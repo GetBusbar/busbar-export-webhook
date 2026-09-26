@@ -1,26 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "busbar-export-webhook-plugin"
-version = "1.0.0"
+version = "1.5.0"
 publish = false            # first-party signed cdylib, shipped as a packed/signed tarball, not to crates.io
 edition = "2021"
 rust-version = "1.97"
-description = "First-party signed kind:export plugin cdylib: the built-in PUSH per-request webhook exporter (Logs stream), packaged as a droppable busbar plugin exporting the neutral six-symbol C ABI. SCAFFOLD pending extraction."
+description = "First-party signed kind:export plugin cdylib: the request-log WEBHOOK sink (`module: request-log-webhook`), packaged as a droppable busbar plugin. Drop the signed tarball into `plugins/` and name it from an `export.<name>.module: request-log-webhook` block."
 license = "Apache-2.0"
 
 [lib]
-crate-type = ["cdylib", "rlib"]   # cdylib for the C ABI delivery; rlib so the unit tests / e2e test can exercise it as a normal crate too
+# cdylib: the DROPPED-IN door (a signed tarball in `plugins/`). rlib: REQUIRED for `cargo test` to
+# emit the cdylib artifact the conformance test packs (a cdylib-only package builds a trivial test
+# harness and never produces the .so/.dylib — the store-postgres-plugin / store-mysql-plugin note).
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# busbar-export-webhook is a SAME-REPO sibling crate (this plugin brings 100% of what it needs). Only
-# busbar-plugin-sdk still reaches into busbar — INTERIM local path dependency into a sibling checkout,
-# since busbar isn't public yet; once it ships publicly this becomes a git (pinned rev/tag) or
-# crates.io dependency instead.
-busbar-plugin-sdk = { path = "../../busbar/crates/plugin-sdk" }
+# THE LOGIC, same repo. Its `export_export_plugin!(open)` registers the image's one door; this crate
+# only makes that door a loadable library.
 busbar-export-webhook = { path = "../export-webhook" }
-serde_json = "1"
 
 [dev-dependencies]
-# INTERIM local path dep into busbar, dev-only. The end-to-end test loads the built cdylib over the
-# real loader ABI seam, so it needs the real loader — never shipped in the plugin artifact itself.
-busbar-plugin-loader = { path = "../../busbar/crates/plugin-loader" }
+# The conformance test loads the built cdylib over the REAL loader (sign, pack, scan, open) and the
+# linked row through the same registry — dev-only, never in the shipped artifact. Same pinned rev as
+# the logic crate's busbar-plugin-sdk, so one busbar source resolves.
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "c6cf2aa03f64972187ef2f6f85feef526561b8c7" }
+busbar-plugin-sdk = { git = "https://github.com/GetBusbar/busbar", rev = "c6cf2aa03f64972187ef2f6f85feef526561b8c7" }
+serde_json = "1"
