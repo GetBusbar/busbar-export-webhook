@@ -1,13 +1,13 @@
 # export-webhook CI — build, test, and the sink's linked + dropped-in conformance, against the busbar
 # rev this repo PINS.
 #
-# This repo builds standalone: its only busbar dependency (busbar-plugin-sdk, and busbar-plugin-loader
+# This repo builds standalone: its only busbar dependency (busbar-contract, and busbar-plugin-loader
 # for the conformance test) is a `git` dependency on https://github.com/GetBusbar/busbar at the rev in
 # field 1 of `.busbar-ref`. No sibling checkout, no path dependency — so what CI proves is exactly
 # what a busbar build that pulls this repo at a pinned rev links.
 #
 # The moving leg (this repo's `dev` against busbar's `predev`) is busbar's side of the contract: its
-# ci.yml `consumers` job builds this repo's `dev` with busbar-plugin-sdk patched to busbar's own tree.
+# ci.yml `consumers` job builds this repo's `dev` with busbar-contract (and busbar-plugin-loader) patched to busbar's own tree.
 name: ci
 
 on:

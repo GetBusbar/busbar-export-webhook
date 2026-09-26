@@ -30,7 +30,7 @@
 
 #![deny(unsafe_code)]
 
-use busbar_plugin_sdk::{
+use busbar_contract::abi::sdk::{
     CheckPhase, DiagLevel, ExportHandler, ExportStream, HostOp, HostResult, HostStep, HttpRequest,
     Observations, PluginDiagnostic,
 };
@@ -286,21 +286,21 @@ pub fn open(cfg: &str) -> Result<Box<dyn ExportHandler>, String> {
     }))
 }
 
-busbar_plugin_sdk::export_export_plugin!(open);
+busbar_contract::abi::sdk::export_export_plugin!(open);
 
 /// THE COMPILED-IN ENTRY POINT — the same op-dispatch and envelope the `busbar_call` symbol runs.
 pub fn dispatch_compiled_in(
     handler: &dyn ExportHandler,
-    req: busbar_plugin_sdk::ExportRequest,
-) -> busbar_plugin_sdk::Envelope<busbar_plugin_sdk::ExportResponse> {
-    busbar_plugin_sdk::dispatch_export_enveloped(handler, req)
+    req: busbar_contract::abi::sdk::ExportRequest,
+) -> busbar_contract::abi::sdk::Envelope<busbar_contract::abi::sdk::ExportResponse> {
+    busbar_contract::abi::sdk::dispatch_export_enveloped(handler, req)
 }
 
 /// THE LINKED DOOR's entry: what the composition root's linked table registers through the one
 /// registration a dropped-in tarball of this crate also takes.
 pub mod linked {
     /// `(name, alias, declares, boundary)`.
-    pub const EXPORT: (&str, &str, &str, &busbar_plugin_sdk::__abi::ColdEntry) = (
+    pub const EXPORT: (&str, &str, &str, &busbar_contract::abi::sdk::ColdEntry) = (
         super::NAME,
         super::ALIAS,
         super::DECLARES,

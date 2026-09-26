@@ -5,7 +5,7 @@
 //! compiled-in sink's (1.5.5); what it asks the host to carry; and what it reports.
 
 use super::*;
-use busbar_plugin_sdk::{HttpResponse, Rotation};
+use busbar_contract::abi::sdk::{HttpResponse, Rotation};
 use serde_json::json;
 
 fn sink(settings: serde_json::Value) -> Box<dyn ExportHandler> {

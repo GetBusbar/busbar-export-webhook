@@ -15,11 +15,11 @@ publish = false
 crate-type = ["rlib"]
 
 [dependencies]
-# The ONE busbar crate a plugin names (DECISIONS #84: a plugin's busbar closure is exactly
-# busbar-plugin-sdk, whose own busbar closure is busbar-contract + busbar-plugin — #40). Pinned by
+# The ONE busbar crate a plugin names (#40: contract only; DECISIONS #84 merged the plugin SDK into it
+# as `busbar_contract::abi::sdk`, so a plugin's busbar closure is exactly busbar-contract). Pinned by
 # git rev to the busbar commit in `.busbar-ref`; a busbar build that links this crate `[patch]`es the
 # busbar git source to its own tree, so ONE copy of the contract links.
-busbar-plugin-sdk = { git = "https://github.com/GetBusbar/busbar", rev = "c6cf2aa03f64972187ef2f6f85feef526561b8c7" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9" }
 # The settings shape (`deny_unknown_fields`, so the operator's typo is the same refusal it was).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

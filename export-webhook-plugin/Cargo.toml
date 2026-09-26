@@ -22,7 +22,7 @@ busbar-export-webhook = { path = "../export-webhook" }
 [dev-dependencies]
 # The conformance test loads the built cdylib over the REAL loader (sign, pack, scan, open) and the
 # linked row through the same registry — dev-only, never in the shipped artifact. Same pinned rev as
-# the logic crate's busbar-plugin-sdk, so one busbar source resolves.
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "c6cf2aa03f64972187ef2f6f85feef526561b8c7" }
-busbar-plugin-sdk = { git = "https://github.com/GetBusbar/busbar", rev = "c6cf2aa03f64972187ef2f6f85feef526561b8c7" }
+# the logic crate's busbar-contract, so one busbar source resolves.
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9" }
 serde_json = "1"

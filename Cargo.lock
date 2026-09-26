@@ -52,7 +52,7 @@ dependencies = [
 [[package]]
 name = "busbar-contract"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=c6cf2aa03f64972187ef2f6f85feef526561b8c7#c6cf2aa03f64972187ef2f6f85feef526561b8c7"
+source = "git+https://github.com/GetBusbar/busbar?rev=8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9#8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9"
 dependencies = [
  "async-trait",
  "futures",
@@ -63,6 +63,8 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "smallvec",
+ "tracing",
+ "tracing-core",
  "zeroize",
 ]
 
@@ -70,7 +72,7 @@ dependencies = [
 name = "busbar-export-webhook"
 version = "1.5.0"
 dependencies = [
- "busbar-plugin-sdk",
+ "busbar-contract",
  "serde",
  "serde_json",
  "url",
@@ -80,16 +82,16 @@ dependencies = [
 name = "busbar-export-webhook-plugin"
 version = "1.5.0"
 dependencies = [
+ "busbar-contract",
  "busbar-export-webhook",
  "busbar-plugin-loader",
- "busbar-plugin-sdk",
  "serde_json",
 ]
 
 [[package]]
 name = "busbar-kernel-ledger"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=c6cf2aa03f64972187ef2f6f85feef526561b8c7#c6cf2aa03f64972187ef2f6f85feef526561b8c7"
+source = "git+https://github.com/GetBusbar/busbar?rev=8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9#8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9"
 dependencies = [
  "busbar-contract",
  "sha2 0.11.0",
@@ -98,32 +100,21 @@ dependencies = [
 [[package]]
 name = "busbar-kernel-wal"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=c6cf2aa03f64972187ef2f6f85feef526561b8c7#c6cf2aa03f64972187ef2f6f85feef526561b8c7"
+source = "git+https://github.com/GetBusbar/busbar?rev=8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9#8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9"
 dependencies = [
  "busbar-contract",
  "sha2 0.11.0",
 ]
 
 [[package]]
-name = "busbar-plugin"
-version = "1.5.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=c6cf2aa03f64972187ef2f6f85feef526561b8c7#c6cf2aa03f64972187ef2f6f85feef526561b8c7"
-dependencies = [
- "busbar-contract",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "busbar-plugin-loader"
 version = "1.5.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=c6cf2aa03f64972187ef2f6f85feef526561b8c7#c6cf2aa03f64972187ef2f6f85feef526561b8c7"
+source = "git+https://github.com/GetBusbar/busbar?rev=8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9#8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9"
 dependencies = [
  "async-trait",
  "busbar-contract",
  "busbar-kernel-ledger",
  "busbar-kernel-wal",
- "busbar-plugin",
  "ed25519-dalek",
  "flate2",
  "futures",
@@ -137,18 +128,6 @@ dependencies = [
  "tar",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "busbar-plugin-sdk"
-version = "1.5.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=c6cf2aa03f64972187ef2f6f85feef526561b8c7#c6cf2aa03f64972187ef2f6f85feef526561b8c7"
-dependencies = [
- "busbar-contract",
- "busbar-plugin",
- "serde_json",
- "tracing",
- "tracing-core",
 ]
 
 [[package]]
