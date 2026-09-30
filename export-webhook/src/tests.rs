@@ -289,3 +289,34 @@ fn a_catalogue_action_cites_only_declared_metrics() {
         }
     }
 }
+
+/// A validation error names the target, never its userinfo (EHOOK-3): the deadline refusals echo
+/// the URL through the one mask the diagnostics use.
+#[test]
+fn validation_errors_mask_the_targets_userinfo() {
+    for (url, shown) in [
+        ("https://u:s3cret@h.example/x", "https://***@h.example/x"),
+        ("https://:s3cret@h.example/x", "https://***@h.example/x"),
+        ("https://s3cret@h.example/x", "https://***@h.example/x"),
+        ("https://u:s3cret@/x", "https://***@/x"),
+    ] {
+        let instances = [(
+            "w".to_string(),
+            json!({"url": url, "delivery_timeout_secs": 0}),
+        )];
+        let lines = check(CheckPhase::Instances, &instances);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains(&format!("targeting '{shown}' (#0)")), "{lines:?}");
+        assert!(!lines[0].contains("s3cret"), "{lines:?}");
+        let instances = [(
+            "w".to_string(),
+            json!({"url": url, "delivery_timeout_secs": u64::MAX}),
+        )];
+        let lines = check(CheckPhase::Instances, &instances);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains(&format!("targeting '{shown}' (#0)")), "{lines:?}");
+        assert!(!lines[0].contains("s3cret"), "{lines:?}");
+    }
+    assert_eq!(mask_userinfo("https://u:p@/x"), "https://***@/x");
+    assert_eq!(mask_userinfo("https:///x"), "https:///x");
+}

@@ -242,7 +242,8 @@ fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
                  settings.delivery_timeout_secs: {}, above the {MAX_DURATION_SECS}-second (30-year) \
                  ceiling every duration is bounded by — a delivery deadline that far out overflows \
                  the clock",
-                w.url, w.delivery_timeout_secs
+                mask_userinfo(&w.url),
+                w.delivery_timeout_secs
             ));
         }
         if w.delivery_timeout_secs < 1 {
@@ -250,7 +251,7 @@ fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
                 "the `module: request-log-webhook` export instance targeting '{}' (#{i}) sets \
                  settings.delivery_timeout_secs: 0, which would abort every delivery — it must be \
                  >= 1",
-                w.url
+                mask_userinfo(&w.url)
             ));
         }
     }
@@ -260,7 +261,7 @@ fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
 /// a URL with none, or a string that is not a URL, unchanged.
 pub fn mask_userinfo(url: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
-        return url.to_string();
+        return mask_unparsed(url);
     };
     if parsed.username().is_empty() && parsed.password().is_none() {
         return url.to_string();
@@ -273,6 +274,20 @@ pub fn mask_userinfo(url: &str) -> String {
         };
     }
     parsed.into()
+}
+
+/// The mask for a string `url::Url` refuses (an empty host, say) yet that still carries
+/// `scheme://userinfo@…`: everything between `://` and the last `@` of the authority becomes `***`.
+/// A string with no such authority is returned unchanged.
+fn mask_unparsed(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..end].rfind('@') {
+        Some(at) => format!("{scheme}://***{}", &rest[at..]),
+        None => url.to_string(),
+    }
 }
 
 /// Open an instance with its settings (JSON text). Never fails: settings that do not parse are the
