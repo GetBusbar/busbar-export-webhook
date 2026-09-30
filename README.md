@@ -16,7 +16,7 @@ First-party signed kind:export plugin cdylib: the request-log WEBHOOK sink (modu
 
 ## Config
 
-Configured under the `webhook` module name.
+Configured under the `request-log-webhook` module name (`export.<name>.module: request-log-webhook`).
 
 ## Build
 
