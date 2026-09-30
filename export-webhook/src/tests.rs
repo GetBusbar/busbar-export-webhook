@@ -245,6 +245,51 @@ fn userinfo_is_masked_and_nothing_else_moves() {
     );
     assert_eq!(mask_userinfo("https://h.example/x"), "https://h.example/x");
     assert_eq!(mask_userinfo("not a url"), "not a url");
+    // Password-only and username-only userinfo are masked as well.
+    assert_eq!(
+        mask_userinfo("https://:s3cret@h.example/x"),
+        "https://***@h.example/x"
+    );
+    assert_eq!(
+        mask_userinfo("https://tok@h.example:8443/x"),
+        "https://***@h.example:8443/x"
+    );
+}
+
+/// The 2xx boundary is 200..=299 (1.5.5's `is_success()`): 199 and 300 are each one BUSBAR-7071.
+#[test]
+fn the_success_boundary_is_200_to_299() {
+    for (status, raises) in [(199u16, true), (200, false), (299, false), (300, true)] {
+        let s = sink(json!({"url": "https://a.example/"}));
+        let answer = HostResult::Http(HttpResponse {
+            status,
+            body: String::new(),
+        });
+        assert_eq!(s.resume(1, vec![answer]), HostStep::Done);
+        let got = raised(s.as_ref());
+        if raises {
+            assert_eq!(got.len(), 1, "{status}: {got:?}");
+            assert_eq!(got[0]["code"], "BUSBAR-7071");
+            assert_eq!(got[0]["fields"]["status"], status.to_string());
+        } else {
+            assert!(got.is_empty(), "{status}: {got:?}");
+        }
+    }
+}
+
+/// An instance configured with 0 in-flight deliveries (the validation bounds the MAX over
+/// instances, so it can start beside a larger sibling) is clamped to 1, never a 0-permit gate.
+#[test]
+fn a_zero_inflight_instance_starts_with_one_permit() {
+    let s = sink(json!({"url": "https://a.example/", "max_inflight_deliveries": 0}));
+    assert_eq!(
+        s.resume(START, vec![HostResult::Done { rotation: None }]),
+        HostStep::Started {
+            live: true,
+            inflight: 1,
+            gate: "webhook".into()
+        }
+    );
 }
 
 /// The declaration both doors state: the shed counter and the three catalogue codes it raises.
