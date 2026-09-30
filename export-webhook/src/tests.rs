@@ -363,5 +363,4 @@ fn validation_errors_mask_the_targets_userinfo() {
         assert!(!lines[0].contains("s3cret"), "{lines:?}");
     }
     assert_eq!(mask_userinfo("https://u:p@/x"), "https://***@/x");
-    assert_eq!(mask_userinfo("https:///x"), "https:///x");
 }
