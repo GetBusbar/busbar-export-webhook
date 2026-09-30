@@ -264,3 +264,28 @@ fn the_declaration_states_the_shed_counter_and_the_codes() {
         .collect();
     assert_eq!(codes, vec![7070, 7071, 7072]);
 }
+
+/// Every metric a catalogue action cites (a backticked `*_total` token) is a series the declaration
+/// states, not a Rust constant's name (EHOOK-14).
+#[test]
+fn a_catalogue_action_cites_only_declared_metrics() {
+    let d: serde_json::Value = serde_json::from_str(DECLARES).unwrap();
+    let declared: Vec<&str> = d["metrics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    for c in d["diagnostics"].as_array().unwrap() {
+        let action = c["action"].as_str().unwrap();
+        for cited in action.split('`').skip(1).step_by(2) {
+            if cited.to_ascii_lowercase().ends_with("_total") {
+                assert!(
+                    declared.contains(&cited),
+                    "BUSBAR-{} cites `{cited}`, which is not a declared metric {declared:?}",
+                    c["code"]
+                );
+            }
+        }
+    }
+}
