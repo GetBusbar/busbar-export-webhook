@@ -9,3 +9,27 @@ First-party signed kind:export plugin cdylib: the request-log WEBHOOK sink (modu
 
 [![ci](https://github.com/GetBusbar/busbar-export-webhook/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/GetBusbar/busbar-export-webhook/actions/workflows/ci.yml)
 <!-- fleet:header:end -->
+
+## What it is for
+
+`busbar-export-webhook` is a `kind: export` busbar plugin.
+
+## Config
+
+Configured under the `webhook` module name.
+
+## Build
+
+```bash
+cargo build --release -p busbar-export-webhook-plugin
+```
+
+## Tests
+
+```bash
+cargo test --workspace --locked
+```
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
