@@ -351,7 +351,10 @@ fn validation_errors_mask_the_targets_userinfo() {
         )];
         let lines = check(CheckPhase::Instances, &instances);
         assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains(&format!("targeting '{shown}' (#0)")), "{lines:?}");
+        assert!(
+            lines[0].contains(&format!("targeting '{shown}' (#0)")),
+            "{lines:?}"
+        );
         assert!(!lines[0].contains("s3cret"), "{lines:?}");
         let instances = [(
             "w".to_string(),
@@ -359,7 +362,10 @@ fn validation_errors_mask_the_targets_userinfo() {
         )];
         let lines = check(CheckPhase::Instances, &instances);
         assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains(&format!("targeting '{shown}' (#0)")), "{lines:?}");
+        assert!(
+            lines[0].contains(&format!("targeting '{shown}' (#0)")),
+            "{lines:?}"
+        );
         assert!(!lines[0].contains("s3cret"), "{lines:?}");
     }
     assert_eq!(mask_userinfo("https://u:p@/x"), "https://***@/x");
