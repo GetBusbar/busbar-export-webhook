@@ -19,12 +19,12 @@ crate-type = ["rlib"]
 # as `busbar_contract::abi::sdk`, so a plugin's busbar closure is exactly busbar-contract). Pinned by
 # git rev to the busbar commit in `.busbar-ref`; a busbar build that links this crate `[patch]`es the
 # busbar git source to its own tree, so ONE copy of the contract links.
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "934a016e20fc1a67c209b671d137c8cc28092767" }
+busbar-contract = { workspace = true }
 # The settings shape (`deny_unknown_fields`, so the operator's typo is the same refusal it was).
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 # The userinfo mask on the target URL the sink's diagnostics name (its own lines, never the host's).
-url = "2"
+url = { workspace = true }
 # The sink's operator log lines, with the catalogue's `diag` banner field; the door's call capture
 # carries them to the instance's plugin log (THE DESIGN §11.2).
-tracing = "0.1.44"
+tracing = { workspace = true }
