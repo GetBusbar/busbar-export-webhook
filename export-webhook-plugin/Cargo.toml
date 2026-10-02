@@ -15,14 +15,12 @@ license = "Apache-2.0"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# THE LOGIC, same repo. Its `export_export_plugin!(open)` registers the image's one door; this crate
-# only makes that door a loadable library.
+# THE LOGIC, same repo: its `door` is the door this image exports.
 busbar-export-webhook = { path = "../export-webhook" }
+# `export_door!`, the macro that emits the image's one symbol. Same pinned rev as the logic crate's.
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "934a016e20fc1a67c209b671d137c8cc28092767" }
 
 [dev-dependencies]
-# The conformance test loads the built cdylib over the REAL loader (sign, pack, scan, open) and the
-# linked row through the same registry — dev-only, never in the shipped artifact. Same pinned rev as
-# the logic crate's busbar-contract, so one busbar source resolves.
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "23d8a6b46deb158839df8bc02115b09023633040" }
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "23d8a6b46deb158839df8bc02115b09023633040" }
-serde_json = "1"
+# The conformance test loads the built cdylib and the linked door over the REAL loader — dev-only,
+# never in the shipped artifact. Same pinned rev, so one busbar source resolves.
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "934a016e20fc1a67c209b671d137c8cc28092767" }

@@ -1,47 +1,58 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! **`busbar-export-webhook`** — the request-log WEBHOOK sink as a `kind: export` plugin (item 141,
-//! owner ruling 2026-09-18 in #3): `export.<name>.module: request-log-webhook`.
+//! **`busbar-export-webhook`** — the request-log WEBHOOK sink as a `kind: export` plugin on the
+//! export kind's memory ABI (`busbar_contract::abi::export`, THE DESIGN §11):
+//! `export.<name>.module: request-log-webhook`. ONE door ([`door`], `plugin_door!`), linked into
+//! the binary as a compiled-in row or exported by the sibling `busbar-export-webhook-plugin` cdylib
+//! as its one symbol; its manifest still carries [`DECLARES`] (the shed counter and the three
+//! catalogue codes it raises).
 //!
-//! Each request-log line the host hands it is POSTed, as compact JSON with
+//! Each request-log line of a delivered batch is POSTed, as the compact JSON line it is, with
 //! `content-type: application/json` and the instance's optional `auth_header`, to the instance's
-//! `https://` target — by the HOST: the sink answers each delivery with an [`HostOp::Http`] and the
-//! host's egress carrier makes the request under its own URL policy (https only; loopback,
-//! link-local, private, CGNAT and cloud-metadata targets refused), TLS and the instance's
-//! `delivery_timeout_secs` deadline. The sink never dials. A delivery is fire-and-forget and never
-//! retried: a non-2xx answer or a transport failure drops that one line and raises BUSBAR-7071 /
+//! `https://` target — through the HOST's connector: the Statement declares ONE outbound need whose
+//! target is the `url` setting, under the open-web egress class (public destinations over a secure
+//! connection only), and the request rides the SDK's framed `exchange` under the instance's
+//! `delivery_timeout_secs`. The sink never dials. A delivery is fire-and-forget and never retried:
+//! a non-2xx answer or a transport failure drops that one line and raises BUSBAR-7071 /
 //! BUSBAR-7072 at debug.
 //!
-//! **Start.** When the host starts its sinks it asks the policy about the target
-//! ([`HostOp::Admit`]); a refused target raises BUSBAR-7070 (`…; disabling this webhook exporter`)
-//! and the instance takes no delivery this run — its siblings keep delivering. A live instance
-//! states its admission: `max_inflight_deliveries` in flight at once under the `webhook` gate; past
-//! it the host sheds the line and counts `busbar_webhook_logs_dropped_total` (the manifest's shed
-//! counter).
+//! **Admission.** The first delivery asks the host for its verdict on the target (the need's
+//! admission at bind); a refused target raises BUSBAR-7070 (`…; disabling this webhook exporter`)
+//! once and the instance takes no delivery until a reload — its siblings keep delivering.
 //!
 //! **Settings** are checked in two phases, as they always were: their SHAPE while the configuration
-//! is resolved ([`ExportHandler::validate`]: `export.<name>.settings: …`), and the delivery deadline
-//! and in-flight bound while it is validated ([`ExportHandler::check`], after the limits).
+//! is resolved (`validate`), and the delivery deadline and in-flight bound while it is validated
+//! (`check`, after the limits). Every line the sink raises is logged with the catalogue's `diag`
+//! banner field; the door's call capture carries it to the instance's plugin log (THE DESIGN §11.2).
 //!
-//! The one registration both doors take states [`NAME`], [`ALIAS`] and [`DECLARES`] (the manifest
-//! `declares` section its signed tarball carries: the shed counter and the three catalogue codes it
-//! raises) over its boundary — [`linked::EXPORT`] for the linked door.
+//! `deny`, not `forbid`: the export kind's SDK lends no safe reader of `check`'s instance list, so
+//! [`instances`] reads it — the one reviewed `unsafe` here.
 
 #![deny(unsafe_code)]
 
-use busbar_contract::abi::sdk::{
-    CheckPhase, DiagLevel, ExportHandler, ExportStream, HostOp, HostResult, HostStep, HttpRequest,
-    Observations, PluginDiagnostic,
+use std::mem::size_of;
+use std::sync::{Mutex, PoisonError, RwLock};
+use std::task::Poll;
+
+use busbar_contract::abi::export::{
+    self, CheckIn, CheckOut, CheckPhase, DeliverIn, ExportStream, ScrapeIn, ScrapeOut, ServeIn,
+    ServeOut, StatusOut, Tail, CHECK_PHASE_LIMITS,
 };
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
+use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome, BLOB_JSON};
+use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement, REWRITE_ALIAS};
+use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
+use busbar_contract::abi::sdk::door::{abi_str, statement};
+use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
+use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
+use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 
 /// The plugin's canonical name.
 pub const NAME: &str = "busbar-export-webhook";
 /// The module name an `export:` instance names it by.
 pub const ALIAS: &str = "request-log-webhook";
-/// The manifest `declares` section both doors state (`--declares-file` for the signed tarball).
+/// The manifest `declares` section (`--declares-file` for the signed tarball).
 pub const DECLARES: &str = include_str!("../declares.json");
 
 /// The in-flight ceiling: the host's semaphore holds at most `usize::MAX >> 3` permits, and a
@@ -49,14 +60,15 @@ pub const DECLARES: &str = include_str!("../declares.json");
 const MAX_PERMITS: usize = usize::MAX >> 3;
 /// The ceiling every duration in a busbar configuration is bounded by (30 years, in seconds).
 const MAX_DURATION_SECS: u64 = 30 * 365 * 86_400;
-/// The gate the host counts this sink's sheds under.
-const GATE: &str = "webhook";
-/// The token of the start-time admission ask ([`HostOp::Admit`]); deliveries count from 1.
-const START: u64 = 0;
 
 const DISABLED: &str = "BUSBAR-7070";
 const NON_2XX: &str = "BUSBAR-7071";
 const TRANSPORT_ERROR: &str = "BUSBAR-7072";
+
+/// The settings key the target comes from.
+const URL_KEY: &str = "url";
+/// The one need's index in the Statement.
+const NEED: u32 = 0;
 
 mod config;
 use config::DEFAULT_MAX_INFLIGHT;
@@ -65,134 +77,178 @@ pub use config::{ExportAuthHeader, WebhookSettings};
 /// This sink's settings (the configuration's `WebhookSettings`).
 pub type Settings = WebhookSettings;
 
+const NONE: AbiStr = AbiStr {
+    ptr: std::ptr::null(),
+    len: 0,
+};
+
+/// The one need: outbound over a secure connection to the `url` setting's target, public
+/// destinations only (1.5.5's https-only policy refusing loopback, link-local, private, CGNAT and
+/// cloud-metadata targets).
+const NEEDS: &[Need] = &[Need {
+    direction: DIRECTION_OUTBOUND,
+    egress_class: EGRESS_OPEN_WEB,
+    transport: abi_str("https"),
+    auth: NONE,
+    target_from: abi_str(URL_KEY),
+    trust_from: NONE,
+    details: Blob::ABSENT,
+    keep_response_headers: std::ptr::null(),
+    keep_response_headers_len: 0,
+    timeout_ms: 0,
+}];
+
+/// The streams this sink carries: the request log.
+const STREAMS: &[u8] = &[ExportStream::Logs as u8];
+
+/// The export kind's Statement tail: `logs`, and no route (a push-only sink).
+const TAIL: Tail = Tail {
+    head: KindTailHead {
+        size: size_of::<Tail>() as u32,
+        _reserved: 0,
+    },
+    streams: STREAMS.as_ptr(),
+    streams_len: STREAMS.len(),
+    routes: std::ptr::null(),
+    routes_len: 0,
+};
+
+/// The module name an operator writes, as the alias the registry holds beside [`NAME`].
+const REWRITES: &[Rewrite] = &[Rewrite {
+    class: REWRITE_ALIAS,
+    _reserved: 0,
+    from: abi_str(ALIAS),
+    to: NONE,
+}];
+
+/// This plugin's Statement: its name, version, the default in-flight bound, alias, stream and need.
+pub const STATEMENT: Statement = Statement {
+    kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
+    rewrites: REWRITES.as_ptr(),
+    rewrites_len: REWRITES.len(),
+    needs: NEEDS.as_ptr(),
+    needs_len: NEEDS.len(),
+    ..statement(NAME, env!("CARGO_PKG_VERSION"), DEFAULT_MAX_INFLIGHT as u32)
+};
+
+/// The settings, parsed as the configuration grammar parses them (empty is `{}`).
+fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
+    let bytes = if settings.is_empty() { b"{}" } else { settings };
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .and_then(serde_json::from_value)
+        .map_err(|e| Refusal::failed(format!("settings: {e}")))
+}
+
 /// One opened instance.
-struct Webhook {
+#[derive(Debug)]
+pub struct Webhook {
     /// Its settings, when they parse (the host refused the configuration otherwise; a sink opened
     /// only to validate or check settings still opens).
-    settings: Option<Settings>,
-    /// The next delivery's token.
-    next: AtomicU64,
-    /// Diagnostics raised since the last drain.
-    raised: Mutex<Vec<PluginDiagnostic>>,
+    settings: RwLock<Option<Settings>>,
+    /// The host's verdict on the target: `None` until the first delivery asks.
+    live: Mutex<Option<bool>>,
+}
+
+impl Life for Webhook {
+    const CANCEL: u32 = export::cancel::ABORTED;
+
+    /// The settings' shape, in the configuration grammar's own serde words.
+    fn validate(settings: &[u8]) -> Result<(), Refusal> {
+        parse(settings).map(|_| ())
+    }
+
+    /// Never refuses: settings that do not parse are the configuration's refusal, reported by
+    /// `validate` — a sink opened only to answer that must open.
+    fn open(settings: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
+        Ok(Self {
+            settings: RwLock::new(parse(settings).ok()),
+            live: Mutex::new(None),
+        })
+    }
+
+    /// A reload's settings replace the instance's, and its target is asked about afresh.
+    fn refresh(&self, settings: &[u8], _: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
+        *self
+            .settings
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = parse(settings).ok();
+        *self.live.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        Ok(Refreshed::default())
+    }
 }
 
 impl Webhook {
-    fn raise(&self, d: PluginDiagnostic) {
-        self.raised
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(d);
+    /// The instance's settings, when they parsed.
+    pub fn settings(&self) -> Option<Settings> {
+        self.settings
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
-    /// The target as its diagnostics name it: userinfo masked, quoted as a string field is.
-    fn shown_url(&self) -> String {
-        let url = self.settings.as_ref().map_or("", |s| s.url.as_str());
-        format!("{:?}", mask_userinfo(url))
-    }
-}
-
-impl ExportHandler for Webhook {
-    fn streams(&self) -> Vec<ExportStream> {
-        vec![ExportStream::Logs]
-    }
-
-    fn validate(&self, instance: &str, settings: &serde_json::Value) -> Vec<String> {
-        match serde_json::from_value::<Settings>(settings.clone()) {
-            Ok(_) => Vec::new(),
-            Err(e) => vec![format!("export.{instance}.settings: {e}")],
+    /// Whether the host admitted the target, asked once: a refusal (or no host to ask) raises
+    /// BUSBAR-7070 in the host's words and disables the instance.
+    pub fn admitted(&self, host: Option<&Host>) -> bool {
+        let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(v) = *live {
+            return v;
         }
-    }
-
-    fn check(&self, phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
-        check(phase, instances)
-    }
-
-    fn start(&self) -> HostStep {
-        match &self.settings {
-            Some(s) => HostStep::Host {
-                token: START,
-                ops: vec![HostOp::Admit { url: s.url.clone() }],
-            },
-            None => stopped(),
-        }
-    }
-
-    fn deliver_via_host(&self, _stream: ExportStream, payload: &serde_json::Value) -> HostStep {
-        let Some(s) = &self.settings else {
-            return HostStep::Done;
+        let verdict = host.map_or(Err(ConnFailure::Unarmed), |h| {
+            h.connector(busbar_contract::abi::mechanism::ticket::Ticket::NONE)
+                .admit(NEED)
+        });
+        let ok = match verdict {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!(diag = %DISABLED, "{e}; disabling this webhook exporter");
+                false
+            }
         };
-        let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
-        if let Some(h) = &s.auth_header {
-            headers.push((h.name.clone(), h.value.clone()));
-        }
-        HostStep::Host {
-            token: self.next.fetch_add(1, Ordering::Relaxed),
-            ops: vec![HostOp::Http(HttpRequest {
-                method: "POST".to_string(),
-                url: s.url.clone(),
-                headers,
-                body: payload.to_string(),
-                timeout_ms: s.delivery_timeout_secs.saturating_mul(1000),
-            })],
-        }
-    }
-
-    fn resume(&self, token: u64, results: Vec<HostResult>) -> HostStep {
-        let outcome = results.into_iter().next();
-        if token == START {
-            return match (outcome, &self.settings) {
-                (Some(HostResult::Done { .. }), Some(s)) => HostStep::Started {
-                    live: true,
-                    inflight: s.max_inflight_deliveries.clamp(1, MAX_PERMITS) as u64,
-                    gate: GATE.to_string(),
-                },
-                (Some(HostResult::Failed { error, .. }), _) => {
-                    let message = format!("{error}; disabling this webhook exporter");
-                    self.raise(PluginDiagnostic::new(DISABLED, DiagLevel::Error, message));
-                    stopped()
-                }
-                _ => stopped(),
-            };
-        }
-        match outcome {
-            Some(HostResult::Http(answer)) if (200..300).contains(&answer.status) => {}
-            Some(HostResult::Http(answer)) => self.raise(
-                PluginDiagnostic::new(
-                    NON_2XX,
-                    DiagLevel::Debug,
-                    "request-log webhook delivery returned a non-2xx status; this log was dropped",
-                )
-                .field("webhook_url", self.shown_url())
-                .field("status", answer.status.to_string()),
-            ),
-            Some(HostResult::Failed { error, .. }) => self.raise(
-                PluginDiagnostic::new(
-                    TRANSPORT_ERROR,
-                    DiagLevel::Debug,
-                    "request-log webhook delivery failed (transport error); this log was dropped",
-                )
-                .field("webhook_url", self.shown_url())
-                .field("error_kind", error),
-            ),
-            _ => {}
-        }
-        HostStep::Done
-    }
-
-    fn drain_observations(&self) -> Observations {
-        let raised = std::mem::take(&mut *self.raised.lock().unwrap_or_else(|e| e.into_inner()));
-        raised
-            .into_iter()
-            .fold(Observations::none(), Observations::diagnostic)
+        *live = Some(ok);
+        ok
     }
 }
 
-/// Started, taking nothing this run.
-fn stopped() -> HostStep {
-    HostStep::Started {
-        live: false,
-        inflight: 0,
-        gate: GATE.to_string(),
+/// The request one line is POSTed as: compact JSON with `content-type: application/json`, then the
+/// auth header, to the target's path and query, under the instance's deadline.
+pub fn request(s: &Settings, line: &[u8]) -> Request {
+    let mut fields = vec![(b"content-type".to_vec(), b"application/json".to_vec())];
+    if let Some(h) = &s.auth_header {
+        fields.push((h.name.as_bytes().to_vec(), h.value.as_bytes().to_vec()));
+    }
+    let target = match url::Url::parse(&s.url) {
+        Ok(u) => match u.query() {
+            Some(q) => format!("{}?{q}", u.path()),
+            None => u.path().to_string(),
+        },
+        Err(_) => "/".to_string(),
+    };
+    Request {
+        method: b"POST".to_vec(),
+        target: target.into_bytes(),
+        fields,
+        body: line.to_vec(),
+        timeout_ms: s.delivery_timeout_secs.saturating_mul(1000),
+    }
+}
+
+/// What became of one line: nothing to say for a 2xx; BUSBAR-7071 for any other status,
+/// BUSBAR-7072 for a transport failure — each at debug, the target's userinfo masked.
+pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
+    match answered {
+        Ok(r) if (200..300).contains(&r.status) => {}
+        Ok(r) => tracing::debug!(
+            diag = %NON_2XX,
+            webhook_url = ?mask_userinfo(url),
+            status = %r.status,
+            "request-log webhook delivery returned a non-2xx status; this log was dropped"
+        ),
+        Err(e) => tracing::debug!(
+            diag = %TRANSPORT_ERROR,
+            webhook_url = ?mask_userinfo(url),
+            error_kind = %e,
+            "request-log webhook delivery failed (transport error); this log was dropped"
+        ),
     }
 }
 
@@ -290,38 +346,206 @@ fn mask_unparsed(url: &str) -> String {
     }
 }
 
-/// Open an instance with its settings (JSON text). Never fails: settings that do not parse are the
-/// configuration's refusal, reported by [`ExportHandler::validate`] — a sink opened only to answer
-/// that must open.
-pub fn open(cfg: &str) -> Result<Box<dyn ExportHandler>, String> {
-    Ok(Box::new(Webhook {
-        settings: serde_json::from_str(cfg).ok(),
-        next: AtomicU64::new(START + 1),
-        raised: Mutex::new(Vec::new()),
-    }))
+/// `check`'s instances, `(name, settings)` in configuration order (settings that are not JSON read
+/// as `null`, which no check parses).
+#[allow(unsafe_code)]
+fn instances(input: Lent<'_, CheckIn>) -> Vec<(String, serde_json::Value)> {
+    /// `len` bytes at `p`, or none.
+    ///
+    /// # Safety
+    /// A non-NULL `p` points at `len` readable bytes, valid for the call.
+    unsafe fn lent<'a>(p: *const u8, len: usize) -> &'a [u8] {
+        if p.is_null() || len == 0 {
+            return &[];
+        }
+        // SAFETY: the caller's contract.
+        unsafe { std::slice::from_raw_parts(p, len) }
+    }
+    let i = input.get();
+    if i.instances.is_null() || i.instances_len == 0 {
+        return Vec::new();
+    }
+    // SAFETY: the host lends `instances_len` `CheckInstance`s at `instances`, and every string and
+    // blob they name, for the call (`abi::export::CheckIn`); `input` is lent for the call.
+    let list = unsafe { std::slice::from_raw_parts(i.instances, i.instances_len) };
+    list.iter()
+        .map(|c| {
+            // SAFETY: as above.
+            let (name, settings) = unsafe {
+                (
+                    lent(c.name.ptr, c.name.len),
+                    lent(c.settings.ptr, c.settings.len),
+                )
+            };
+            (
+                String::from_utf8_lossy(name).into_owned(),
+                serde_json::from_slice(settings).unwrap_or(serde_json::Value::Null),
+            )
+        })
+        .collect()
 }
 
-busbar_contract::abi::sdk::export_export_plugin!(open);
+/// The instance state every slot reads.
+type State = Held<Webhook>;
 
-/// THE COMPILED-IN ENTRY POINT — the same op-dispatch and envelope the `busbar_call` symbol runs.
-pub fn dispatch_compiled_in(
-    handler: &dyn ExportHandler,
-    req: busbar_contract::abi::sdk::ExportRequest,
-) -> busbar_contract::abi::sdk::Envelope<busbar_contract::abi::sdk::ExportResponse> {
-    busbar_contract::abi::sdk::dispatch_export_enveloped(handler, req)
+/// What a delivery parks across PENDING: the line it is on, the handles issued before that line's
+/// exchange, and the exchange.
+struct Posting {
+    line: usize,
+    issued: u32,
+    exchange: Option<Exchange>,
 }
 
-/// THE LINKED DOOR's entry: what the composition root's linked table registers through the one
-/// registration a dropped-in tarball of this crate also takes.
-pub mod linked {
-    /// `(name, alias, declares, boundary)`.
-    pub const EXPORT: (&str, &str, &str, &busbar_contract::abi::sdk::ColdEntry) = (
-        super::NAME,
-        super::ALIAS,
-        super::DECLARES,
-        &super::BUSBAR_COLD_ENTRY,
-    );
+/// `deliver`: each line of the batch POSTed in order, one exchange after another; fire-and-forget,
+/// so READY whatever became of the lines, PENDING while an exchange runs.
+pub struct Deliver;
+
+impl SafeSlot for Deliver {
+    type In = DeliverIn;
+    type Out = OutHead;
+    type State = State;
+    fn call(
+        instance: Instance<'_, State>,
+        input: Lent<'_, DeliverIn>,
+        _: Out<'_, OutHead>,
+    ) -> Outcome {
+        let Some(h) = instance.get() else {
+            return Outcome::Refused;
+        };
+        let hook = h.life();
+        let Some(s) = hook.settings() else {
+            return Outcome::Ready;
+        };
+        if !hook.admitted(h.host()) {
+            return Outcome::Ready;
+        }
+        let lines: Vec<&[u8]> = input
+            .field(|i| &i.batch)
+            .bytes()
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .collect();
+        let mut at = instance.resume::<Posting>().map_or(
+            Posting {
+                line: 0,
+                issued: 0,
+                exchange: None,
+            },
+            |p| *p,
+        );
+        while let Some(line) = lines.get(at.line) {
+            let answered = match h.host() {
+                None => Err(ConnFailure::Unarmed),
+                Some(host) => {
+                    let mut c = host.connector_from(instance.ticket(), at.issued);
+                    let started = match at.exchange.take() {
+                        Some(ex) => Ok(ex),
+                        None => Exchange::request(request(&s, line)),
+                    };
+                    match started {
+                        Err(e) => Err(e),
+                        Ok(mut ex) => match exchange(&mut c, &mut ex, NEED, None) {
+                            Poll::Pending => {
+                                at.exchange = Some(ex);
+                                instance.park(at);
+                                return Outcome::Pending;
+                            }
+                            Poll::Ready(r) => {
+                                at.issued = c.issued();
+                                r
+                            }
+                        },
+                    }
+                }
+            };
+            report(&s.url, answered);
+            at.line += 1;
+        }
+        Outcome::Ready
+    }
 }
+
+/// `scrape`: a push sink renders no exposition.
+pub struct Scrape;
+
+impl SafeSlot for Scrape {
+    type In = ScrapeIn;
+    type Out = ScrapeOut;
+    type State = State;
+    fn call(_: Instance<'_, State>, _: Lent<'_, ScrapeIn>, _: Out<'_, ScrapeOut>) -> Outcome {
+        Outcome::Ready
+    }
+}
+
+/// `status`: nothing to report.
+pub struct Status;
+
+impl SafeSlot for Status {
+    type In = InHead;
+    type Out = StatusOut;
+    type State = State;
+    fn call(_: Instance<'_, State>, _: Lent<'_, InHead>, _: Out<'_, StatusOut>) -> Outcome {
+        Outcome::Ready
+    }
+}
+
+/// `check`: [`check`] at the phase asked, its lines as a JSON array under a lease.
+pub struct Check;
+
+impl SafeSlot for Check {
+    type In = CheckIn;
+    type Out = CheckOut;
+    type State = State;
+    fn call(
+        instance: Instance<'_, State>,
+        input: Lent<'_, CheckIn>,
+        mut out: Out<'_, CheckOut>,
+    ) -> Outcome {
+        let Some(h) = instance.get() else {
+            return Outcome::Refused;
+        };
+        let phase = match input.phase {
+            CHECK_PHASE_LIMITS => CheckPhase::Limits,
+            _ => CheckPhase::Instances,
+        };
+        let lines = check(phase, &instances(input));
+        if !lines.is_empty() {
+            let json = serde_json::to_vec(&lines).unwrap_or_default();
+            out.lease(|o| &o.findings, h.leases(), json, BLOB_JSON);
+        }
+        Outcome::Ready
+    }
+}
+
+/// `serve`: no route, so any request is `404`.
+pub struct Serve;
+
+impl SafeSlot for Serve {
+    type In = ServeIn;
+    type Out = ServeOut;
+    type State = State;
+    fn call(_: Instance<'_, State>, _: Lent<'_, ServeIn>, mut out: Out<'_, ServeOut>) -> Outcome {
+        out.set(|o| &o.status_code, 404_u16);
+        Outcome::Ready
+    }
+}
+
+mod table {
+    use super::{Check, Deliver, Safe, Scrape, Serve, Status, Webhook};
+
+    busbar_contract::plugin_door! {
+        ops: busbar_contract::abi::export::Ops,
+        statement: super::STATEMENT,
+        lifecycle: life(Webhook),
+        kind_ops: {
+            deliver: Safe<Deliver>, scrape: Safe<Scrape>, status: Safe<Status>,
+            check: Safe<Check>, serve: Safe<Serve>,
+        },
+    }
+}
+
+/// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
+pub use table::door;
 
 #[cfg(test)]
 #[path = "tests.rs"]

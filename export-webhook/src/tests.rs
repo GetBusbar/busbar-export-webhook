@@ -5,50 +5,30 @@
 //! compiled-in sink's (1.5.5); what it asks the host to carry; and what it reports.
 
 use super::*;
-use busbar_contract::abi::sdk::{HttpResponse, Rotation};
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 
-fn sink(settings: serde_json::Value) -> Box<dyn ExportHandler> {
-    open(&settings.to_string()).expect("opens")
+fn refused(settings: serde_json::Value) -> String {
+    let r = Webhook::validate(settings.to_string().as_bytes()).expect_err("refused");
+    assert_eq!(r.outcome(), Outcome::Failed);
+    r.text().expect("a refusal says why").to_string()
 }
 
-fn raised(s: &dyn ExportHandler) -> Vec<serde_json::Value> {
-    s.drain_observations()
-        .diagnostics
-        .iter()
-        .map(|d| serde_json::to_value(d).unwrap())
-        .collect()
-}
-
-/// The shape refusals are serde's, under the `export.<name>.settings:` prefix — the same derive,
-/// field order and `deny_unknown_fields` the compiled-in `WebhookSettings` had.
+/// The shape refusals are serde's, under the `settings:` prefix — the same derive, field order and
+/// `deny_unknown_fields` the compiled-in `WebhookSettings` had.
 #[test]
 fn a_settings_shape_refusal_is_the_compiled_in_sinks_line() {
-    let s = sink(json!({}));
     assert_eq!(
-        s.validate("req-log", &json!({"url": "https://a.example/", "bogus": 1})),
-        vec![
-            "export.req-log.settings: unknown field `bogus`, expected one of `url`, \
-             `auth_header`, `max_inflight_deliveries`, `delivery_timeout_secs`"
-        ]
+        refused(json!({"url": "https://a.example/", "bogus": 1})),
+        "settings: unknown field `bogus`, expected one of `url`, `auth_header`, \
+         `max_inflight_deliveries`, `delivery_timeout_secs`"
     );
+    assert_eq!(refused(json!({})), "settings: missing field `url`");
     assert_eq!(
-        s.validate("w", &json!({})),
-        vec!["export.w.settings: missing field `url`"]
+        refused(json!({"url": "https://a/", "auth_header": {"name": "A"}})),
+        "settings: missing field `value`"
     );
-    assert_eq!(
-        s.validate(
-            "w",
-            &json!({"url": "https://a/", "auth_header": {"name": "A"}})
-        ),
-        vec!["export.w.settings: missing field `value`"]
-    );
-    assert!(s
-        .validate(
-            "w",
-            &json!({"url": "https://a/", "max_inflight_deliveries": 0})
-        )
-        .is_empty());
+    assert!(Webhook::validate(br#"{"url":"https://a/","max_inflight_deliveries":0}"#).is_ok());
 }
 
 /// BOOT-083a / BOOT-083b / BOOT-089f: the validation-phase lines, one in-flight bound over the
@@ -124,135 +104,125 @@ fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
     assert!(check(CheckPhase::Instances, &both)[0].contains("delivery_timeout_secs"));
 }
 
-/// A delivery asks the host to POST the compact JSON line with `content-type: application/json`
-/// then the auth header, under the instance's deadline — and nothing else.
+/// One logged event: every field it carried, by name, and its message.
+type Event = Vec<(String, String)>;
+
+/// The `tracing` events captured, in order.
+#[derive(Default, Clone)]
+struct Capture(Arc<Mutex<Vec<Event>>>);
+
+struct Fields(Event);
+
+impl tracing::field::Visit for Fields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0
+            .push((field.name().to_string(), format!("{value:?}")));
+    }
+}
+
+impl tracing::Subscriber for Capture {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut v = Fields(Vec::new());
+        event.record(&mut v);
+        self.0.lock().unwrap().push(v.0);
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Run `f` and return every event it logged, in order.
+fn logged(f: impl FnOnce()) -> Vec<Event> {
+    let cap = Capture::default();
+    tracing::subscriber::with_default(cap.clone(), f);
+    let got = cap.0.lock().unwrap().clone();
+    got
+}
+
+fn field(e: &Event, name: &str) -> String {
+    e.iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, v)| v.clone())
+        .unwrap_or_else(|| panic!("no `{name}` in {e:?}"))
+}
+
+fn settings(v: serde_json::Value) -> Settings {
+    serde_json::from_value(v).expect("settings parse")
+}
+
+fn reply(status: u16) -> Result<ExchangeResponse, ConnFailure> {
+    Ok(ExchangeResponse {
+        status,
+        ..ExchangeResponse::default()
+    })
+}
+
+/// A delivery POSTs the compact JSON line to the target's path and query with
+/// `content-type: application/json` then the auth header, under the instance's deadline.
 #[test]
-fn a_delivery_asks_the_host_to_post_the_line() {
-    let s = sink(json!({
-        "url": "https://siem.example/in",
+fn a_delivery_posts_the_line() {
+    let s = settings(json!({
+        "url": "https://siem.example/in?k=v",
         "auth_header": {"name": "Authorization", "value": "Bearer x"},
         "delivery_timeout_secs": 9
     }));
-    let payload = json!({"ts": 7, "pool": "p", "outcome": "ok"});
-    let HostStep::Host { token, ops } = s.deliver_via_host(ExportStream::Logs, &payload) else {
-        panic!("a delivery asks the host")
-    };
-    assert_ne!(token, START);
+    let line = br#"{"ts":7,"pool":"p","outcome":"ok"}"#;
     assert_eq!(
-        ops,
-        vec![HostOp::Http(HttpRequest {
-            method: "POST".into(),
-            url: "https://siem.example/in".into(),
-            headers: vec![
-                ("content-type".into(), "application/json".into()),
-                ("Authorization".into(), "Bearer x".into()),
+        request(&s, line),
+        Request {
+            method: b"POST".to_vec(),
+            target: b"/in?k=v".to_vec(),
+            fields: vec![
+                (b"content-type".to_vec(), b"application/json".to_vec()),
+                (b"Authorization".to_vec(), b"Bearer x".to_vec()),
             ],
-            body: payload.to_string(),
+            body: line.to_vec(),
             timeout_ms: 9000,
-        })]
+        }
     );
-    // Accepted: nothing to report, and never a second request (no retry).
-    let ok = HostResult::Http(HttpResponse {
-        status: 204,
-        body: String::new(),
-    });
-    assert_eq!(s.resume(token, vec![ok]), HostStep::Done);
-    assert!(raised(s.as_ref()).is_empty());
+    let bare = settings(json!({"url": "https://siem.example"}));
+    assert_eq!(request(&bare, b"{}").target, b"/".to_vec());
+    assert_eq!(request(&bare, b"{}").fields.len(), 1);
+    assert_eq!(request(&bare, b"{}").timeout_ms, 2000);
 }
 
 /// A non-2xx answer and a transport failure each drop the line and raise their code at debug,
 /// with the fields in the compiled-in site's order, the target's userinfo masked.
 #[test]
-fn a_failed_delivery_raises_its_code_once_and_is_not_retried() {
-    let s = sink(json!({"url": "https://user:pw@siem.example/in"}));
-    let status = HostResult::Http(HttpResponse {
-        status: 503,
-        body: "busy".into(),
+fn a_failed_delivery_raises_its_code_once() {
+    let url = "https://user:pw@siem.example/in";
+    let got = logged(|| {
+        report(url, reply(204));
+        report(url, reply(503));
+        report(url, Err(ConnFailure::Failed("timed out".into())));
     });
-    assert_eq!(s.resume(1, vec![status]), HostStep::Done);
-    let failed = HostResult::Failed {
-        step: "request".into(),
-        error: "timed out".into(),
-        rotation: None::<Rotation>,
+    let names = |e: &Event| {
+        e.iter()
+            .map(|(n, _)| n.clone())
+            .filter(|n| n != "message")
+            .collect::<Vec<_>>()
     };
-    assert_eq!(s.resume(2, vec![failed]), HostStep::Done);
-    let got = raised(s.as_ref());
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!(names(&got[0]), ["diag", "webhook_url", "status"]);
+    assert_eq!(field(&got[0], "diag"), "BUSBAR-7071");
     assert_eq!(
-        got,
-        vec![
-            json!({"code": "BUSBAR-7071", "level": "debug",
-                   "message": "request-log webhook delivery returned a non-2xx status; this log was dropped",
-                   "fields": {"status": "503", "webhook_url": "\"https://***@siem.example/in\""},
-                   "order": ["webhook_url", "status"]}),
-            json!({"code": "BUSBAR-7072", "level": "debug",
-                   "message": "request-log webhook delivery failed (transport error); this log was dropped",
-                   "fields": {"error_kind": "timed out", "webhook_url": "\"https://***@siem.example/in\""},
-                   "order": ["webhook_url", "error_kind"]}),
-        ]
+        field(&got[0], "webhook_url"),
+        "\"https://***@siem.example/in\""
     );
-}
-
-/// At start the sink asks the host's policy about its target: admitted, it is live under the
-/// `webhook` gate at its own bound; refused, it raises BUSBAR-7070 in the policy's words and takes
-/// nothing this run.
-#[test]
-fn start_admits_the_target_or_disables_the_instance() {
-    let s = sink(json!({"url": "https://a.example/", "max_inflight_deliveries": 5}));
+    assert_eq!(field(&got[0], "status"), "503");
+    assert_eq!(names(&got[1]), ["diag", "webhook_url", "error_kind"]);
+    assert_eq!(field(&got[1], "diag"), "BUSBAR-7072");
+    assert_eq!(field(&got[1], "error_kind"), "timed out");
     assert_eq!(
-        s.start(),
-        HostStep::Host {
-            token: START,
-            ops: vec![HostOp::Admit {
-                url: "https://a.example/".into()
-            }]
-        }
-    );
-    let done = HostResult::Done { rotation: None };
-    assert_eq!(
-        s.resume(START, vec![done]),
-        HostStep::Started {
-            live: true,
-            inflight: 5,
-            gate: "webhook".into()
-        }
-    );
-    let refused = HostResult::Failed {
-        step: "refused".into(),
-        error: "observability.request_log_webhook_url must be an https:// URL (got 'http://a/')"
-            .into(),
-        rotation: None,
-    };
-    assert_eq!(
-        s.resume(START, vec![refused]),
-        HostStep::Started {
-            live: false,
-            inflight: 0,
-            gate: "webhook".into()
-        }
-    );
-    assert_eq!(
-        raised(s.as_ref()),
-        vec![json!({"code": "BUSBAR-7070", "level": "error",
-            "message": "observability.request_log_webhook_url must be an https:// URL (got 'http://a/'); disabling this webhook exporter"})]
-    );
-}
-
-#[test]
-fn userinfo_is_masked_and_nothing_else_moves() {
-    assert_eq!(
-        mask_userinfo("https://u:p@h.example/x"),
-        "https://***@h.example/x"
-    );
-    assert_eq!(mask_userinfo("https://h.example/x"), "https://h.example/x");
-    assert_eq!(mask_userinfo("not a url"), "not a url");
-    // Password-only and username-only userinfo are masked as well.
-    assert_eq!(
-        mask_userinfo("https://:s3cret@h.example/x"),
-        "https://***@h.example/x"
-    );
-    assert_eq!(
-        mask_userinfo("https://tok@h.example:8443/x"),
-        "https://***@h.example:8443/x"
+        field(&got[1], "message"),
+        "request-log webhook delivery failed (transport error); this log was dropped"
     );
 }
 
@@ -260,36 +230,46 @@ fn userinfo_is_masked_and_nothing_else_moves() {
 #[test]
 fn the_success_boundary_is_200_to_299() {
     for (status, raises) in [(199u16, true), (200, false), (299, false), (300, true)] {
-        let s = sink(json!({"url": "https://a.example/"}));
-        let answer = HostResult::Http(HttpResponse {
-            status,
-            body: String::new(),
-        });
-        assert_eq!(s.resume(1, vec![answer]), HostStep::Done);
-        let got = raised(s.as_ref());
-        if raises {
-            assert_eq!(got.len(), 1, "{status}: {got:?}");
-            assert_eq!(got[0]["code"], "BUSBAR-7071");
-            assert_eq!(got[0]["fields"]["status"], status.to_string());
-        } else {
-            assert!(got.is_empty(), "{status}: {got:?}");
-        }
+        let got = logged(|| report("https://a.example/", reply(status)));
+        assert_eq!(got.len(), usize::from(raises), "{status}: {got:?}");
     }
 }
 
-/// An instance configured with 0 in-flight deliveries (the validation bounds the MAX over
-/// instances, so it can start beside a larger sibling) is clamped to 1, never a 0-permit gate.
+/// With no verdict to be had, the instance is disabled once, in BUSBAR-7070's words, and stays so
+/// until a reload asks again.
 #[test]
-fn a_zero_inflight_instance_starts_with_one_permit() {
-    let s = sink(json!({"url": "https://a.example/", "max_inflight_deliveries": 0}));
+fn an_unadmitted_target_disables_the_instance_once() {
+    let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
+    let got = logged(|| {
+        assert!(!w.admitted(None));
+        assert!(!w.admitted(None));
+    });
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(field(&got[0], "diag"), "BUSBAR-7070");
     assert_eq!(
-        s.resume(START, vec![HostResult::Done { rotation: None }]),
-        HostStep::Started {
-            live: true,
-            inflight: 1,
-            gate: "webhook".into()
-        }
+        field(&got[0], "message"),
+        "the instance was handed no connector; disabling this webhook exporter"
     );
+    w.refresh(br#"{"url":"https://b.example/"}"#, &[], 2)
+        .expect("a refresh applies");
+    assert_eq!(logged(|| assert!(!w.admitted(None))).len(), 1);
+    assert_eq!(w.settings().expect("parsed").url, "https://b.example/");
+}
+
+/// The Statement: name, the default in-flight bound, the module alias, the `logs` stream, no
+/// route, and ONE outbound open-web need targeted by the `url` setting.
+#[test]
+fn the_statement_states_the_sink() {
+    assert_eq!(STATEMENT.name.len, NAME.len());
+    assert_eq!(STATEMENT.max_inflight, 64);
+    assert_eq!(REWRITES[0].class, REWRITE_ALIAS);
+    assert_eq!(REWRITES[0].from.len, ALIAS.len());
+    assert_eq!(STREAMS, &[ExportStream::Logs as u8]);
+    assert_eq!(TAIL.routes_len, 0);
+    assert_eq!(STATEMENT.needs_len, 1);
+    assert_eq!(NEEDS[0].direction, DIRECTION_OUTBOUND);
+    assert_eq!(NEEDS[0].egress_class, EGRESS_OPEN_WEB);
+    assert_eq!(NEEDS[0].target_from.len, URL_KEY.len());
 }
 
 /// The declaration both doors state: the shed counter and the three catalogue codes it raises.
