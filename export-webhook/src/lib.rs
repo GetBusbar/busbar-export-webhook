@@ -65,8 +65,15 @@ const DISABLED: &str = "BUSBAR-7070";
 const NON_2XX: &str = "BUSBAR-7071";
 const TRANSPORT_ERROR: &str = "BUSBAR-7072";
 
-/// The settings key the target comes from.
-const URL_KEY: &str = "url";
+/// The config path the target comes from: the `url` setting (`settings.<key>`, the path the host's
+/// connection-table fill resolves, spec PB-100). A bare key resolves to nothing, and the host's
+/// connector refuses a need whose target resolved to nothing.
+const TARGET_FROM: &str = "settings.url";
+
+/// The in-flight ceiling this sink declares: no bound of its own. The bound is the operator's
+/// `max_inflight_deliveries` (1.5.5's, 64 when unset), which the host applies per instance; `check`
+/// refuses one past [`MAX_PERMITS`] or below 1.
+const MAX_INFLIGHT: u32 = u32::MAX;
 /// The one need's index in the Statement.
 const NEED: u32 = 0;
 
@@ -84,18 +91,25 @@ const NONE: AbiStr = AbiStr {
 
 /// The one need: outbound over a secure connection to the `url` setting's target, public
 /// destinations only (1.5.5's https-only policy refusing loopback, link-local, private, CGNAT and
-/// cloud-metadata targets).
+/// cloud-metadata targets). It is framed by the `http` transport — the scheme its claim names; an
+/// `https://` target is secured by the host's connector, and the open-web egress class refuses any
+/// target that is not secure before a byte leaves.
 const NEEDS: &[Need] = &[Need {
     direction: DIRECTION_OUTBOUND,
     egress_class: EGRESS_OPEN_WEB,
-    transport: abi_str("https"),
+    transport: abi_str("http"),
     auth: NONE,
-    target_from: abi_str(URL_KEY),
+    target_from: abi_str(TARGET_FROM),
     trust_from: NONE,
     details: Blob::ABSENT,
     keep_response_headers: std::ptr::null(),
     keep_response_headers_len: 0,
     timeout_ms: 0,
+    // The receiver's response head is not read: the named (empty) list, nothing denied beyond it.
+    keep_mode: busbar_contract::abi::host::conn::connector::KEEP_NAMED,
+    _reserved: 0,
+    deny_response_headers: std::ptr::null(),
+    deny_response_headers_len: 0,
 }];
 
 /// The streams this sink carries: the request log.
@@ -121,14 +135,14 @@ const REWRITES: &[Rewrite] = &[Rewrite {
     to: NONE,
 }];
 
-/// This plugin's Statement: its name, version, the default in-flight bound, alias, stream and need.
+/// This plugin's Statement: its name, version, its in-flight ceiling, alias, stream and need.
 pub const STATEMENT: Statement = Statement {
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
     rewrites: REWRITES.as_ptr(),
     rewrites_len: REWRITES.len(),
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
-    ..statement(NAME, env!("CARGO_PKG_VERSION"), DEFAULT_MAX_INFLIGHT as u32)
+    ..statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
 };
 
 /// The settings, parsed as the configuration grammar parses them (empty is `{}`).

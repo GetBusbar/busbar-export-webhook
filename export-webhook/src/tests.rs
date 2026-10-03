@@ -261,7 +261,7 @@ fn an_unadmitted_target_disables_the_instance_once() {
 #[test]
 fn the_statement_states_the_sink() {
     assert_eq!(STATEMENT.name.len, NAME.len());
-    assert_eq!(STATEMENT.max_inflight, 64);
+    assert_eq!(STATEMENT.max_inflight, u32::MAX);
     assert_eq!(REWRITES[0].class, REWRITE_ALIAS);
     assert_eq!(REWRITES[0].from.len, ALIAS.len());
     assert_eq!(STREAMS, &[ExportStream::Logs as u8]);
@@ -269,7 +269,8 @@ fn the_statement_states_the_sink() {
     assert_eq!(STATEMENT.needs_len, 1);
     assert_eq!(NEEDS[0].direction, DIRECTION_OUTBOUND);
     assert_eq!(NEEDS[0].egress_class, EGRESS_OPEN_WEB);
-    assert_eq!(NEEDS[0].target_from.len, URL_KEY.len());
+    assert_eq!(NEEDS[0].target_from.len, "settings.url".len());
+    assert_eq!(TARGET_FROM, "settings.url");
 }
 
 /// The declaration both doors state: the shed counter and the three catalogue codes it raises.
