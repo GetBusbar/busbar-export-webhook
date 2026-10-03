@@ -82,6 +82,7 @@ version = "1.5.0"
 dependencies = [
  "busbar-contract",
  "busbar-export-webhook",
+ "busbar-export-webhook-plugin",
  "busbar-plugin-loader",
 ]
 
