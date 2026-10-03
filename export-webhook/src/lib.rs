@@ -84,11 +84,13 @@ const NONE: AbiStr = AbiStr {
 
 /// The one need: outbound over a secure connection to the `url` setting's target, public
 /// destinations only (1.5.5's https-only policy refusing loopback, link-local, private, CGNAT and
-/// cloud-metadata targets).
+/// cloud-metadata targets). It is framed by the `http` transport — the scheme its claim names; an
+/// `https://` target is secured by the host's connector, and the open-web egress class refuses any
+/// target that is not secure before a byte leaves.
 const NEEDS: &[Need] = &[Need {
     direction: DIRECTION_OUTBOUND,
     egress_class: EGRESS_OPEN_WEB,
-    transport: abi_str("https"),
+    transport: abi_str("http"),
     auth: NONE,
     target_from: abi_str(URL_KEY),
     trust_from: NONE,
