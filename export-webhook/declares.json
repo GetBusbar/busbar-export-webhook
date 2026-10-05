@@ -38,5 +38,8 @@
       "action": "If logs are being lost, check the webhook sink's reachability and the delivery counters. `busbar_webhook_logs_dropped_total` tracks the volume.",
       "since": "1.6.0"
     }
+  ],
+  "needs": [
+    "http"
   ]
 }
