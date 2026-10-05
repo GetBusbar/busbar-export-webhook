@@ -44,7 +44,7 @@
 #![allow(dead_code)]
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -320,6 +320,89 @@ fn reply(s: &mut StdServerSession, answer: Answer) {
         match s.read(&mut buf) {
             Ok(0) | Err(_) => return,
             Ok(n) => seen.extend_from_slice(&buf[..n]),
+        }
+    }
+}
+
+/// A far end's cleartext negotiation before TLS (a protocol's own StartTLS: Postgres's
+/// `SSLRequest` answered `S`, LDAP's StartTLS extended operation, ...): `true` = go on to TLS.
+pub type Preamble = fn(&mut TcpStream) -> bool;
+
+/// THE SUITE'S TLS FRONT at [`FAR_END`] (started once; later calls are no-ops): each connection's
+/// cleartext `preamble` runs, then the TLS handshake (busbar's test kit, a `localhost` certificate
+/// [`anchors`] trusts), then its bytes are carried both ways to the REAL backend at `upstream`
+/// (the plugin's live service, in the clear on loopback). What it proves: the plugin's own
+/// connection is secured by the HOST's TLS against the suite's anchors.
+///
+/// # Panics
+/// [`FAR_END`] cannot be bound.
+pub fn tls_front(preamble: Preamble, upstream: &'static str) {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    STARTED.get_or_init(|| {
+        let listener = TcpListener::bind(FAR_END)
+            .unwrap_or_else(|e| panic!("the suite's TLS front cannot bind {FAR_END}: {e}"));
+        let tls = ServerTls::new(&[ca().leaf_der.clone()], &ca().key_der, None, &[])
+            .unwrap_or_else(|e| panic!("the suite's TLS front has no TLS identity: {e}"));
+        std::thread::spawn(move || {
+            for tcp in listener.incoming() {
+                let Ok(tcp) = tcp else { return };
+                let tls = tls.clone();
+                std::thread::spawn(move || front(tcp, &tls, preamble, upstream));
+            }
+        });
+    });
+}
+
+/// One connection through the TLS front: preamble, handshake, then both directions carried until
+/// either side ends.
+fn front(mut tcp: TcpStream, tls: &ServerTls, preamble: Preamble, upstream: &str) {
+    if !preamble(&mut tcp) {
+        return;
+    }
+    let Ok(ctl) = tcp.try_clone() else { return };
+    let Ok(mut s) = tls.accept_std(tcp) else {
+        return;
+    };
+    if !s.handshake_ok() {
+        return;
+    }
+    let Ok(mut up) = TcpStream::connect(upstream) else {
+        return;
+    };
+    let tick = Some(Duration::from_millis(2));
+    if ctl.set_read_timeout(tick).is_err() || up.set_read_timeout(tick).is_err() {
+        return;
+    }
+    let idle = |e: &std::io::Error| {
+        matches!(
+            e.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        )
+    };
+    let mut buf = [0_u8; 16 * 1024];
+    loop {
+        match s.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => {
+                if up.write_all(&buf[..n]).is_err() {
+                    return;
+                }
+            }
+            Err(e) if idle(&e) => {}
+            Err(_) => return,
+        }
+        match up.read(&mut buf) {
+            Ok(0) => {
+                s.close();
+                return;
+            }
+            Ok(n) => {
+                if s.write_all(&buf[..n]).and_then(|()| s.flush()).is_err() {
+                    return;
+                }
+            }
+            Err(e) if idle(&e) => {}
+            Err(_) => return,
         }
     }
 }
