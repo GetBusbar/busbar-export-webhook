@@ -96,6 +96,11 @@ const NEEDS: &[Need] = &[Need {
     keep_response_headers: std::ptr::null(),
     keep_response_headers_len: 0,
     timeout_ms: 0,
+    // The receiver's response head is not read: the named (empty) list, nothing denied beyond it.
+    keep_mode: busbar_contract::abi::host::conn::connector::KEEP_NAMED,
+    _reserved: 0,
+    deny_response_headers: std::ptr::null(),
+    deny_response_headers_len: 0,
 }];
 
 /// The streams this sink carries: the request log.
