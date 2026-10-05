@@ -1,0 +1,21 @@
+{
+  "settings": { "url": "https://hooks.example.com/busbar" },
+  "export": {
+    "bad_settings": [
+      { "settings": {}, "refusal": "settings: missing field `url`" },
+      { "settings": { "url": "https://x.example.com", "bogus": 1 },
+        "refusal": "settings: unknown field `bogus`, expected one of `url`, `auth_header`, `max_inflight_deliveries`, `delivery_timeout_secs`" },
+      { "settings": { "url": 5 },
+        "refusal": "settings: invalid type: integer `5`, expected a string" }
+    ],
+    "deliver": [
+      { "stream": "logs",
+        "batch": "{\"outcome\":\"ok\",\"ts\":1}\n",
+        "observed": [] }
+    ],
+    "scrape": [ { "families": [], "cap": 64, "exposition": "" } ],
+    "status": { "outcome": "Ready" },
+    "check": { "outcome": "Ready" },
+    "serve": [ { "method": "GET", "path": "/exports/tail/x", "outcome": "Ready", "status_code": 404 } ]
+  }
+}
