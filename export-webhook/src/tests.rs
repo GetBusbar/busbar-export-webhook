@@ -132,6 +132,7 @@ impl tracing::Subscriber for Capture {
     fn event(&self, event: &tracing::Event<'_>) {
         let mut v = Fields(Vec::new());
         event.record(&mut v);
+        v.0.push(("level".to_string(), event.metadata().level().to_string()));
         self.0.lock().unwrap().push(v.0);
     }
     fn enter(&self, _: &tracing::span::Id) {}
@@ -193,8 +194,9 @@ fn a_delivery_posts_the_line() {
     assert_eq!(request(&bare, b"{}").timeout_ms, 2000);
 }
 
-/// A non-2xx answer and a transport failure each drop the line and raise their code at debug,
-/// with the fields in the compiled-in site's order, the target's userinfo masked.
+/// A non-2xx answer and a transport failure each drop the line and raise their code at WARN (1.5.5's
+/// `warn_webhook_delivery_failed`), with the fields in the compiled-in site's order, the target's
+/// userinfo masked.
 #[test]
 fn a_failed_delivery_raises_its_code_once() {
     let url = "https://user:pw@siem.example/in";
@@ -206,7 +208,7 @@ fn a_failed_delivery_raises_its_code_once() {
     let names = |e: &Event| {
         e.iter()
             .map(|(n, _)| n.clone())
-            .filter(|n| n != "message")
+            .filter(|n| n != "message" && n != "level")
             .collect::<Vec<_>>()
     };
     assert_eq!(got.len(), 2, "{got:?}");
@@ -220,6 +222,8 @@ fn a_failed_delivery_raises_its_code_once() {
     assert_eq!(names(&got[1]), ["diag", "webhook_url", "error_kind"]);
     assert_eq!(field(&got[1], "diag"), "BUSBAR-7072");
     assert_eq!(field(&got[1], "error_kind"), "timed out");
+    assert_eq!(field(&got[0], "level"), "WARN");
+    assert_eq!(field(&got[1], "level"), "WARN");
     assert_eq!(
         field(&got[1], "message"),
         "request-log webhook delivery failed (transport error); this log was dropped"
@@ -235,6 +239,31 @@ fn the_success_boundary_is_200_to_299() {
     }
 }
 
+/// A target the host refused is named in 1.5.5's words when the refusal is the `https://` scheme rule
+/// (the scheme read without case; userinfo masked as 1.5.5 masked it), and in the host's words
+/// otherwise; a host that gave no verdict is named as such.
+#[test]
+fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
+    let refused = ConnFailure::Refused("destination refused".into());
+    assert_eq!(
+        refusal_words(Some("http://127.0.0.1:4000/sidecar"), &refused),
+        "observability.request_log_webhook_url must be an https:// URL (got 'http://127.0.0.1:4000/sidecar')"
+    );
+    assert_eq!(
+        refusal_words(Some("HTTP://u:p@siem.example/in"), &refused),
+        "observability.request_log_webhook_url must be an https:// URL (got 'http://***@siem.example/in')"
+    );
+    assert_eq!(
+        refusal_words(Some("HTTPS://siem.example/in"), &refused),
+        "destination refused"
+    );
+    assert_eq!(
+        refusal_words(Some("http://siem.example/in"), &ConnFailure::Unarmed),
+        "the instance was handed no connector"
+    );
+    assert_eq!(refusal_words(None, &refused), "destination refused");
+}
+
 /// With no verdict to be had, the instance is disabled once, in BUSBAR-7070's words, and stays so
 /// until a reload asks again.
 #[test]
@@ -246,6 +275,7 @@ fn an_unadmitted_target_disables_the_instance_once() {
     });
     assert_eq!(got.len(), 1, "{got:?}");
     assert_eq!(field(&got[0], "diag"), "BUSBAR-7070");
+    assert_eq!(field(&got[0], "level"), "ERROR");
     assert_eq!(
         field(&got[0], "message"),
         "the instance was handed no connector; disabling this webhook exporter"
