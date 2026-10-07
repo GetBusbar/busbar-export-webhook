@@ -15,10 +15,11 @@
 //! connection only), and the request rides the SDK's framed `exchange` under the instance's
 //! `delivery_timeout_secs`. The sink never dials. A delivery is fire-and-forget and never retried:
 //! a non-2xx answer or a transport failure drops that one line and raises BUSBAR-7071 /
-//! BUSBAR-7072 at debug.
+//! BUSBAR-7072 at WARN, as 1.5.5 warned them.
 //!
 //! **Admission.** The first delivery asks the host for its verdict on the target (the need's
-//! admission at bind); a refused target raises BUSBAR-7070 (`…; disabling this webhook exporter`)
+//! admission at bind); a refused target raises BUSBAR-7070 (`…; disabling this webhook exporter`,
+//! in 1.5.5's words when the refusal is the `https://` scheme rule)
 //! once and the instance takes no delivery until a reload — its siblings keep delivering.
 //!
 //! **Settings** are checked in two phases, as they always were: their SHAPE while the configuration
@@ -214,7 +215,9 @@ impl Webhook {
         let ok = match verdict {
             Ok(()) => true,
             Err(e) => {
-                tracing::error!(diag = %DISABLED, "{e}; disabling this webhook exporter");
+                let url = self.settings().map(|s| s.url);
+                let words = refusal_words(url.as_deref(), &e);
+                tracing::error!(diag = %DISABLED, "{words}; disabling this webhook exporter");
                 false
             }
         };
@@ -246,18 +249,39 @@ pub fn request(s: &Settings, line: &[u8]) -> Request {
     }
 }
 
+/// BUSBAR-7070's words for a refused target. When the host refused it and the target is not an
+/// `https://` URL, the refusal is the scheme rule, and it is said in 1.5.5's words byte for byte
+/// (v1.5.5 `crates/busbar/src/observability.rs` `validate_webhook_url`; the scheme read without
+/// case, as there). Any other refusal is said in the host's words.
+pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
+    match (url, refused) {
+        (Some(u), ConnFailure::Refused(_)) if !is_https(u) => format!(
+            "observability.request_log_webhook_url must be an https:// URL (got '{}')",
+            mask_userinfo(u)
+        ),
+        _ => refused.to_string(),
+    }
+}
+
+/// `url` names the `https` scheme, read without case (RFC 3986; 1.5.5's `scheme_is`).
+fn is_https(url: &str) -> bool {
+    url.split_once("://")
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
+}
+
 /// What became of one line: nothing to say for a 2xx; BUSBAR-7071 for any other status,
-/// BUSBAR-7072 for a transport failure — each at debug, the target's userinfo masked.
+/// BUSBAR-7072 for a transport failure — each at WARN, as 1.5.5 warned them
+/// (`warn_webhook_delivery_failed`), the target's userinfo masked.
 pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
     match answered {
         Ok(r) if (200..300).contains(&r.status) => {}
-        Ok(r) => tracing::debug!(
+        Ok(r) => tracing::warn!(
             diag = %NON_2XX,
             webhook_url = ?mask_userinfo(url),
             status = %r.status,
             "request-log webhook delivery returned a non-2xx status; this log was dropped"
         ),
-        Err(e) => tracing::debug!(
+        Err(e) => tracing::warn!(
             diag = %TRANSPORT_ERROR,
             webhook_url = ?mask_userinfo(url),
             error_kind = %e,
