@@ -17,8 +17,8 @@
 //! a non-2xx answer or a transport failure drops that one line and raises BUSBAR-7071 /
 //! BUSBAR-7072 at WARN, as 1.5.5 warned them.
 //!
-//! **Admission.** The first delivery asks the host for its verdict on the target (the need's
-//! admission at bind); a refused target raises BUSBAR-7070 (`…; disabling this webhook exporter`,
+//! **Admission.** The door states `ready`, so the host's verdict on the target (the need's admission
+//! at bind) is asked at boot, before the instance serves; a refused target raises BUSBAR-7070 (`…; disabling this webhook exporter`,
 //! in 1.5.5's words when the refusal is the `https://` scheme rule)
 //! once and the instance takes no delivery until a reload — its siblings keep delivering.
 //!
@@ -179,6 +179,22 @@ impl Life for Webhook {
             settings: RwLock::new(parse(settings).ok()),
             live: Mutex::new(None),
         })
+    }
+
+    /// DISCOVERY AT BOOT (the mechanism's `ready`, awaited after `open` before the instance serves):
+    /// the host's verdict on the target is asked here, once, so a refused target raises BUSBAR-7070
+    /// at boot, as 1.5.5 refused it when the sink was configured. It never refuses the boot: the
+    /// instance is disabled and its siblings serve, as in 1.5.5. Settings that did not parse are the
+    /// configuration's refusal, not this one's.
+    fn ready(
+        &self,
+        host: &Host,
+        _: busbar_contract::abi::mechanism::ticket::Ticket,
+    ) -> Poll<Result<(), Refusal>> {
+        if self.settings().is_some() {
+            let _ = self.admitted(Some(host));
+        }
+        Poll::Ready(Ok(()))
     }
 
     /// A reload's settings replace the instance's, and its target is asked about afresh.
@@ -574,7 +590,7 @@ mod table {
     busbar_contract::plugin_door! {
         ops: busbar_contract::abi::export::Ops,
         statement: super::STATEMENT,
-        lifecycle: life(Webhook),
+        lifecycle: life(Webhook, ready),
         kind_ops: {
             deliver: Safe<Deliver>, scrape: Safe<Scrape>, status: Safe<Status>,
             check: Safe<Check>, serve: Safe<Serve>,
