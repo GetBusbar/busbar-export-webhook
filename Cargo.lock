@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "busbar-export-webhook"
-version = "1.5.0"
+version = "1.0.0"
 dependencies = [
  "busbar-contract",
  "serde",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "busbar-export-webhook-plugin"
-version = "1.5.0"
+version = "1.0.0"
 dependencies = [
  "busbar-contract",
  "busbar-core-connector",
