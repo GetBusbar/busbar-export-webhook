@@ -398,6 +398,7 @@ fn ready_asks_the_verdict_at_boot_and_never_refuses_it() {
         wake: None,
         conns: std::ptr::null(),
         services: std::ptr::null(),
+        io: std::ptr::null(),
     };
     let host = busbar_contract::abi::sdk::conn::Host::of(&tables);
     let w = Webhook::open(br#"{"url":"http://127.0.0.1:4000/sidecar"}"#, &[], 1).expect("opens");
