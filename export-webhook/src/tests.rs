@@ -509,3 +509,50 @@ fn ready_asks_the_verdict_at_boot_and_never_refuses_it() {
         "asked once"
     );
 }
+
+/// RED (audit export-webhook #4): PARITY WITH 1.5.5, which added the configured auth header only
+/// when `HeaderName::from_bytes` and `HeaderValue::from_str` both took it and otherwise POSTed the
+/// line without it (v1.5.5 `crates/busbar/src/export/webhook.rs` `deliver_logs`). A name that is not
+/// an RFC 9110 token, or a value with a control byte, leaves the header out, and the line is still
+/// sent; a value with a tab or a non-ASCII byte is kept, as `HeaderValue::from_str` kept it.
+#[test]
+fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
+    let json = (b"content-type".to_vec(), b"application/json".to_vec());
+    for (name, value) in [
+        ("Bad Name", "Bearer x"),
+        ("", "Bearer x"),
+        ("X-K\u{e9}y", "k"),
+        ("Authorization:", "k"),
+        ("Authorization", "Bearer x\r\nX-Injected: 1"),
+        ("Authorization", "Bearer \u{7f}"),
+        ("Authorization", "Bearer \u{0}"),
+    ] {
+        let s = settings(json!({
+            "url": "https://siem.example/in",
+            "auth_header": {"name": name, "value": value}
+        }));
+        assert_eq!(
+            request(&s, b"{}").fields,
+            vec![json.clone()],
+            "{name:?}: {value:?}"
+        );
+    }
+    for (name, value) in [
+        ("X-Api-Key", "k\tv"),
+        ("x!#$%&'*+-.^_`|~1", "caf\u{e9} \"ok\""),
+        ("Authorization", ""),
+    ] {
+        let s = settings(json!({
+            "url": "https://siem.example/in",
+            "auth_header": {"name": name, "value": value}
+        }));
+        assert_eq!(
+            request(&s, b"{}").fields,
+            vec![
+                json.clone(),
+                (name.as_bytes().to_vec(), value.as_bytes().to_vec())
+            ],
+            "{name:?}: {value:?}"
+        );
+    }
+}
