@@ -9,13 +9,14 @@
 //! catalogue codes it raises).
 //!
 //! Each request-log line of a delivered batch is POSTed, as the compact JSON line it is, with
-//! `content-type: application/json` and the instance's optional `auth_header`, to the instance's
-//! `https://` target — through the HOST's connector: the Statement declares ONE outbound need whose
-//! target is the `url` setting, under the open-web egress class (public destinations over a secure
-//! connection only), and the request rides the SDK's framed `exchange` under the instance's
-//! `delivery_timeout_secs`. The sink never dials. A delivery is fire-and-forget and never retried:
-//! a non-2xx answer or a transport failure drops that one line and raises BUSBAR-7071 /
-//! BUSBAR-7072 at WARN, as 1.5.5 warned them.
+//! `content-type: application/json`, the instance's optional `auth_header`, and the
+//! `authorization: Basic …` a userinfo in the URL becomes (as 1.5.5's reqwest made it), to the
+//! instance's `https://` target — through the HOST's connector: the Statement declares ONE outbound
+//! need whose target is the `url` setting (the host drops its userinfo), under the open-web egress
+//! class (public destinations over a secure connection only), and the request rides the SDK's
+//! framed `exchange` under the instance's `delivery_timeout_secs`. The sink never dials. A delivery
+//! is fire-and-forget and never retried: a non-2xx answer or a transport failure drops that one line
+//! and raises BUSBAR-7071 / BUSBAR-7072 at WARN, as 1.5.5 warned them.
 //!
 //! **Admission.** The door states `ready`, so the host's verdict on the target (the need's admission
 //! at bind) is asked at boot, before the instance serves; a refused target raises BUSBAR-7070 (`…; disabling this webhook exporter`,
@@ -242,12 +243,20 @@ impl Webhook {
     }
 }
 
-/// The request one line is POSTed as: compact JSON with `content-type: application/json`, then the
-/// auth header, to the target's path and query, under the instance's deadline.
+/// The request one line is POSTed as: compact JSON to the target's path and query, under the
+/// instance's deadline, with the fields 1.5.5's reqwest request held, in its order: the
+/// `authorization: Basic …` the URL's userinfo became ([`basic_authorization`]), then
+/// `content-type: application/json`, then the auth header — each appended as an `http::HeaderMap`
+/// appends, so a configured auth header named `Authorization` is sent too, after the userinfo's,
+/// as 1.5.5 sent both.
 pub fn request(s: &Settings, line: &[u8]) -> Request {
-    let mut fields = vec![(b"content-type".to_vec(), b"application/json".to_vec())];
+    let mut fields = Vec::new();
+    if let Some(basic) = basic_authorization(&s.url) {
+        append(&mut fields, b"authorization", &basic);
+    }
+    append(&mut fields, b"content-type", b"application/json");
     if let Some(h) = &s.auth_header {
-        fields.push((h.name.as_bytes().to_vec(), h.value.as_bytes().to_vec()));
+        append(&mut fields, h.name.as_bytes(), h.value.as_bytes());
     }
     let target = match url::Url::parse(&s.url) {
         Ok(u) => match u.query() {
@@ -263,6 +272,105 @@ pub fn request(s: &Settings, line: &[u8]) -> Request {
         body: line.to_vec(),
         timeout_ms: s.delivery_timeout_secs.saturating_mul(1000),
     }
+}
+
+/// One field appended as an `http::HeaderMap` appends it, the map 1.5.5's request held its fields
+/// in and wrote them from: after the last field of the same name (names compared without case),
+/// or last when there is none.
+fn append(fields: &mut Vec<(Vec<u8>, Vec<u8>)>, name: &[u8], value: &[u8]) {
+    let field = (name.to_vec(), value.to_vec());
+    match fields
+        .iter()
+        .rposition(|(n, _)| n.eq_ignore_ascii_case(name))
+    {
+        Some(i) => fields.insert(i + 1, field),
+        None => fields.push(field),
+    }
+}
+
+/// THE USERINFO AS 1.5.5 SENT IT: the `authorization` value a target URL's userinfo became, `None`
+/// when it carries none. 1.5.5 POSTed through reqwest 0.12, whose `RequestBuilder::new`
+/// (`extract_authority`) took the parsed URL's username and password off the URL, each
+/// percent-decoded and kept only when that is UTF-8 (a username that is not leaves no field at
+/// all; a password that is not is left out), and, when either was set, wrote `basic_auth`:
+/// `Basic ` and the padded standard base64 of `{username}:` followed by the password, if any. The
+/// host's connector drops the userinfo from the target the `url` setting gives the need.
+pub fn basic_authorization(url: &str) -> Option<Vec<u8>> {
+    let u = url::Url::parse(url).ok()?;
+    if !u.has_authority() {
+        return None;
+    }
+    let username = String::from_utf8(percent_decode(u.username().as_bytes())).ok()?;
+    let password = u
+        .password()
+        .and_then(|p| String::from_utf8(percent_decode(p.as_bytes())).ok());
+    if username.is_empty() && password.is_none() {
+        return None;
+    }
+    let mut credentials = format!("{username}:").into_bytes();
+    if let Some(p) = password {
+        credentials.extend_from_slice(p.as_bytes());
+    }
+    let mut value = b"Basic ".to_vec();
+    value.extend_from_slice(base64(&credentials).as_bytes());
+    Some(value)
+}
+
+/// `%XX` (two hex digits, either case) decoded to its byte; any other byte, a `%` not followed by
+/// two hex digits included, kept as it is (percent-encoding's `percent_decode`).
+fn percent_decode(s: &[u8]) -> Vec<u8> {
+    fn hex(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s[i] == b'%' {
+            let pair = s
+                .get(i + 1)
+                .copied()
+                .and_then(hex)
+                .zip(s.get(i + 2).copied().and_then(hex));
+            if let Some((high, low)) = pair {
+                out.push((high << 4) | low);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(s[i]);
+        i += 1;
+    }
+    out
+}
+
+/// The standard base64 alphabet, padded (RFC 4648 §4; base64's `STANDARD` engine).
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0];
+        let b = chunk.get(1).copied().unwrap_or(0);
+        let c = chunk.get(2).copied().unwrap_or(0);
+        let sextets = [
+            a >> 2,
+            ((a & 0x03) << 4) | (b >> 4),
+            ((b & 0x0f) << 2) | (c >> 6),
+            c & 0x3f,
+        ];
+        for (i, sextet) in sextets.into_iter().enumerate() {
+            out.push(if i <= chunk.len() {
+                char::from(ALPHABET[usize::from(sextet)])
+            } else {
+                '='
+            });
+        }
+    }
+    out
 }
 
 /// BUSBAR-7070's words for a refused target. When the host refused it and the target is not an
