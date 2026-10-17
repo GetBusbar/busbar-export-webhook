@@ -9,7 +9,8 @@
 //! catalogue codes it raises).
 //!
 //! Each request-log line of a delivered batch is POSTed, as the compact JSON line it is, with
-//! `content-type: application/json`, the instance's optional `auth_header`, and the
+//! `content-type: application/json`, the instance's optional `auth_header` (left out, as 1.5.5 left
+//! it out, when it is not a header 1.5.5 could build), and the
 //! `authorization: Basic …` a userinfo in the URL becomes (as 1.5.5's reqwest made it), to the
 //! instance's `https://` target — through the HOST's connector: the Statement declares ONE outbound
 //! need whose target is the `url` setting (the host drops its userinfo), under the open-web egress
@@ -255,7 +256,7 @@ pub fn request(s: &Settings, line: &[u8]) -> Request {
         append(&mut fields, b"authorization", &basic);
     }
     append(&mut fields, b"content-type", b"application/json");
-    if let Some(h) = &s.auth_header {
+    if let Some(h) = s.auth_header.as_ref().filter(|h| header_builds(h)) {
         append(&mut fields, h.name.as_bytes(), h.value.as_bytes());
     }
     let target = match url::Url::parse(&s.url) {
@@ -272,6 +273,20 @@ pub fn request(s: &Settings, line: &[u8]) -> Request {
         body: line.to_vec(),
         timeout_ms: s.delivery_timeout_secs.saturating_mul(1000),
     }
+}
+
+/// Whether 1.5.5 could build the auth header, and so sent it: `HeaderName::from_bytes` took a name
+/// of 1 to 65535 RFC 9110 token bytes, and `HeaderValue::from_str` a value of visible ASCII, space,
+/// tab and non-ASCII bytes (no other control byte, no DEL). A header that fails either was left out
+/// and the line POSTed without it (v1.5.5 `crates/busbar/src/export/webhook.rs` `deliver_logs`).
+fn header_builds(h: &ExportAuthHeader) -> bool {
+    let token = |b: &u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b);
+    let name = h.name.as_bytes();
+    (1..=usize::from(u16::MAX)).contains(&name.len())
+        && name.iter().all(token)
+        && h.value
+            .bytes()
+            .all(|b| b == b'\t' || (b >= 0x20 && b != 0x7f))
 }
 
 /// One field appended as an `http::HeaderMap` appends it, the map 1.5.5's request held its fields
