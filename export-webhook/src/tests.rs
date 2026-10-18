@@ -583,3 +583,34 @@ fn the_settings_schema_marks_the_auth_header_value_secret() {
     );
     assert_eq!(props["url"].get("x-busbar-secret"), None);
 }
+
+/// THE AUTH HEADER'S VALUE NEVER RENDERS THROUGH `Debug` (Q128 export-webhook M2: "the secret
+/// handled as a secret ... never shown through Debug"): formatting the settings, the header or an
+/// instance holding them names the header and redacts its value. RED before the fix: `Debug` was
+/// derived over `ExportAuthHeader::value`.
+#[test]
+fn the_auth_header_value_is_redacted_from_debug() {
+    let header = ExportAuthHeader {
+        name: "Authorization".into(),
+        value: "Bearer s3cret-token".into(),
+    };
+    let settings = WebhookSettings {
+        url: "https://siem.example/in".into(),
+        auth_header: Some(header.clone()),
+        max_inflight_deliveries: 1,
+        delivery_timeout_secs: 1,
+    };
+    for text in [
+        format!("{header:?}"),
+        format!("{header:#?}"),
+        format!("{settings:?}"),
+        format!("{settings:#?}"),
+    ] {
+        assert!(!text.contains("s3cret"), "the value leaked: {text}");
+        assert!(text.contains("Authorization"), "the name is kept: {text}");
+        assert!(
+            text.contains("<redacted>"),
+            "the value is marked redacted: {text}"
+        );
+    }
+}
