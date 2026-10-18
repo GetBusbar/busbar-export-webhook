@@ -21,8 +21,7 @@
         },
         "value": {
           "type": "string",
-          "x-busbar-secret": true,
-          "description": "The header's value (the credential). A secret reference resolves at open."
+          "description": "The header's value (the credential), e.g. \"Bearer ${WEBHOOK_TOKEN}\": it rides the configuration's ${VAR} interpolation, so it is never stored literally."
         }
       }
     },
