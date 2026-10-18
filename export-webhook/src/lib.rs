@@ -434,6 +434,13 @@ pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
 /// ([`CheckPhase::Limits`]) the in-flight bound — one bound over the instances, the largest
 /// configured (64 with none), so a generous instance is never refused for a stingy sibling; AFTER
 /// them ([`CheckPhase::Instances`]) each instance's delivery deadline, numbered by its position.
+///
+/// THE FOLD IS 1.5.5'S, KEPT AS PARITY: 1.5.5 validated only the largest instance's bound (v1.5.5
+/// crates/busbar/src/config/mod.rs:4003-4008, "the shared bound must accommodate the most
+/// permissive sink"; config_validate/mod.rs:1406-1420) and clamped each target's gate to at least
+/// one permit (export/webhook.rs:97-104), as the host's export axis clamps each instance's bound
+/// now. An instance stating `0` beside a larger sibling therefore validates and runs at one permit;
+/// refusing it per instance would be a customer-visible tightening the owner has not signed.
 pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
     let parsed: Vec<Settings> = instances
         .iter()
