@@ -337,9 +337,10 @@ fn the_success_boundary_is_200_to_299() {
     }
 }
 
-/// A target the host refused is named in 1.5.5's words when the refusal is the `https://` scheme rule
-/// (the scheme read without case; userinfo masked as 1.5.5 masked it), and in the host's words
-/// otherwise; a host that gave no verdict is named as such.
+/// A target the host refused is named in 1.5.5's words, as 1.5.5's `validate_webhook_url` named it:
+/// the `https://` scheme rule (the scheme read without case), a URL that does not parse, or the
+/// destination guard, the userinfo masked as 1.5.5 masked it; a host that gave no verdict is named
+/// as such.
 #[test]
 fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     let refused = ConnFailure::Refused("destination refused".into());
@@ -351,9 +352,17 @@ fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
         refusal_words(Some("HTTP://u:p@siem.example/in"), &refused),
         "observability.request_log_webhook_url must be an https:// URL (got 'http://***@siem.example/in')"
     );
+    // RED (Q128 export-webhook LOW, src/lib.rs:391-403): 1.5.5 named the other two refusals on this
+    // path in its own words too (v1.5.5 observability.rs validate_webhook_url): a URL that does not
+    // parse, and a parseable https target the destination guard refused.
     assert_eq!(
-        refusal_words(Some("HTTPS://siem.example/in"), &refused),
-        "destination refused"
+        refusal_words(Some("https://u:p@/x"), &refused),
+        "observability.request_log_webhook_url is not a valid URL: empty host"
+    );
+    assert_eq!(
+        refusal_words(Some("HTTPS://u:p@169.254.169.254/in"), &refused),
+        "observability.request_log_webhook_url must not target a loopback/link-local/private/CGNAT/\
+         cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/in'"
     );
     assert_eq!(
         refusal_words(Some("http://siem.example/in"), &ConnFailure::Unarmed),
