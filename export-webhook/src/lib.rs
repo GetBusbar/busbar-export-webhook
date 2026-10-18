@@ -388,16 +388,26 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
-/// BUSBAR-7070's words for a refused target. When the host refused it and the target is not an
-/// `https://` URL, the refusal is the scheme rule, and it is said in 1.5.5's words byte for byte
-/// (v1.5.5 `crates/busbar/src/observability.rs` `validate_webhook_url`; the scheme read without
-/// case, as there). Any other refusal is said in the host's words.
+/// BUSBAR-7070's words for a refused target, in 1.5.5's words byte for byte, in 1.5.5's order (v1.5.5
+/// `crates/busbar/src/observability.rs` `validate_webhook_url`): a target that is not an `https://`
+/// URL is the scheme rule (the scheme read without case); one that does not parse is an invalid
+/// URL; a parseable `https://` target the host refused is the destination guard, the only rule
+/// left on that path. Userinfo is masked as 1.5.5 masked it. A host that gave no verdict, or any
+/// failure that is not a refusal, is said in the host's words.
 pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
     match (url, refused) {
         (Some(u), ConnFailure::Refused(_)) if !is_https(u) => format!(
             "observability.request_log_webhook_url must be an https:// URL (got '{}')",
             mask_userinfo(u)
         ),
+        (Some(u), ConnFailure::Refused(_)) => match url::Url::parse(u) {
+            Err(e) => format!("observability.request_log_webhook_url is not a valid URL: {e}"),
+            Ok(_) => format!(
+                "observability.request_log_webhook_url must not target a loopback/link-local/\
+                 private/CGNAT/cloud-metadata host (SSRF guard); got '{}'",
+                mask_userinfo(u)
+            ),
+        },
         _ => refused.to_string(),
     }
 }
