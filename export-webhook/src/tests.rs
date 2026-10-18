@@ -556,15 +556,19 @@ fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
     }
 }
 
-/// THE SETTINGS SCHEMA MARKS THE AUTH HEADER'S VALUE SECRET (Q128 export-webhook M2, ruling: busbar
-/// pack accepts a nested `x-busbar-secret` marker and resolves it at open). The schema the release
-/// signs in names exactly the settings grammar's keys, and `auth_header.value` is the one marked
-/// field. RED before the fix: the plugin stated no schema, so nothing host-side could treat the
-/// token as secret.
+/// THE SETTINGS SCHEMA IS ONE THE 1.5.5 PACK RULES ACCEPT (Q128 export-webhook M2, ruling
+/// 2026-10-18 (B)): it names exactly the settings grammar's keys, and an `x-busbar-secret` marker
+/// sits only on a direct root property, as 1.5.5's `busbar-plugin-pack` requires ("only allowed on a
+/// direct root-level property", busbar qa/evidence/inventory/1.5.5-plugins-stores.md:1972). The
+/// auth header's value is nested, so it carries no marker: it is protected by the redacted `Debug`
+/// below and by the host's whole-bag settings redaction. Nor does the schema claim a secret
+/// reference resolves at open: an export's settings are not resolved. RED before the fix: the
+/// schema marked `auth_header.value`, a declaration the release could not pack.
 #[test]
-fn the_settings_schema_marks_the_auth_header_value_secret() {
-    let schema: serde_json::Value = serde_json::from_str(include_str!("../settings.schema.json"))
-        .expect("the settings schema is JSON");
+fn the_settings_schema_is_one_the_pack_rules_accept() {
+    let text = include_str!("../settings.schema.json");
+    let schema: serde_json::Value =
+        serde_json::from_str(text).expect("the settings schema is JSON");
     let props = schema["properties"].as_object().expect("root properties");
     let mut keys: Vec<&str> = props.keys().map(String::as_str).collect();
     keys.sort_unstable();
@@ -577,11 +581,35 @@ fn the_settings_schema_marks_the_auth_header_value_secret() {
             "url"
         ]
     );
+    /// Every marker below the root's own properties.
+    fn nested_markers(v: &serde_json::Value, depth: usize, found: &mut usize) {
+        match v {
+            serde_json::Value::Object(m) => {
+                if depth > 2 && m.get("x-busbar-secret").is_some() {
+                    *found += 1;
+                }
+                for child in m.values() {
+                    nested_markers(child, depth + 1, found);
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for child in a {
+                    nested_markers(child, depth + 1, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = 0;
+    nested_markers(&schema, 0, &mut found);
     assert_eq!(
-        schema["properties"]["auth_header"]["properties"]["value"]["x-busbar-secret"],
-        true
+        found, 0,
+        "a nested x-busbar-secret marker 1.5.5's pack refuses"
     );
-    assert_eq!(props["url"].get("x-busbar-secret"), None);
+    assert!(
+        !text.contains("resolves at open"),
+        "an export's settings are not resolved"
+    );
 }
 
 /// THE AUTH HEADER'S VALUE NEVER RENDERS THROUGH `Debug` (Q128 export-webhook M2: "the secret
