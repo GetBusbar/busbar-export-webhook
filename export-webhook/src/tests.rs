@@ -642,3 +642,20 @@ fn the_auth_header_value_is_redacted_from_debug() {
         );
     }
 }
+
+/// THE TARGET URL'S USERINFO NEVER RENDERS THROUGH `Debug` (§11.13): a `user:password@` in the url is
+/// sent as Basic credentials, so formatting the settings masks it as every line this sink writes
+/// does ([`mask_userinfo`]). RED before the fix: `Debug` was derived over `WebhookSettings::url`.
+#[test]
+fn the_url_userinfo_is_masked_in_debug() {
+    let settings = WebhookSettings {
+        url: "https://ops:hunter2@siem.example/in".into(),
+        auth_header: None,
+        max_inflight_deliveries: 1,
+        delivery_timeout_secs: 1,
+    };
+    for text in [format!("{settings:?}"), format!("{settings:#?}")] {
+        assert!(!text.contains("hunter2"), "the password leaked: {text}");
+        assert!(text.contains("siem.example"), "the host is kept: {text}");
+    }
+}
