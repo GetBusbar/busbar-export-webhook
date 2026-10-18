@@ -31,12 +31,23 @@ pub struct WebhookSettings {
     pub delivery_timeout_secs: u64,
 }
 
-/// One `{ name, value }` auth header for a webhook export instance.
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+/// One `{ name, value }` auth header for a webhook export instance. Its `value` is the credential:
+/// `Debug` names the header and prints the value as `<redacted>`, so no formatted settings, header
+/// or instance carries it.
+#[derive(Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ExportAuthHeader {
     pub name: String,
     pub value: String,
+}
+
+impl std::fmt::Debug for ExportAuthHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportAuthHeader")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .finish()
+    }
 }
 
 /// The default in-flight bound per instance.
