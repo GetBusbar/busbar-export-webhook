@@ -194,6 +194,104 @@ fn a_delivery_posts_the_line() {
     assert_eq!(request(&bare, b"{}").timeout_ms, 2000);
 }
 
+/// RED (audit export-webhook #1, ARCHITECT ruling (c)): PARITY WITH 1.5.5. A target URL carrying a
+/// userinfo is sent as 1.5.5's reqwest 0.12 sent it (`RequestBuilder::new` -> `extract_authority`
+/// -> `basic_auth`; reqwest-0.12.28 src/async_impl/request.rs:169-183, :581-605, src/util.rs:4-25):
+/// `authorization: Basic` and the padded standard base64 of `{user}:{password}`, each half
+/// percent-decoded; a user alone as `{user}:`, a password alone as `:{password}`; a username that
+/// does not decode to UTF-8 sends no field, and a password that does not is left out.
+#[test]
+fn a_userinfo_in_the_url_is_sent_as_basic_as_1_5_5_sent_it() {
+    for (url, sent) in [
+        (
+            "https://user:pass@siem.example/in",
+            Some("Basic dXNlcjpwYXNz"),
+        ),
+        (
+            "https://Aladdin:open%20sesame@siem.example/in",
+            Some("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="),
+        ),
+        ("https://user@siem.example/in", Some("Basic dXNlcjo=")),
+        ("https://user:@siem.example/in", Some("Basic dXNlcjo=")),
+        ("https://:pass@siem.example/in", Some("Basic OnBhc3M=")),
+        (
+            "https://us%40er:p%3Ass%20w@siem.example/in",
+            Some("Basic dXNAZXI6cDpzcyB3"),
+        ),
+        (
+            "https://jos%C3%A9:pw@siem.example/in",
+            Some("Basic am9zw6k6cHc="),
+        ),
+        (
+            "https://jos\u{e9}:pw@siem.example/in",
+            Some("Basic am9zw6k6cHc="),
+        ),
+        ("https://a%zz:b@siem.example/in", Some("Basic YSV6ejpi")),
+        ("https://u:%FF@siem.example/in", Some("Basic dTo=")),
+        ("https://%FF:pw@siem.example/in", None),
+        ("https://siem.example/in", None),
+        ("not a url", None),
+    ] {
+        assert_eq!(
+            basic_authorization(url).as_deref(),
+            sent.map(str::as_bytes),
+            "{url}"
+        );
+    }
+    // The base64 is the padded standard alphabet (RFC 4648 section 10's vectors).
+    for (plain, encoded) in [
+        ("", ""),
+        ("f", "Zg=="),
+        ("fo", "Zm8="),
+        ("foo", "Zm9v"),
+        ("foob", "Zm9vYg=="),
+        ("fooba", "Zm9vYmE="),
+        ("foobar", "Zm9vYmFy"),
+    ] {
+        assert_eq!(base64(plain.as_bytes()), encoded, "{plain}");
+    }
+    assert_eq!(base64(&[0xfb, 0xff, 0xbf]), "+/+/");
+}
+
+/// RED (audit export-webhook #1, ARCHITECT ruling (c)): the userinfo's field rides every POST
+/// first, then `content-type`, then a configured auth header, as 1.5.5's `HeaderMap` held them —
+/// a configured header ALSO named `Authorization` (any case) is sent too, right after the
+/// userinfo's, so the receiver reads both, the userinfo's first, as it did from 1.5.5. The target
+/// is the path and query, never the userinfo.
+#[test]
+fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
+    let basic = (b"authorization".to_vec(), b"Basic dXNlcjpwYXNz".to_vec());
+    let json = (b"content-type".to_vec(), b"application/json".to_vec());
+    let both = settings(json!({
+        "url": "https://user:pass@siem.example/in?k=v",
+        "auth_header": {"name": "Authorization", "value": "Bearer x"}
+    }));
+    let r = request(&both, b"{}");
+    assert_eq!(
+        r.fields,
+        vec![
+            basic.clone(),
+            (b"Authorization".to_vec(), b"Bearer x".to_vec()),
+            json.clone(),
+        ]
+    );
+    assert_eq!(r.target, b"/in?k=v".to_vec());
+    let other = settings(json!({
+        "url": "https://user:pass@siem.example/in",
+        "auth_header": {"name": "X-Api-Key", "value": "k"}
+    }));
+    assert_eq!(
+        request(&other, b"{}").fields,
+        vec![
+            basic.clone(),
+            json.clone(),
+            (b"X-Api-Key".to_vec(), b"k".to_vec()),
+        ]
+    );
+    let alone = settings(json!({"url": "https://user:pass@siem.example/in"}));
+    assert_eq!(request(&alone, b"{}").fields, vec![basic, json]);
+}
+
 /// A non-2xx answer and a transport failure each drop the line and raise their code at WARN (1.5.5's
 /// `warn_webhook_delivery_failed`), with the fields in the compiled-in site's order, the target's
 /// userinfo masked.
@@ -409,4 +507,79 @@ fn ready_asks_the_verdict_at_boot_and_never_refuses_it() {
         0,
         "asked once"
     );
+}
+
+/// RED (audit export-webhook #4): PARITY WITH 1.5.5, which added the configured auth header only
+/// when `HeaderName::from_bytes` and `HeaderValue::from_str` both took it and otherwise POSTed the
+/// line without it (v1.5.5 `crates/busbar/src/export/webhook.rs` `deliver_logs`). A name that is not
+/// an RFC 9110 token, or a value with a control byte, leaves the header out, and the line is still
+/// sent; a value with a tab or a non-ASCII byte is kept, as `HeaderValue::from_str` kept it.
+#[test]
+fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
+    let json = (b"content-type".to_vec(), b"application/json".to_vec());
+    for (name, value) in [
+        ("Bad Name", "Bearer x"),
+        ("", "Bearer x"),
+        ("X-K\u{e9}y", "k"),
+        ("Authorization:", "k"),
+        ("Authorization", "Bearer x\r\nX-Injected: 1"),
+        ("Authorization", "Bearer \u{7f}"),
+        ("Authorization", "Bearer \u{0}"),
+    ] {
+        let s = settings(json!({
+            "url": "https://siem.example/in",
+            "auth_header": {"name": name, "value": value}
+        }));
+        assert_eq!(
+            request(&s, b"{}").fields,
+            vec![json.clone()],
+            "{name:?}: {value:?}"
+        );
+    }
+    for (name, value) in [
+        ("X-Api-Key", "k\tv"),
+        ("x!#$%&'*+-.^_`|~1", "caf\u{e9} \"ok\""),
+        ("Authorization", ""),
+    ] {
+        let s = settings(json!({
+            "url": "https://siem.example/in",
+            "auth_header": {"name": name, "value": value}
+        }));
+        assert_eq!(
+            request(&s, b"{}").fields,
+            vec![
+                json.clone(),
+                (name.as_bytes().to_vec(), value.as_bytes().to_vec())
+            ],
+            "{name:?}: {value:?}"
+        );
+    }
+}
+
+/// THE SETTINGS SCHEMA MARKS THE AUTH HEADER'S VALUE SECRET (Q128 export-webhook M2, ruling: busbar
+/// pack accepts a nested `x-busbar-secret` marker and resolves it at open). The schema the release
+/// signs in names exactly the settings grammar's keys, and `auth_header.value` is the one marked
+/// field. RED before the fix: the plugin stated no schema, so nothing host-side could treat the
+/// token as secret.
+#[test]
+fn the_settings_schema_marks_the_auth_header_value_secret() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!("../settings.schema.json"))
+        .expect("the settings schema is JSON");
+    let props = schema["properties"].as_object().expect("root properties");
+    let mut keys: Vec<&str> = props.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "auth_header",
+            "delivery_timeout_secs",
+            "max_inflight_deliveries",
+            "url"
+        ]
+    );
+    assert_eq!(
+        schema["properties"]["auth_header"]["properties"]["value"]["x-busbar-secret"],
+        true
+    );
+    assert_eq!(props["url"].get("x-busbar-secret"), None);
 }
