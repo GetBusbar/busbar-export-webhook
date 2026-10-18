@@ -556,3 +556,31 @@ fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
         );
     }
 }
+
+/// THE SETTINGS SCHEMA MARKS THE AUTH HEADER'S VALUE SECRET (Q128 export-webhook M2, ruling: busbar
+/// pack accepts a nested `x-busbar-secret` marker and resolves it at open). The schema the release
+/// signs in names exactly the settings grammar's keys, and `auth_header.value` is the one marked
+/// field. RED before the fix: the plugin stated no schema, so nothing host-side could treat the
+/// token as secret.
+#[test]
+fn the_settings_schema_marks_the_auth_header_value_secret() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!("../settings.schema.json"))
+        .expect("the settings schema is JSON");
+    let props = schema["properties"].as_object().expect("root properties");
+    let mut keys: Vec<&str> = props.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "auth_header",
+            "delivery_timeout_secs",
+            "max_inflight_deliveries",
+            "url"
+        ]
+    );
+    assert_eq!(
+        schema["properties"]["auth_header"]["properties"]["value"]["x-busbar-secret"],
+        true
+    );
+    assert_eq!(props["url"].get("x-busbar-secret"), None);
+}
