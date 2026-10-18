@@ -29,8 +29,7 @@
 //! (`check`, after the limits). Every line the sink raises is logged with the catalogue's `diag`
 //! banner field; the door's call capture carries it to the instance's plugin log (THE DESIGN §11.2).
 //!
-//! `deny`, not `forbid`: the export kind's SDK lends no safe reader of `check`'s instance list, so
-//! [`instances`] reads it — the one reviewed `unsafe` here.
+//! No `unsafe`: `check`'s instance list is read through the SDK's safe lend (`instances()`).
 
 #![deny(unsafe_code)]
 
@@ -74,8 +73,9 @@ const TRANSPORT_ERROR: &str = "BUSBAR-7072";
 const TARGET_FROM: &str = "settings.url";
 
 /// The in-flight ceiling this sink declares: no bound of its own. The bound is the operator's
-/// `max_inflight_deliveries` (1.5.5's, 64 when unset), which the host applies per instance; `check`
-/// refuses one past [`MAX_PERMITS`] or below 1.
+/// `max_inflight_deliveries` (1.5.5's, 64 when unset), which the host applies per instance, clamped
+/// to at least one permit; `check` refuses the LARGEST instance's bound past [`MAX_PERMITS`] or below
+/// 1, 1.5.5's fold ([`check`]).
 const MAX_INFLIGHT: u32 = u32::MAX;
 /// The one need's index in the Statement.
 const NEED: u32 = 0;
@@ -531,39 +531,16 @@ fn mask_unparsed(url: &str) -> String {
 }
 
 /// `check`'s instances, `(name, settings)` in configuration order (settings that are not JSON read
-/// as `null`, which no check parses).
-#[allow(unsafe_code)]
+/// as `null`, which no check parses), through the SDK's safe lend.
 fn instances(input: Lent<'_, CheckIn>) -> Vec<(String, serde_json::Value)> {
-    /// `len` bytes at `p`, or none.
-    ///
-    /// # Safety
-    /// A non-NULL `p` points at `len` readable bytes, valid for the call.
-    unsafe fn lent<'a>(p: *const u8, len: usize) -> &'a [u8] {
-        if p.is_null() || len == 0 {
-            return &[];
-        }
-        // SAFETY: the caller's contract.
-        unsafe { std::slice::from_raw_parts(p, len) }
-    }
-    let i = input.get();
-    if i.instances.is_null() || i.instances_len == 0 {
-        return Vec::new();
-    }
-    // SAFETY: the host lends `instances_len` `CheckInstance`s at `instances`, and every string and
-    // blob they name, for the call (`abi::export::CheckIn`); `input` is lent for the call.
-    let list = unsafe { std::slice::from_raw_parts(i.instances, i.instances_len) };
-    list.iter()
+    input
+        .instances()
+        .iter()
         .map(|c| {
-            // SAFETY: as above.
-            let (name, settings) = unsafe {
-                (
-                    lent(c.name.ptr, c.name.len),
-                    lent(c.settings.ptr, c.settings.len),
-                )
-            };
             (
-                String::from_utf8_lossy(name).into_owned(),
-                serde_json::from_slice(settings).unwrap_or(serde_json::Value::Null),
+                String::from_utf8_lossy(c.field(|c| &c.name).bytes()).into_owned(),
+                serde_json::from_slice(c.field(|c| &c.settings).bytes())
+                    .unwrap_or(serde_json::Value::Null),
             )
         })
         .collect()
