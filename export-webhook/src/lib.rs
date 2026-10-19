@@ -57,8 +57,10 @@ pub const ALIAS: &str = "request-log-webhook";
 /// The manifest `declares` section (`--declares-file` for the signed tarball).
 pub const DECLARES: &str = include_str!("../declares.json");
 
-/// The in-flight ceiling: the host's semaphore holds at most `usize::MAX >> 3` permits, and a
-/// larger bound panics where the gate is built rather than failing validation.
+/// The in-flight ceiling `check` holds the largest instance's bound to, with 1.5.5's refusal text:
+/// 1.5.5's limit (`tokio::sync::Semaphore::MAX_PERMITS`, `usize::MAX >> 3`, past which its gate
+/// panicked), kept as parity. The 1.6.0 host builds no semaphore: its export axis saturates the
+/// bound into a `u32`, clamped to at least one, and caps the instance's in-flight deliveries at it.
 const MAX_PERMITS: usize = usize::MAX >> 3;
 /// The ceiling every duration in a busbar configuration is bounded by (30 years, in seconds).
 const MAX_DURATION_SECS: u64 = 30 * 365 * 86_400;
@@ -74,7 +76,7 @@ const TARGET_FROM: &str = "settings.url";
 
 /// The in-flight ceiling this sink declares: no bound of its own. The bound is the operator's
 /// `max_inflight_deliveries` (1.5.5's, 64 when unset), which the host applies per instance, clamped
-/// to at least one permit; `check` refuses the LARGEST instance's bound past [`MAX_PERMITS`] or below
+/// to at least one; `check` refuses the LARGEST instance's bound past [`MAX_PERMITS`] or below
 /// 1, 1.5.5's fold ([`check`]).
 const MAX_INFLIGHT: u32 = u32::MAX;
 /// The one need's index in the Statement.
@@ -333,60 +335,17 @@ pub fn basic_authorization(url: &str) -> Option<Vec<u8>> {
 }
 
 /// `%XX` (two hex digits, either case) decoded to its byte; any other byte, a `%` not followed by
-/// two hex digits included, kept as it is (percent-encoding's `percent_decode`).
+/// two hex digits included, kept as it is: the `percent-encoding` crate's `percent_decode`, the
+/// decoder 1.5.5's reqwest used through `url`.
 fn percent_decode(s: &[u8]) -> Vec<u8> {
-    fn hex(b: u8) -> Option<u8> {
-        match b {
-            b'0'..=b'9' => Some(b - b'0'),
-            b'a'..=b'f' => Some(b - b'a' + 10),
-            b'A'..=b'F' => Some(b - b'A' + 10),
-            _ => None,
-        }
-    }
-    let mut out = Vec::with_capacity(s.len());
-    let mut i = 0;
-    while i < s.len() {
-        if s[i] == b'%' {
-            let pair = s
-                .get(i + 1)
-                .copied()
-                .and_then(hex)
-                .zip(s.get(i + 2).copied().and_then(hex));
-            if let Some((high, low)) = pair {
-                out.push((high << 4) | low);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(s[i]);
-        i += 1;
-    }
-    out
+    percent_encoding::percent_decode(s).collect()
 }
 
-/// The standard base64 alphabet, padded (RFC 4648 §4; base64's `STANDARD` engine).
+/// The standard base64 alphabet, padded (RFC 4648 §4): the `base64` crate's `STANDARD` engine,
+/// the encoder 1.5.5's reqwest `basic_auth` used.
 fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let a = chunk[0];
-        let b = chunk.get(1).copied().unwrap_or(0);
-        let c = chunk.get(2).copied().unwrap_or(0);
-        let sextets = [
-            a >> 2,
-            ((a & 0x03) << 4) | (b >> 4),
-            ((b & 0x0f) << 2) | (c >> 6),
-            c & 0x3f,
-        ];
-        for (i, sextet) in sextets.into_iter().enumerate() {
-            out.push(if i <= chunk.len() {
-                char::from(ALPHABET[usize::from(sextet)])
-            } else {
-                '='
-            });
-        }
-    }
-    out
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// BUSBAR-7070's words for a refused target, in 1.5.5's words byte for byte, in 1.5.5's order (v1.5.5
