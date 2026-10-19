@@ -16,8 +16,10 @@
 //! need whose target is the `url` setting (the host drops its userinfo), under the open-web egress
 //! class (public destinations over a secure connection only), and the request rides the SDK's
 //! framed `exchange` under the instance's `delivery_timeout_secs`. The sink never dials. A delivery
-//! is fire-and-forget and never retried: a non-2xx answer or a transport failure drops that one line
-//! and raises BUSBAR-7071 / BUSBAR-7072 at WARN, as 1.5.5 warned them.
+//! is judged on the reply's HEAD, as 1.5.5 judged it: the exchange is head-only, so the body is
+//! never read and a slow or huge body after a 2xx is a delivery made. A delivery is fire-and-forget
+//! and never retried: a non-2xx answer or a transport failure drops that one line and raises
+//! BUSBAR-7071 / BUSBAR-7072 at WARN, as 1.5.5 warned them.
 //!
 //! **Admission.** The door states `ready`, so the host's verdict on the target (the need's admission
 //! at bind) is asked at boot, before the instance serves; a refused target raises BUSBAR-7070 (`…; disabling this webhook exporter`,
@@ -29,8 +31,7 @@
 //! (`check`, after the limits). Every line the sink raises is logged with the catalogue's `diag`
 //! banner field; the door's call capture carries it to the instance's plugin log (THE DESIGN §11.2).
 //!
-//! `deny`, not `forbid`: the export kind's SDK lends no safe reader of `check`'s instance list, so
-//! [`instances`] reads it — the one reviewed `unsafe` here.
+//! No `unsafe`: `check`'s instance list is read through the SDK's safe lend (`instances()`).
 
 #![deny(unsafe_code)]
 
@@ -45,7 +46,7 @@ use busbar_contract::abi::export::{
 use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement, REWRITE_ALIAS};
-use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
+use busbar_contract::abi::sdk::conn::{Answer, ConnFailure, Connector, Host};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
@@ -74,8 +75,9 @@ const TRANSPORT_ERROR: &str = "BUSBAR-7072";
 const TARGET_FROM: &str = "settings.url";
 
 /// The in-flight ceiling this sink declares: no bound of its own. The bound is the operator's
-/// `max_inflight_deliveries` (1.5.5's, 64 when unset), which the host applies per instance; `check`
-/// refuses one past [`MAX_PERMITS`] or below 1.
+/// `max_inflight_deliveries` (1.5.5's, 64 when unset), which the host applies per instance, clamped
+/// to at least one permit; `check` refuses the LARGEST instance's bound past [`MAX_PERMITS`] or below
+/// 1, 1.5.5's fold ([`check`]).
 const MAX_INFLIGHT: u32 = u32::MAX;
 /// The one need's index in the Statement.
 const NEED: u32 = 0;
@@ -162,7 +164,8 @@ pub struct Webhook {
     /// Its settings, when they parse (the host refused the configuration otherwise; a sink opened
     /// only to validate or check settings still opens).
     settings: RwLock<Option<Settings>>,
-    /// The host's verdict on the target: `None` until the first delivery asks.
+    /// The host's verdict on the target: `None` until `ready` asks it, at boot; a reload's
+    /// `refresh` clears it, and the next delivery asks afresh.
     live: Mutex<Option<bool>>,
 }
 
@@ -388,16 +391,26 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
-/// BUSBAR-7070's words for a refused target. When the host refused it and the target is not an
-/// `https://` URL, the refusal is the scheme rule, and it is said in 1.5.5's words byte for byte
-/// (v1.5.5 `crates/busbar/src/observability.rs` `validate_webhook_url`; the scheme read without
-/// case, as there). Any other refusal is said in the host's words.
+/// BUSBAR-7070's words for a refused target, in 1.5.5's words byte for byte, in 1.5.5's order (v1.5.5
+/// `crates/busbar/src/observability.rs` `validate_webhook_url`): a target that is not an `https://`
+/// URL is the scheme rule (the scheme read without case); one that does not parse is an invalid
+/// URL; a parseable `https://` target the host refused is the destination guard, the only rule
+/// left on that path. Userinfo is masked as 1.5.5 masked it. A host that gave no verdict, or any
+/// failure that is not a refusal, is said in the host's words.
 pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
     match (url, refused) {
         (Some(u), ConnFailure::Refused(_)) if !is_https(u) => format!(
             "observability.request_log_webhook_url must be an https:// URL (got '{}')",
             mask_userinfo(u)
         ),
+        (Some(u), ConnFailure::Refused(_)) => match url::Url::parse(u) {
+            Err(e) => format!("observability.request_log_webhook_url is not a valid URL: {e}"),
+            Ok(_) => format!(
+                "observability.request_log_webhook_url must not target a loopback/link-local/\
+                 private/CGNAT/cloud-metadata host (SSRF guard); got '{}'",
+                mask_userinfo(u)
+            ),
+        },
         _ => refused.to_string(),
     }
 }
@@ -406,6 +419,23 @@ pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
 fn is_https(url: &str) -> bool {
     url.split_once("://")
         .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
+}
+
+/// ONE LINE'S DELIVERY: the exchange [`Deliver`] runs to POST `line` ([`request`]). It is
+/// HEAD-ONLY (`Exchange::head_only`): the delivery is judged on the reply's head and its body is
+/// never read, as 1.5.5's `deliver_logs` judged it and dropped the response unread, so a slow or
+/// huge body after a 2xx raises no BUSBAR-7072.
+///
+/// # Errors
+/// The request does not frame (a field the framer refuses): nothing is sent.
+pub fn delivery(s: &Settings, line: &[u8]) -> Result<Exchange, ConnFailure> {
+    Exchange::request(request(s, line)).map(Exchange::head_only)
+}
+
+/// Run one line's [`delivery`] on `c`, over the sink's one need: PENDING until it is judged, then
+/// what [`report`] reports.
+pub fn post(c: &mut Connector<'_>, ex: &mut Exchange) -> Answer<ExchangeResponse> {
+    exchange(c, ex, NEED, None)
 }
 
 /// What became of one line: nothing to say for a 2xx; BUSBAR-7071 for any other status,
@@ -434,6 +464,13 @@ pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
 /// ([`CheckPhase::Limits`]) the in-flight bound — one bound over the instances, the largest
 /// configured (64 with none), so a generous instance is never refused for a stingy sibling; AFTER
 /// them ([`CheckPhase::Instances`]) each instance's delivery deadline, numbered by its position.
+///
+/// THE FOLD IS 1.5.5'S, KEPT AS PARITY: 1.5.5 validated only the largest instance's bound (v1.5.5
+/// crates/busbar/src/config/mod.rs:4003-4008, "the shared bound must accommodate the most
+/// permissive sink"; config_validate/mod.rs:1406-1420) and clamped each target's gate to at least
+/// one permit (export/webhook.rs:97-104), as the host's export axis clamps each instance's bound
+/// now. An instance stating `0` beside a larger sibling therefore validates and runs at one permit;
+/// refusing it per instance would be a customer-visible tightening the owner has not signed.
 pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
     let parsed: Vec<Settings> = instances
         .iter()
@@ -524,39 +561,16 @@ fn mask_unparsed(url: &str) -> String {
 }
 
 /// `check`'s instances, `(name, settings)` in configuration order (settings that are not JSON read
-/// as `null`, which no check parses).
-#[allow(unsafe_code)]
+/// as `null`, which no check parses), through the SDK's safe lend.
 fn instances(input: Lent<'_, CheckIn>) -> Vec<(String, serde_json::Value)> {
-    /// `len` bytes at `p`, or none.
-    ///
-    /// # Safety
-    /// A non-NULL `p` points at `len` readable bytes, valid for the call.
-    unsafe fn lent<'a>(p: *const u8, len: usize) -> &'a [u8] {
-        if p.is_null() || len == 0 {
-            return &[];
-        }
-        // SAFETY: the caller's contract.
-        unsafe { std::slice::from_raw_parts(p, len) }
-    }
-    let i = input.get();
-    if i.instances.is_null() || i.instances_len == 0 {
-        return Vec::new();
-    }
-    // SAFETY: the host lends `instances_len` `CheckInstance`s at `instances`, and every string and
-    // blob they name, for the call (`abi::export::CheckIn`); `input` is lent for the call.
-    let list = unsafe { std::slice::from_raw_parts(i.instances, i.instances_len) };
-    list.iter()
+    input
+        .instances()
+        .iter()
         .map(|c| {
-            // SAFETY: as above.
-            let (name, settings) = unsafe {
-                (
-                    lent(c.name.ptr, c.name.len),
-                    lent(c.settings.ptr, c.settings.len),
-                )
-            };
             (
-                String::from_utf8_lossy(name).into_owned(),
-                serde_json::from_slice(settings).unwrap_or(serde_json::Value::Null),
+                String::from_utf8_lossy(c.field(|c| &c.name).bytes()).into_owned(),
+                serde_json::from_slice(c.field(|c| &c.settings).bytes())
+                    .unwrap_or(serde_json::Value::Null),
             )
         })
         .collect()
@@ -617,11 +631,11 @@ impl SafeSlot for Deliver {
                     let mut c = host.connector_from(instance.ticket(), at.issued);
                     let started = match at.exchange.take() {
                         Some(ex) => Ok(ex),
-                        None => Exchange::request(request(&s, line)),
+                        None => delivery(&s, line),
                     };
                     match started {
                         Err(e) => Err(e),
-                        Ok(mut ex) => match exchange(&mut c, &mut ex, NEED, None) {
+                        Ok(mut ex) => match post(&mut c, &mut ex) {
                             Poll::Pending => {
                                 at.exchange = Some(ex);
                                 instance.park(at);

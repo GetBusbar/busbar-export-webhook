@@ -10,8 +10,10 @@ use serde::Deserialize;
 /// `observability` webhook keys. Also absorbs the retired `generic-webhook` exporter: its ONLY extra
 /// over this one was `auth_header:`, which is now just a setting here, and its other reason to exist
 /// (a SECOND webhook target) is what the named-instance map itself provides. The FIELD ORDER is the
-/// order serde names them in an unknown-field refusal: do not reorder.
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+/// order serde names them in an unknown-field refusal: do not reorder. `Debug` carries no
+/// credential: the url's userinfo is masked as every line the sink writes masks it, and the auth
+/// header's value is redacted.
+#[derive(Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WebhookSettings {
     /// The webhook target URL — REQUIRED, `https://`-only, refused by the host's policy when it
@@ -31,12 +33,34 @@ pub struct WebhookSettings {
     pub delivery_timeout_secs: u64,
 }
 
-/// One `{ name, value }` auth header for a webhook export instance.
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+impl std::fmt::Debug for WebhookSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookSettings")
+            .field("url", &crate::mask_userinfo(&self.url))
+            .field("auth_header", &self.auth_header)
+            .field("max_inflight_deliveries", &self.max_inflight_deliveries)
+            .field("delivery_timeout_secs", &self.delivery_timeout_secs)
+            .finish()
+    }
+}
+
+/// One `{ name, value }` auth header for a webhook export instance. Its `value` is the credential:
+/// `Debug` names the header and prints the value as `<redacted>`, so no formatted settings, header
+/// or instance carries it.
+#[derive(Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ExportAuthHeader {
     pub name: String,
     pub value: String,
+}
+
+impl std::fmt::Debug for ExportAuthHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportAuthHeader")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .finish()
+    }
 }
 
 /// The default in-flight bound per instance.

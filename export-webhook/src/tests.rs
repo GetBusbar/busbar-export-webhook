@@ -337,9 +337,10 @@ fn the_success_boundary_is_200_to_299() {
     }
 }
 
-/// A target the host refused is named in 1.5.5's words when the refusal is the `https://` scheme rule
-/// (the scheme read without case; userinfo masked as 1.5.5 masked it), and in the host's words
-/// otherwise; a host that gave no verdict is named as such.
+/// A target the host refused is named in 1.5.5's words, as 1.5.5's `validate_webhook_url` named it:
+/// the `https://` scheme rule (the scheme read without case), a URL that does not parse, or the
+/// destination guard, the userinfo masked as 1.5.5 masked it; a host that gave no verdict is named
+/// as such.
 #[test]
 fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     let refused = ConnFailure::Refused("destination refused".into());
@@ -351,9 +352,17 @@ fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
         refusal_words(Some("HTTP://u:p@siem.example/in"), &refused),
         "observability.request_log_webhook_url must be an https:// URL (got 'http://***@siem.example/in')"
     );
+    // RED (Q128 export-webhook LOW, src/lib.rs:391-403): 1.5.5 named the other two refusals on this
+    // path in its own words too (v1.5.5 observability.rs validate_webhook_url): a URL that does not
+    // parse, and a parseable https target the destination guard refused.
     assert_eq!(
-        refusal_words(Some("HTTPS://siem.example/in"), &refused),
-        "destination refused"
+        refusal_words(Some("https://u:p@/x"), &refused),
+        "observability.request_log_webhook_url is not a valid URL: empty host"
+    );
+    assert_eq!(
+        refusal_words(Some("HTTPS://u:p@169.254.169.254/in"), &refused),
+        "observability.request_log_webhook_url must not target a loopback/link-local/private/CGNAT/\
+         cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/in'"
     );
     assert_eq!(
         refusal_words(Some("http://siem.example/in"), &ConnFailure::Unarmed),
@@ -556,15 +565,19 @@ fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
     }
 }
 
-/// THE SETTINGS SCHEMA MARKS THE AUTH HEADER'S VALUE SECRET (Q128 export-webhook M2, ruling: busbar
-/// pack accepts a nested `x-busbar-secret` marker and resolves it at open). The schema the release
-/// signs in names exactly the settings grammar's keys, and `auth_header.value` is the one marked
-/// field. RED before the fix: the plugin stated no schema, so nothing host-side could treat the
-/// token as secret.
+/// THE SETTINGS SCHEMA IS ONE THE 1.5.5 PACK RULES ACCEPT (Q128 export-webhook M2, ruling
+/// 2026-10-18 (B)): it names exactly the settings grammar's keys, and an `x-busbar-secret` marker
+/// sits only on a direct root property, as 1.5.5's `busbar-plugin-pack` requires ("only allowed on a
+/// direct root-level property", busbar qa/evidence/inventory/1.5.5-plugins-stores.md:1972). The
+/// auth header's value is nested, so it carries no marker: it is protected by the redacted `Debug`
+/// below and by the host's whole-bag settings redaction. Nor does the schema claim a secret
+/// reference resolves at open: an export's settings are not resolved. RED before the fix: the
+/// schema marked `auth_header.value`, a declaration the release could not pack.
 #[test]
-fn the_settings_schema_marks_the_auth_header_value_secret() {
-    let schema: serde_json::Value = serde_json::from_str(include_str!("../settings.schema.json"))
-        .expect("the settings schema is JSON");
+fn the_settings_schema_is_one_the_pack_rules_accept() {
+    let text = include_str!("../settings.schema.json");
+    let schema: serde_json::Value =
+        serde_json::from_str(text).expect("the settings schema is JSON");
     let props = schema["properties"].as_object().expect("root properties");
     let mut keys: Vec<&str> = props.keys().map(String::as_str).collect();
     keys.sort_unstable();
@@ -577,9 +590,81 @@ fn the_settings_schema_marks_the_auth_header_value_secret() {
             "url"
         ]
     );
+    /// Every marker below the root's own properties.
+    fn nested_markers(v: &serde_json::Value, depth: usize, found: &mut usize) {
+        match v {
+            serde_json::Value::Object(m) => {
+                if depth > 2 && m.get("x-busbar-secret").is_some() {
+                    *found += 1;
+                }
+                for child in m.values() {
+                    nested_markers(child, depth + 1, found);
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for child in a {
+                    nested_markers(child, depth + 1, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = 0;
+    nested_markers(&schema, 0, &mut found);
     assert_eq!(
-        schema["properties"]["auth_header"]["properties"]["value"]["x-busbar-secret"],
-        true
+        found, 0,
+        "a nested x-busbar-secret marker 1.5.5's pack refuses"
     );
-    assert_eq!(props["url"].get("x-busbar-secret"), None);
+    assert!(
+        !text.contains("resolves at open"),
+        "an export's settings are not resolved"
+    );
+}
+
+/// THE AUTH HEADER'S VALUE NEVER RENDERS THROUGH `Debug` (Q128 export-webhook M2: "the secret
+/// handled as a secret ... never shown through Debug"): formatting the settings, the header or an
+/// instance holding them names the header and redacts its value. RED before the fix: `Debug` was
+/// derived over `ExportAuthHeader::value`.
+#[test]
+fn the_auth_header_value_is_redacted_from_debug() {
+    let header = ExportAuthHeader {
+        name: "Authorization".into(),
+        value: "Bearer s3cret-token".into(),
+    };
+    let settings = WebhookSettings {
+        url: "https://siem.example/in".into(),
+        auth_header: Some(header.clone()),
+        max_inflight_deliveries: 1,
+        delivery_timeout_secs: 1,
+    };
+    for text in [
+        format!("{header:?}"),
+        format!("{header:#?}"),
+        format!("{settings:?}"),
+        format!("{settings:#?}"),
+    ] {
+        assert!(!text.contains("s3cret"), "the value leaked: {text}");
+        assert!(text.contains("Authorization"), "the name is kept: {text}");
+        assert!(
+            text.contains("<redacted>"),
+            "the value is marked redacted: {text}"
+        );
+    }
+}
+
+/// THE TARGET URL'S USERINFO NEVER RENDERS THROUGH `Debug` (§11.13): a `user:password@` in the url is
+/// sent as Basic credentials, so formatting the settings masks it as every line this sink writes
+/// does ([`mask_userinfo`]). RED before the fix: `Debug` was derived over `WebhookSettings::url`.
+#[test]
+fn the_url_userinfo_is_masked_in_debug() {
+    let settings = WebhookSettings {
+        url: "https://ops:hunter2@siem.example/in".into(),
+        auth_header: None,
+        max_inflight_deliveries: 1,
+        delivery_timeout_secs: 1,
+    };
+    for text in [format!("{settings:?}"), format!("{settings:#?}")] {
+        assert!(!text.contains("hunter2"), "the password leaked: {text}");
+        assert!(text.contains("siem.example"), "the host is kept: {text}");
+    }
 }
