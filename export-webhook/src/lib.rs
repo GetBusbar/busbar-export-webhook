@@ -29,8 +29,7 @@
 //! (`check`, after the limits). Every line the sink raises is logged with the catalogue's `diag`
 //! banner field; the door's call capture carries it to the instance's plugin log (THE DESIGN §11.2).
 //!
-//! `deny`, not `forbid`: the export kind's SDK lends no safe reader of `check`'s instance list, so
-//! [`instances`] reads it — the one reviewed `unsafe` here.
+//! No `unsafe`: `check`'s instance list is read through the SDK's safe lend (`instances()`).
 
 #![deny(unsafe_code)]
 
@@ -40,7 +39,7 @@ use std::task::Poll;
 
 use busbar_contract::abi::export::{
     self, CheckIn, CheckOut, CheckPhase, DeliverIn, ExportStream, ScrapeIn, ScrapeOut, ServeIn,
-    ServeOut, StatusOut, Tail, CHECK_PHASE_LIMITS,
+    ServeOut, StatusOut, Tail, CHECK_PHASE_INSTANCES, CHECK_PHASE_LIMITS,
 };
 use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome, BLOB_JSON};
@@ -58,8 +57,10 @@ pub const ALIAS: &str = "request-log-webhook";
 /// The manifest `declares` section (`--declares-file` for the signed tarball).
 pub const DECLARES: &str = include_str!("../declares.json");
 
-/// The in-flight ceiling: the host's semaphore holds at most `usize::MAX >> 3` permits, and a
-/// larger bound panics where the gate is built rather than failing validation.
+/// The in-flight ceiling `check` holds the largest instance's bound to, with 1.5.5's refusal text:
+/// 1.5.5's limit (`tokio::sync::Semaphore::MAX_PERMITS`, `usize::MAX >> 3`, past which its gate
+/// panicked), kept as parity. The 1.6.0 host builds no semaphore: its export axis saturates the
+/// bound into a `u32`, clamped to at least one, and caps the instance's in-flight deliveries at it.
 const MAX_PERMITS: usize = usize::MAX >> 3;
 /// The ceiling every duration in a busbar configuration is bounded by (30 years, in seconds).
 const MAX_DURATION_SECS: u64 = 30 * 365 * 86_400;
@@ -67,6 +68,7 @@ const MAX_DURATION_SECS: u64 = 30 * 365 * 86_400;
 const DISABLED: &str = "BUSBAR-7070";
 const NON_2XX: &str = "BUSBAR-7071";
 const TRANSPORT_ERROR: &str = "BUSBAR-7072";
+const RELOAD_CUT: &str = "BUSBAR-7100";
 
 /// The config path the target comes from: the `url` setting (`settings.<key>`, the path the host's
 /// connection-table fill resolves, spec PB-100). A bare key resolves to nothing, and the host's
@@ -74,8 +76,9 @@ const TRANSPORT_ERROR: &str = "BUSBAR-7072";
 const TARGET_FROM: &str = "settings.url";
 
 /// The in-flight ceiling this sink declares: no bound of its own. The bound is the operator's
-/// `max_inflight_deliveries` (1.5.5's, 64 when unset), which the host applies per instance; `check`
-/// refuses one past [`MAX_PERMITS`] or below 1.
+/// `max_inflight_deliveries` (1.5.5's, 64 when unset), which the host applies per instance, clamped
+/// to at least one; `check` refuses the LARGEST instance's bound past [`MAX_PERMITS`] or below
+/// 1, 1.5.5's fold ([`check`]).
 const MAX_INFLIGHT: u32 = u32::MAX;
 /// The one need's index in the Statement.
 const NEED: u32 = 0;
@@ -162,7 +165,8 @@ pub struct Webhook {
     /// Its settings, when they parse (the host refused the configuration otherwise; a sink opened
     /// only to validate or check settings still opens).
     settings: RwLock<Option<Settings>>,
-    /// The host's verdict on the target: `None` until the first delivery asks.
+    /// The host's verdict on the target, asked once: at boot by `ready` (and again after a
+    /// `refresh` clears it, by the next delivery or readiness ask); `None` until then.
     live: Mutex<Option<bool>>,
 }
 
@@ -332,72 +336,39 @@ pub fn basic_authorization(url: &str) -> Option<Vec<u8>> {
 }
 
 /// `%XX` (two hex digits, either case) decoded to its byte; any other byte, a `%` not followed by
-/// two hex digits included, kept as it is (percent-encoding's `percent_decode`).
+/// two hex digits included, kept as it is: the `percent-encoding` crate's `percent_decode`, the
+/// decoder 1.5.5's reqwest used through `url`.
 fn percent_decode(s: &[u8]) -> Vec<u8> {
-    fn hex(b: u8) -> Option<u8> {
-        match b {
-            b'0'..=b'9' => Some(b - b'0'),
-            b'a'..=b'f' => Some(b - b'a' + 10),
-            b'A'..=b'F' => Some(b - b'A' + 10),
-            _ => None,
-        }
-    }
-    let mut out = Vec::with_capacity(s.len());
-    let mut i = 0;
-    while i < s.len() {
-        if s[i] == b'%' {
-            let pair = s
-                .get(i + 1)
-                .copied()
-                .and_then(hex)
-                .zip(s.get(i + 2).copied().and_then(hex));
-            if let Some((high, low)) = pair {
-                out.push((high << 4) | low);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(s[i]);
-        i += 1;
-    }
-    out
+    percent_encoding::percent_decode(s).collect()
 }
 
-/// The standard base64 alphabet, padded (RFC 4648 §4; base64's `STANDARD` engine).
+/// The standard base64 alphabet, padded (RFC 4648 §4): the `base64` crate's `STANDARD` engine,
+/// the encoder 1.5.5's reqwest `basic_auth` used.
 fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let a = chunk[0];
-        let b = chunk.get(1).copied().unwrap_or(0);
-        let c = chunk.get(2).copied().unwrap_or(0);
-        let sextets = [
-            a >> 2,
-            ((a & 0x03) << 4) | (b >> 4),
-            ((b & 0x0f) << 2) | (c >> 6),
-            c & 0x3f,
-        ];
-        for (i, sextet) in sextets.into_iter().enumerate() {
-            out.push(if i <= chunk.len() {
-                char::from(ALPHABET[usize::from(sextet)])
-            } else {
-                '='
-            });
-        }
-    }
-    out
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-/// BUSBAR-7070's words for a refused target. When the host refused it and the target is not an
-/// `https://` URL, the refusal is the scheme rule, and it is said in 1.5.5's words byte for byte
-/// (v1.5.5 `crates/busbar/src/observability.rs` `validate_webhook_url`; the scheme read without
-/// case, as there). Any other refusal is said in the host's words.
+/// BUSBAR-7070's words for a refused target, in 1.5.5's words byte for byte, in 1.5.5's order (v1.5.5
+/// `crates/busbar/src/observability.rs` `validate_webhook_url`): a target that is not an `https://`
+/// URL is the scheme rule (the scheme read without case); one that does not parse is an invalid
+/// URL; a parseable `https://` target the host refused is the destination guard, the only rule
+/// left on that path. Userinfo is masked as 1.5.5 masked it. A host that gave no verdict, or any
+/// failure that is not a refusal, is said in the host's words.
 pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
     match (url, refused) {
         (Some(u), ConnFailure::Refused(_)) if !is_https(u) => format!(
             "observability.request_log_webhook_url must be an https:// URL (got '{}')",
             mask_userinfo(u)
         ),
+        (Some(u), ConnFailure::Refused(_)) => match url::Url::parse(u) {
+            Err(e) => format!("observability.request_log_webhook_url is not a valid URL: {e}"),
+            Ok(_) => format!(
+                "observability.request_log_webhook_url must not target a loopback/link-local/\
+                 private/CGNAT/cloud-metadata host (SSRF guard); got '{}'",
+                mask_userinfo(u)
+            ),
+        },
         _ => refused.to_string(),
     }
 }
@@ -434,6 +405,13 @@ pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
 /// ([`CheckPhase::Limits`]) the in-flight bound — one bound over the instances, the largest
 /// configured (64 with none), so a generous instance is never refused for a stingy sibling; AFTER
 /// them ([`CheckPhase::Instances`]) each instance's delivery deadline, numbered by its position.
+///
+/// THE FOLD IS 1.5.5'S, KEPT AS PARITY: 1.5.5 validated only the largest instance's bound (v1.5.5
+/// crates/busbar/src/config/mod.rs:4003-4008, "the shared bound must accommodate the most
+/// permissive sink"; config_validate/mod.rs:1406-1420) and clamped each target's gate to at least
+/// one permit (export/webhook.rs:97-104), as the host's export axis clamps each instance's bound
+/// now. An instance stating `0` beside a larger sibling therefore validates and runs at one permit;
+/// refusing it per instance would be a customer-visible tightening the owner has not signed.
 pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
     let parsed: Vec<Settings> = instances
         .iter()
@@ -524,39 +502,16 @@ fn mask_unparsed(url: &str) -> String {
 }
 
 /// `check`'s instances, `(name, settings)` in configuration order (settings that are not JSON read
-/// as `null`, which no check parses).
-#[allow(unsafe_code)]
+/// as `null`, which no check parses), through the SDK's safe lend.
 fn instances(input: Lent<'_, CheckIn>) -> Vec<(String, serde_json::Value)> {
-    /// `len` bytes at `p`, or none.
-    ///
-    /// # Safety
-    /// A non-NULL `p` points at `len` readable bytes, valid for the call.
-    unsafe fn lent<'a>(p: *const u8, len: usize) -> &'a [u8] {
-        if p.is_null() || len == 0 {
-            return &[];
-        }
-        // SAFETY: the caller's contract.
-        unsafe { std::slice::from_raw_parts(p, len) }
-    }
-    let i = input.get();
-    if i.instances.is_null() || i.instances_len == 0 {
-        return Vec::new();
-    }
-    // SAFETY: the host lends `instances_len` `CheckInstance`s at `instances`, and every string and
-    // blob they name, for the call (`abi::export::CheckIn`); `input` is lent for the call.
-    let list = unsafe { std::slice::from_raw_parts(i.instances, i.instances_len) };
-    list.iter()
+    input
+        .instances()
+        .iter()
         .map(|c| {
-            // SAFETY: as above.
-            let (name, settings) = unsafe {
-                (
-                    lent(c.name.ptr, c.name.len),
-                    lent(c.settings.ptr, c.settings.len),
-                )
-            };
             (
-                String::from_utf8_lossy(name).into_owned(),
-                serde_json::from_slice(settings).unwrap_or(serde_json::Value::Null),
+                String::from_utf8_lossy(c.field(|c| &c.name).bytes()).into_owned(),
+                serde_json::from_slice(c.field(|c| &c.settings).bytes())
+                    .unwrap_or(serde_json::Value::Null),
             )
         })
         .collect()
@@ -565,9 +520,11 @@ fn instances(input: Lent<'_, CheckIn>) -> Vec<(String, serde_json::Value)> {
 /// The instance state every slot reads.
 type State = Held<Webhook>;
 
-/// What a delivery parks across PENDING: the line it is on, the handles issued before that line's
-/// exchange, and the exchange.
+/// What a delivery parks across PENDING: the settings it started under (a reload mid-batch changes
+/// nothing for it: its lines go, and are reported, to the target it began with), the line it is on,
+/// the handles issued before that line's exchange, and the exchange.
 struct Posting {
+    settings: Settings,
     line: usize,
     issued: u32,
     exchange: Option<Exchange>,
@@ -590,26 +547,35 @@ impl SafeSlot for Deliver {
             return Outcome::Refused;
         };
         let hook = h.life();
-        let Some(s) = hook.settings() else {
-            return Outcome::Ready;
+        // A RESUMED delivery finishes its parked exchange whatever a reload changed meanwhile: it
+        // is driven to its end (the host's stream closed), on the settings it started under. If a
+        // reload changed the settings, the batch's remaining lines are dropped after it (below):
+        // the host's pin now names the new target, and the old settings' credentials must not go
+        // there, nor the new ones on an exchange this batch began elsewhere.
+        let parked = instance.resume::<Posting>().map(|p| *p);
+        let mut at = match parked {
+            Some(p) => p,
+            None => {
+                let Some(settings) = hook.settings() else {
+                    return Outcome::Ready;
+                };
+                if !hook.admitted(h.host()) {
+                    return Outcome::Ready;
+                }
+                Posting {
+                    settings,
+                    line: 0,
+                    issued: 0,
+                    exchange: None,
+                }
+            }
         };
-        if !hook.admitted(h.host()) {
-            return Outcome::Ready;
-        }
         let lines: Vec<&[u8]> = input
             .field(|i| &i.batch)
             .bytes()
             .split(|b| *b == b'\n')
             .filter(|l| !l.is_empty())
             .collect();
-        let mut at = instance.resume::<Posting>().map_or(
-            Posting {
-                line: 0,
-                issued: 0,
-                exchange: None,
-            },
-            |p| *p,
-        );
         while let Some(line) = lines.get(at.line) {
             let answered = match h.host() {
                 None => Err(ConnFailure::Unarmed),
@@ -617,7 +583,7 @@ impl SafeSlot for Deliver {
                     let mut c = host.connector_from(instance.ticket(), at.issued);
                     let started = match at.exchange.take() {
                         Some(ex) => Ok(ex),
-                        None => Exchange::request(request(&s, line)),
+                        None => Exchange::request(request(&at.settings, line)),
                     };
                     match started {
                         Err(e) => Err(e),
@@ -635,8 +601,19 @@ impl SafeSlot for Deliver {
                     }
                 }
             };
-            report(&s.url, answered);
+            report(&at.settings.url, answered);
             at.line += 1;
+            let left = lines.len().saturating_sub(at.line);
+            if left > 0 && hook.settings().as_ref() != Some(&at.settings) {
+                tracing::warn!(
+                    diag = %RELOAD_CUT,
+                    webhook_url = ?mask_userinfo(&at.settings.url),
+                    dropped = left,
+                    "request-log webhook settings were reloaded during a delivery; the batch's \
+                     remaining log lines were dropped"
+                );
+                break;
+            }
         }
         Outcome::Ready
     }
@@ -683,7 +660,9 @@ impl SafeSlot for Check {
         };
         let phase = match input.phase {
             CHECK_PHASE_LIMITS => CheckPhase::Limits,
-            _ => CheckPhase::Instances,
+            CHECK_PHASE_INSTANCES => CheckPhase::Instances,
+            // A phase this sink does not know is refused, never run as another.
+            _ => return Outcome::Refused,
         };
         let lines = check(phase, &instances(input));
         if !lines.is_empty() {
