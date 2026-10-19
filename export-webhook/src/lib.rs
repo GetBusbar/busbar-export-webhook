@@ -16,8 +16,10 @@
 //! need whose target is the `url` setting (the host drops its userinfo), under the open-web egress
 //! class (public destinations over a secure connection only), and the request rides the SDK's
 //! framed `exchange` under the instance's `delivery_timeout_secs`. The sink never dials. A delivery
-//! is fire-and-forget and never retried: a non-2xx answer or a transport failure drops that one line
-//! and raises BUSBAR-7071 / BUSBAR-7072 at WARN, as 1.5.5 warned them.
+//! is judged on the reply's HEAD, as 1.5.5 judged it: the exchange is head-only, so the body is
+//! never read and a slow or huge body after a 2xx is a delivery made. A delivery is fire-and-forget
+//! and never retried: a non-2xx answer or a transport failure drops that one line and raises
+//! BUSBAR-7071 / BUSBAR-7072 at WARN, as 1.5.5 warned them.
 //!
 //! **Admission.** The door states `ready`, so the host's verdict on the target (the need's admission
 //! at bind) is asked at boot, before the instance serves; a refused target raises BUSBAR-7070 (`…; disabling this webhook exporter`,
@@ -162,7 +164,8 @@ pub struct Webhook {
     /// Its settings, when they parse (the host refused the configuration otherwise; a sink opened
     /// only to validate or check settings still opens).
     settings: RwLock<Option<Settings>>,
-    /// The host's verdict on the target: `None` until the first delivery asks.
+    /// The host's verdict on the target: `None` until `ready` asks it, at boot; a reload's
+    /// `refresh` clears it, and the next delivery asks afresh.
     live: Mutex<Option<bool>>,
 }
 
@@ -418,12 +421,15 @@ fn is_https(url: &str) -> bool {
         .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
 }
 
-/// ONE LINE'S DELIVERY: the exchange [`Deliver`] runs to POST `line` ([`request`]).
+/// ONE LINE'S DELIVERY: the exchange [`Deliver`] runs to POST `line` ([`request`]). It is
+/// HEAD-ONLY (`Exchange::head_only`): the delivery is judged on the reply's head and its body is
+/// never read, as 1.5.5's `deliver_logs` judged it and dropped the response unread, so a slow or
+/// huge body after a 2xx raises no BUSBAR-7072.
 ///
 /// # Errors
 /// The request does not frame (a field the framer refuses): nothing is sent.
 pub fn delivery(s: &Settings, line: &[u8]) -> Result<Exchange, ConnFailure> {
-    Exchange::request(request(s, line))
+    Exchange::request(request(s, line)).map(Exchange::head_only)
 }
 
 /// Run one line's [`delivery`] on `c`, over the sink's one need: PENDING until it is judged, then
