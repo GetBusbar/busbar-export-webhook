@@ -39,7 +39,7 @@ use std::task::Poll;
 
 use busbar_contract::abi::export::{
     self, CheckIn, CheckOut, CheckPhase, DeliverIn, ExportStream, ScrapeIn, ScrapeOut, ServeIn,
-    ServeOut, StatusOut, Tail, CHECK_PHASE_LIMITS,
+    ServeOut, StatusOut, Tail, CHECK_PHASE_INSTANCES, CHECK_PHASE_LIMITS,
 };
 use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome, BLOB_JSON};
@@ -560,9 +560,11 @@ fn instances(input: Lent<'_, CheckIn>) -> Vec<(String, serde_json::Value)> {
 /// The instance state every slot reads.
 type State = Held<Webhook>;
 
-/// What a delivery parks across PENDING: the line it is on, the handles issued before that line's
-/// exchange, and the exchange.
+/// What a delivery parks across PENDING: the settings it started under (a reload mid-batch changes
+/// nothing for it: its lines go, and are reported, to the target it began with), the line it is on,
+/// the handles issued before that line's exchange, and the exchange.
 struct Posting {
+    settings: Settings,
     line: usize,
     issued: u32,
     exchange: Option<Exchange>,
@@ -585,26 +587,32 @@ impl SafeSlot for Deliver {
             return Outcome::Refused;
         };
         let hook = h.life();
-        let Some(s) = hook.settings() else {
-            return Outcome::Ready;
+        // A RESUMED delivery finishes its parked exchange whatever a reload changed meanwhile: it
+        // is driven to its end (the host's stream closed), on the settings it started under.
+        let parked = instance.resume::<Posting>().map(|p| *p);
+        let mut at = match parked {
+            Some(p) => p,
+            None => {
+                let Some(settings) = hook.settings() else {
+                    return Outcome::Ready;
+                };
+                if !hook.admitted(h.host()) {
+                    return Outcome::Ready;
+                }
+                Posting {
+                    settings,
+                    line: 0,
+                    issued: 0,
+                    exchange: None,
+                }
+            }
         };
-        if !hook.admitted(h.host()) {
-            return Outcome::Ready;
-        }
         let lines: Vec<&[u8]> = input
             .field(|i| &i.batch)
             .bytes()
             .split(|b| *b == b'\n')
             .filter(|l| !l.is_empty())
             .collect();
-        let mut at = instance.resume::<Posting>().map_or(
-            Posting {
-                line: 0,
-                issued: 0,
-                exchange: None,
-            },
-            |p| *p,
-        );
         while let Some(line) = lines.get(at.line) {
             let answered = match h.host() {
                 None => Err(ConnFailure::Unarmed),
@@ -612,7 +620,7 @@ impl SafeSlot for Deliver {
                     let mut c = host.connector_from(instance.ticket(), at.issued);
                     let started = match at.exchange.take() {
                         Some(ex) => Ok(ex),
-                        None => Exchange::request(request(&s, line)),
+                        None => Exchange::request(request(&at.settings, line)),
                     };
                     match started {
                         Err(e) => Err(e),
@@ -630,7 +638,7 @@ impl SafeSlot for Deliver {
                     }
                 }
             };
-            report(&s.url, answered);
+            report(&at.settings.url, answered);
             at.line += 1;
         }
         Outcome::Ready
@@ -678,7 +686,9 @@ impl SafeSlot for Check {
         };
         let phase = match input.phase {
             CHECK_PHASE_LIMITS => CheckPhase::Limits,
-            _ => CheckPhase::Instances,
+            CHECK_PHASE_INSTANCES => CheckPhase::Instances,
+            // A phase this sink does not know is refused, never run as another.
+            _ => return Outcome::Refused,
         };
         let lines = check(phase, &instances(input));
         if !lines.is_empty() {
