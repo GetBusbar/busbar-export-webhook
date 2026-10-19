@@ -547,7 +547,10 @@ impl SafeSlot for Deliver {
         };
         let hook = h.life();
         // A RESUMED delivery finishes its parked exchange whatever a reload changed meanwhile: it
-        // is driven to its end (the host's stream closed), on the settings it started under.
+        // is driven to its end (the host's stream closed), on the settings it started under. If a
+        // reload changed the settings, the batch's remaining lines are dropped after it (below):
+        // the host's pin now names the new target, and the old settings' credentials must not go
+        // there, nor the new ones on an exchange this batch began elsewhere.
         let parked = instance.resume::<Posting>().map(|p| *p);
         let mut at = match parked {
             Some(p) => p,
@@ -599,6 +602,16 @@ impl SafeSlot for Deliver {
             };
             report(&at.settings.url, answered);
             at.line += 1;
+            let left = lines.len().saturating_sub(at.line);
+            if left > 0 && hook.settings().as_ref() != Some(&at.settings) {
+                tracing::warn!(
+                    webhook_url = ?mask_userinfo(&at.settings.url),
+                    dropped = left,
+                    "request-log webhook settings were reloaded during a delivery; the batch's \
+                     remaining log lines were dropped"
+                );
+                break;
+            }
         }
         Outcome::Ready
     }
