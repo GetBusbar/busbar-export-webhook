@@ -44,7 +44,7 @@ use busbar_contract::abi::export::{
 use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement, REWRITE_ALIAS};
-use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
+use busbar_contract::abi::sdk::conn::{Answer, ConnFailure, Connector, Host};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
@@ -418,6 +418,20 @@ fn is_https(url: &str) -> bool {
         .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
 }
 
+/// ONE LINE'S DELIVERY: the exchange [`Deliver`] runs to POST `line` ([`request`]).
+///
+/// # Errors
+/// The request does not frame (a field the framer refuses): nothing is sent.
+pub fn delivery(s: &Settings, line: &[u8]) -> Result<Exchange, ConnFailure> {
+    Exchange::request(request(s, line))
+}
+
+/// Run one line's [`delivery`] on `c`, over the sink's one need: PENDING until it is judged, then
+/// what [`report`] reports.
+pub fn post(c: &mut Connector<'_>, ex: &mut Exchange) -> Answer<ExchangeResponse> {
+    exchange(c, ex, NEED, None)
+}
+
 /// What became of one line: nothing to say for a 2xx; BUSBAR-7071 for any other status,
 /// BUSBAR-7072 for a transport failure — each at WARN, as 1.5.5 warned them
 /// (`warn_webhook_delivery_failed`), the target's userinfo masked.
@@ -611,11 +625,11 @@ impl SafeSlot for Deliver {
                     let mut c = host.connector_from(instance.ticket(), at.issued);
                     let started = match at.exchange.take() {
                         Some(ex) => Ok(ex),
-                        None => Exchange::request(request(&s, line)),
+                        None => delivery(&s, line),
                     };
                     match started {
                         Err(e) => Err(e),
-                        Ok(mut ex) => match exchange(&mut c, &mut ex, NEED, None) {
+                        Ok(mut ex) => match post(&mut c, &mut ex) {
                             Poll::Pending => {
                                 at.exchange = Some(ex);
                                 instance.park(at);
