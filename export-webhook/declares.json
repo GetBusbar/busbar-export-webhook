@@ -37,6 +37,15 @@
       "summary": "A request-log webhook delivery failed with a transport error (connection/timeout/DNS), so that one log line was dropped. Deliveries are fire-and-forget and never retried. It is warned on every dropped line, as 1.5.5 warned it: an unreachable sink is the operator's to fix.",
       "action": "If logs are being lost, check the webhook sink's reachability: each dropped line is its own warn line. `busbar_webhook_logs_dropped_total` counts only lines shed by the in-flight bound, not failed deliveries.",
       "since": "1.6.0"
+    },
+    {
+      "code": 7100,
+      "slug": "webhook-batch-dropped-on-reload",
+      "title": "Webhook log batch cut short by a settings reload (logs dropped)",
+      "severity": "actionable",
+      "summary": "A request-log webhook delivery was in flight when the exporter's settings were reloaded. The line in flight finished on the settings it started under; the batch's remaining lines were dropped rather than sent with the old settings' credentials to the new target, or with the new ones on a batch begun elsewhere. Warned once per cut batch, with the count dropped.",
+      "action": "Expected around a reload of the named webhook exporter; if it recurs without reloads, check what is reloading the configuration.",
+      "since": "1.6.0"
     }
   ],
   "needs": [

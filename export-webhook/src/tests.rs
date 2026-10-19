@@ -337,9 +337,10 @@ fn the_success_boundary_is_200_to_299() {
     }
 }
 
-/// A target the host refused is named in 1.5.5's words when the refusal is the `https://` scheme rule
-/// (the scheme read without case; userinfo masked as 1.5.5 masked it), and in the host's words
-/// otherwise; a host that gave no verdict is named as such.
+/// A target the host refused is named in 1.5.5's words, as 1.5.5's `validate_webhook_url` named it:
+/// the `https://` scheme rule (the scheme read without case), a URL that does not parse, or the
+/// destination guard, the userinfo masked as 1.5.5 masked it; a host that gave no verdict is named
+/// as such.
 #[test]
 fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     let refused = ConnFailure::Refused("destination refused".into());
@@ -351,9 +352,17 @@ fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
         refusal_words(Some("HTTP://u:p@siem.example/in"), &refused),
         "observability.request_log_webhook_url must be an https:// URL (got 'http://***@siem.example/in')"
     );
+    // RED (Q128 export-webhook LOW, src/lib.rs:391-403): 1.5.5 named the other two refusals on this
+    // path in its own words too (v1.5.5 observability.rs validate_webhook_url): a URL that does not
+    // parse, and a parseable https target the destination guard refused.
     assert_eq!(
-        refusal_words(Some("HTTPS://siem.example/in"), &refused),
-        "destination refused"
+        refusal_words(Some("https://u:p@/x"), &refused),
+        "observability.request_log_webhook_url is not a valid URL: empty host"
+    );
+    assert_eq!(
+        refusal_words(Some("HTTPS://u:p@169.254.169.254/in"), &refused),
+        "observability.request_log_webhook_url must not target a loopback/link-local/private/CGNAT/\
+         cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/in'"
     );
     assert_eq!(
         refusal_words(Some("http://siem.example/in"), &ConnFailure::Unarmed),
@@ -384,8 +393,9 @@ fn an_unadmitted_target_disables_the_instance_once() {
     assert_eq!(w.settings().expect("parsed").url, "https://b.example/");
 }
 
-/// The Statement: name, the default in-flight bound, the module alias, the `logs` stream, no
-/// route, and ONE outbound open-web need targeted by the `url` setting.
+/// The Statement: name, NO in-flight ceiling of its own (`u32::MAX`: the operator's
+/// `max_inflight_deliveries` is the bound), the module alias, the `logs` stream, no route, and ONE
+/// outbound open-web need targeted by the `url` setting.
 #[test]
 fn the_statement_states_the_sink() {
     assert_eq!(STATEMENT.name.len, NAME.len());
@@ -416,7 +426,7 @@ fn the_declaration_states_the_shed_counter_and_the_codes() {
         .iter()
         .map(|c| c["code"].as_u64().unwrap())
         .collect();
-    assert_eq!(codes, vec![7070, 7071, 7072]);
+    assert_eq!(codes, vec![7070, 7071, 7072, 7100]);
 }
 
 /// Every metric a catalogue action cites (a backticked `*_total` token) is a series the declaration
@@ -605,4 +615,52 @@ fn the_settings_schema_marks_no_nested_secret() {
         schema["properties"]["auth_header"]["properties"]["value"]["type"],
         "string"
     );
+}
+
+/// THE AUTH HEADER'S VALUE NEVER RENDERS THROUGH `Debug` (Q128 export-webhook M2: "the secret
+/// handled as a secret ... never shown through Debug"): formatting the settings, the header or an
+/// instance holding them names the header and redacts its value. RED before the fix: `Debug` was
+/// derived over `ExportAuthHeader::value`.
+#[test]
+fn the_auth_header_value_is_redacted_from_debug() {
+    let header = ExportAuthHeader {
+        name: "Authorization".into(),
+        value: "Bearer s3cret-token".into(),
+    };
+    let settings = WebhookSettings {
+        url: "https://siem.example/in".into(),
+        auth_header: Some(header.clone()),
+        max_inflight_deliveries: 1,
+        delivery_timeout_secs: 1,
+    };
+    for text in [
+        format!("{header:?}"),
+        format!("{header:#?}"),
+        format!("{settings:?}"),
+        format!("{settings:#?}"),
+    ] {
+        assert!(!text.contains("s3cret"), "the value leaked: {text}");
+        assert!(text.contains("Authorization"), "the name is kept: {text}");
+        assert!(
+            text.contains("<redacted>"),
+            "the value is marked redacted: {text}"
+        );
+    }
+}
+
+/// THE TARGET URL'S USERINFO NEVER RENDERS THROUGH `Debug` (§11.13): a `user:password@` in the url is
+/// sent as Basic credentials, so formatting the settings masks it as every line this sink writes
+/// does ([`mask_userinfo`]). RED before the fix: `Debug` was derived over `WebhookSettings::url`.
+#[test]
+fn the_url_userinfo_is_masked_in_debug() {
+    let settings = WebhookSettings {
+        url: "https://ops:hunter2@siem.example/in".into(),
+        auth_header: None,
+        max_inflight_deliveries: 1,
+        delivery_timeout_secs: 1,
+    };
+    for text in [format!("{settings:?}"), format!("{settings:#?}")] {
+        assert!(!text.contains("hunter2"), "the password leaked: {text}");
+        assert!(text.contains("siem.example"), "the host is kept: {text}");
+    }
 }

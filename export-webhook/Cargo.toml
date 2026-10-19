@@ -28,3 +28,6 @@ url = { workspace = true }
 # The sink's operator log lines, with the catalogue's `diag` banner field; the door's call capture
 # carries them to the instance's plugin log (THE DESIGN §11.2).
 tracing = { workspace = true }
+# A userinfo's percent-decoding and its Basic base64, as 1.5.5's reqwest made them.
+percent-encoding = { workspace = true }
+base64 = { workspace = true }
