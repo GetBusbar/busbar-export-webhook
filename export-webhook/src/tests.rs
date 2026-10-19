@@ -426,7 +426,7 @@ fn the_declaration_states_the_shed_counter_and_the_codes() {
         .iter()
         .map(|c| c["code"].as_u64().unwrap())
         .collect();
-    assert_eq!(codes, vec![7070, 7071, 7072]);
+    assert_eq!(codes, vec![7070, 7071, 7072, 7100]);
 }
 
 /// Every metric a catalogue action cites (a backticked `*_total` token) is a series the declaration
