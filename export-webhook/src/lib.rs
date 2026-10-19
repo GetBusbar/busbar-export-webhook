@@ -68,6 +68,7 @@ const MAX_DURATION_SECS: u64 = 30 * 365 * 86_400;
 const DISABLED: &str = "BUSBAR-7070";
 const NON_2XX: &str = "BUSBAR-7071";
 const TRANSPORT_ERROR: &str = "BUSBAR-7072";
+const RELOAD_CUT: &str = "BUSBAR-7100";
 
 /// The config path the target comes from: the `url` setting (`settings.<key>`, the path the host's
 /// connection-table fill resolves, spec PB-100). A bare key resolves to nothing, and the host's
@@ -605,6 +606,7 @@ impl SafeSlot for Deliver {
             let left = lines.len().saturating_sub(at.line);
             if left > 0 && hook.settings().as_ref() != Some(&at.settings) {
                 tracing::warn!(
+                    diag = %RELOAD_CUT,
                     webhook_url = ?mask_userinfo(&at.settings.url),
                     dropped = left,
                     "request-log webhook settings were reloaded during a delivery; the batch's \
