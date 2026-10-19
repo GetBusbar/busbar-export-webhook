@@ -556,13 +556,15 @@ fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
     }
 }
 
-/// THE SETTINGS SCHEMA MARKS THE AUTH HEADER'S VALUE SECRET (Q128 export-webhook M2, ruling: busbar
-/// pack accepts a nested `x-busbar-secret` marker and resolves it at open). The schema the release
-/// signs in names exactly the settings grammar's keys, and `auth_header.value` is the one marked
-/// field. RED before the fix: the plugin stated no schema, so nothing host-side could treat the
-/// token as secret.
+/// THE SETTINGS SCHEMA MARKS NO FIELD SECRET BELOW THE ROOT (coordinator ruling (B), 2026-10-19:
+/// pack keeps 1.5.5's refusal of a nested `x-busbar-secret` marker, v1.5.5
+/// `crates/plugin-pack/src/main.rs:298-304`). `auth_header.value` is a plain string, as 1.5.5's
+/// `ExportAuthHeader { name, value: String }` read it (v1.5.5 `crates/busbar/src/config/mod.rs`),
+/// its `${VAR}` filled by the config's env interpolation. The schema names exactly the settings
+/// grammar's keys. RED before the fix: `auth_header.value` carried a nested marker the packer
+/// refuses.
 #[test]
-fn the_settings_schema_marks_the_auth_header_value_secret() {
+fn the_settings_schema_marks_no_nested_secret() {
     let schema: serde_json::Value = serde_json::from_str(include_str!("../settings.schema.json"))
         .expect("the settings schema is JSON");
     let props = schema["properties"].as_object().expect("root properties");
@@ -577,9 +579,30 @@ fn the_settings_schema_marks_the_auth_header_value_secret() {
             "url"
         ]
     );
-    assert_eq!(
-        schema["properties"]["auth_header"]["properties"]["value"]["x-busbar-secret"],
-        true
+    fn marked_below_root(v: &serde_json::Value, depth: u32) -> bool {
+        match v {
+            serde_json::Value::Object(o) => {
+                (depth > 1 && o.get("x-busbar-secret").is_some())
+                    || o.iter().any(|(k, child)| {
+                        let deeper = if k == "properties" { depth + 1 } else { depth };
+                        match child {
+                            serde_json::Value::Object(m) if k == "properties" => {
+                                m.values().any(|f| marked_below_root(f, deeper))
+                            }
+                            _ => marked_below_root(child, depth),
+                        }
+                    })
+            }
+            serde_json::Value::Array(a) => a.iter().any(|x| marked_below_root(x, depth)),
+            _ => false,
+        }
+    }
+    assert!(
+        !marked_below_root(&schema, 0),
+        "no secret marker below the root"
     );
-    assert_eq!(props["url"].get("x-busbar-secret"), None);
+    assert_eq!(
+        schema["properties"]["auth_header"]["properties"]["value"]["type"],
+        "string"
+    );
 }
