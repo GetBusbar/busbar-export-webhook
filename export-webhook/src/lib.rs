@@ -162,7 +162,8 @@ pub struct Webhook {
     /// Its settings, when they parse (the host refused the configuration otherwise; a sink opened
     /// only to validate or check settings still opens).
     settings: RwLock<Option<Settings>>,
-    /// The host's verdict on the target: `None` until the first delivery asks.
+    /// The host's verdict on the target, asked once: at boot by `ready` (and again after a
+    /// `refresh` clears it, by the next delivery or readiness ask); `None` until then.
     live: Mutex<Option<bool>>,
 }
 
