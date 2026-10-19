@@ -93,6 +93,7 @@ pub type Settings = WebhookSettings;
 const NONE: AbiStr = AbiStr {
     ptr: std::ptr::null(),
     len: 0,
+    ..AbiStr::ZERO
 };
 
 /// The one need: outbound over a secure connection to the `url` setting's target, public
@@ -116,6 +117,7 @@ const NEEDS: &[Need] = &[Need {
     _reserved: 0,
     deny_response_headers: std::ptr::null(),
     deny_response_headers_len: 0,
+    ..Need::ZERO
 }];
 
 /// The streams this sink carries: the request log.
@@ -126,11 +128,13 @@ const TAIL: Tail = Tail {
     head: KindTailHead {
         size: size_of::<Tail>() as u32,
         _reserved: 0,
+        ..KindTailHead::ZERO
     },
     streams: STREAMS.as_ptr(),
     streams_len: STREAMS.len(),
     routes: std::ptr::null(),
     routes_len: 0,
+    ..Tail::ZERO
 };
 
 /// The module name an operator writes, as the alias the registry holds beside [`NAME`].
@@ -139,6 +143,7 @@ const REWRITES: &[Rewrite] = &[Rewrite {
     _reserved: 0,
     from: abi_str(ALIAS),
     to: NONE,
+    ..Rewrite::ZERO
 }];
 
 /// This plugin's Statement: its name, version, its in-flight ceiling, alias, stream and need.

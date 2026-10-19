@@ -8,6 +8,9 @@ description = "The request-log WEBHOOK export sink as a kind:export plugin: POST
 license = "Apache-2.0"
 publish = false
 
+[lints]
+workspace = true
+
 [lib]
 # rlib: THE LOGIC and its door. A build that LINKS this crate registers `door` as its compiled-in
 # row (no symbol is exported from here); the sibling `busbar-export-webhook-plugin` cdylib exports

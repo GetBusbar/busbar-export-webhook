@@ -8,6 +8,9 @@ rust-version = "1.97"
 description = "First-party signed kind:export plugin cdylib: the request-log WEBHOOK sink (`module: request-log-webhook`), packaged as a droppable busbar plugin. Drop the signed tarball into `plugins/` and name it from an `export.<name>.module: request-log-webhook` block."
 license = "Apache-2.0"
 
+[lints]
+workspace = true
+
 [lib]
 # cdylib: the DROPPED-IN door (a signed tarball in `plugins/`). rlib: REQUIRED for `cargo test` to
 # emit the cdylib artifact the conformance test packs (a cdylib-only package builds a trivial test
