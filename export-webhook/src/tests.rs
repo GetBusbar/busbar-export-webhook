@@ -565,19 +565,17 @@ fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
     }
 }
 
-/// THE SETTINGS SCHEMA IS ONE THE 1.5.5 PACK RULES ACCEPT (Q128 export-webhook M2, ruling
-/// 2026-10-18 (B)): it names exactly the settings grammar's keys, and an `x-busbar-secret` marker
-/// sits only on a direct root property, as 1.5.5's `busbar-plugin-pack` requires ("only allowed on a
-/// direct root-level property", busbar qa/evidence/inventory/1.5.5-plugins-stores.md:1972). The
-/// auth header's value is nested, so it carries no marker: it is protected by the redacted `Debug`
-/// below and by the host's whole-bag settings redaction. Nor does the schema claim a secret
-/// reference resolves at open: an export's settings are not resolved. RED before the fix: the
-/// schema marked `auth_header.value`, a declaration the release could not pack.
+/// THE SETTINGS SCHEMA MARKS NO FIELD SECRET BELOW THE ROOT (coordinator ruling (B), 2026-10-19:
+/// pack keeps 1.5.5's refusal of a nested `x-busbar-secret` marker, v1.5.5
+/// `crates/plugin-pack/src/main.rs:298-304`). `auth_header.value` is a plain string, as 1.5.5's
+/// `ExportAuthHeader { name, value: String }` read it (v1.5.5 `crates/busbar/src/config/mod.rs`),
+/// its `${VAR}` filled by the config's env interpolation. The schema names exactly the settings
+/// grammar's keys. RED before the fix: `auth_header.value` carried a nested marker the packer
+/// refuses.
 #[test]
-fn the_settings_schema_is_one_the_pack_rules_accept() {
-    let text = include_str!("../settings.schema.json");
-    let schema: serde_json::Value =
-        serde_json::from_str(text).expect("the settings schema is JSON");
+fn the_settings_schema_marks_no_nested_secret() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!("../settings.schema.json"))
+        .expect("the settings schema is JSON");
     let props = schema["properties"].as_object().expect("root properties");
     let mut keys: Vec<&str> = props.keys().map(String::as_str).collect();
     keys.sort_unstable();
@@ -590,34 +588,31 @@ fn the_settings_schema_is_one_the_pack_rules_accept() {
             "url"
         ]
     );
-    /// Every marker below the root's own properties.
-    fn nested_markers(v: &serde_json::Value, depth: usize, found: &mut usize) {
+    fn marked_below_root(v: &serde_json::Value, depth: u32) -> bool {
         match v {
-            serde_json::Value::Object(m) => {
-                if depth > 2 && m.get("x-busbar-secret").is_some() {
-                    *found += 1;
-                }
-                for child in m.values() {
-                    nested_markers(child, depth + 1, found);
-                }
+            serde_json::Value::Object(o) => {
+                (depth > 1 && o.get("x-busbar-secret").is_some())
+                    || o.iter().any(|(k, child)| {
+                        let deeper = if k == "properties" { depth + 1 } else { depth };
+                        match child {
+                            serde_json::Value::Object(m) if k == "properties" => {
+                                m.values().any(|f| marked_below_root(f, deeper))
+                            }
+                            _ => marked_below_root(child, depth),
+                        }
+                    })
             }
-            serde_json::Value::Array(a) => {
-                for child in a {
-                    nested_markers(child, depth + 1, found);
-                }
-            }
-            _ => {}
+            serde_json::Value::Array(a) => a.iter().any(|x| marked_below_root(x, depth)),
+            _ => false,
         }
     }
-    let mut found = 0;
-    nested_markers(&schema, 0, &mut found);
-    assert_eq!(
-        found, 0,
-        "a nested x-busbar-secret marker 1.5.5's pack refuses"
-    );
     assert!(
-        !text.contains("resolves at open"),
-        "an export's settings are not resolved"
+        !marked_below_root(&schema, 0),
+        "no secret marker below the root"
+    );
+    assert_eq!(
+        schema["properties"]["auth_header"]["properties"]["value"]["type"],
+        "string"
     );
 }
 
