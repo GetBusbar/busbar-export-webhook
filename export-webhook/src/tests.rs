@@ -393,8 +393,9 @@ fn an_unadmitted_target_disables_the_instance_once() {
     assert_eq!(w.settings().expect("parsed").url, "https://b.example/");
 }
 
-/// The Statement: name, the default in-flight bound, the module alias, the `logs` stream, no
-/// route, and ONE outbound open-web need targeted by the `url` setting.
+/// The Statement: name, NO in-flight ceiling of its own (`u32::MAX`: the operator's
+/// `max_inflight_deliveries` is the bound), the module alias, the `logs` stream, no route, and ONE
+/// outbound open-web need targeted by the `url` setting.
 #[test]
 fn the_statement_states_the_sink() {
     assert_eq!(STATEMENT.name.len, NAME.len());
