@@ -31,3 +31,7 @@ tracing = { workspace = true }
 # A userinfo's percent-decoding and its Basic base64, as 1.5.5's reqwest made them.
 percent-encoding = { workspace = true }
 base64 = { workspace = true }
+
+# The test kit's `FakeHost` (the host tables a test lends), behind the contract's dev-only feature.
+[dev-dependencies]
+busbar-contract = { workspace = true, features = ["test-seal"] }

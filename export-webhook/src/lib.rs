@@ -41,7 +41,7 @@ use busbar_contract::abi::export::{
     ServeOut, StatusOut, Tail, CHECK_PHASE_INSTANCES, CHECK_PHASE_LIMITS,
 };
 use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome, BLOB_JSON};
+use busbar_contract::abi::mechanism::call::{AbiStr, InHead, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{Rewrite, Statement, REWRITE_ALIAS};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
