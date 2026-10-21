@@ -5,7 +5,7 @@
 //! export kind's memory ABI (`busbar_contract::abi::export`, THE DESIGN §11):
 //! `export.<name>.module: request-log-webhook`. ONE door ([`door`], `plugin_door!`), linked into
 //! the binary as a compiled-in row or exported by the sibling `busbar-export-webhook-plugin` cdylib
-//! as its one symbol; its manifest still carries [`DECLARES`] (the shed counter and the three
+//! as its one symbol; its manifest still carries `DECLARES` (the shed counter and the three
 //! catalogue codes it raises).
 //!
 //! Each request-log line of a delivered batch is POSTed, as the compact JSON line it is, with
@@ -51,11 +51,16 @@ use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 
 /// The plugin's canonical name.
-pub const NAME: &str = "busbar-export-webhook";
+const NAME: &str = "busbar-export-webhook";
 /// The module name an `export:` instance names it by.
-pub const ALIAS: &str = "request-log-webhook";
-/// The manifest `declares` section (`--declares-file` for the signed tarball).
-pub const DECLARES: &str = include_str!("../declares.json");
+const ALIAS: &str = "request-log-webhook";
+busbar_contract::statement_extensions!(
+    /// The manifest `declares` section (`--declares-file` for the signed tarball).
+    EXTENSIONS: [(
+        busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
+        include_bytes!("../declares.json"),
+    )]
+);
 
 /// The in-flight ceiling `check` holds the largest instance's bound to, with 1.5.5's refusal text:
 /// 1.5.5's limit (`tokio::sync::Semaphore::MAX_PERMITS`, `usize::MAX >> 3`, past which its gate
@@ -85,10 +90,10 @@ const NEED: u32 = 0;
 
 mod config;
 use config::DEFAULT_MAX_INFLIGHT;
-pub use config::{ExportAuthHeader, WebhookSettings};
+use config::{ExportAuthHeader, WebhookSettings};
 
 /// This sink's settings (the configuration's `WebhookSettings`).
-pub type Settings = WebhookSettings;
+type Settings = WebhookSettings;
 
 const NONE: AbiStr = AbiStr {
     ptr: std::ptr::null(),
@@ -142,12 +147,13 @@ const REWRITES: &[Rewrite] = &[Rewrite {
 }];
 
 /// This plugin's Statement: its name, version, its in-flight ceiling, alias, stream and need.
-pub const STATEMENT: Statement = Statement {
+const STATEMENT: Statement = Statement {
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
     rewrites: REWRITES.as_ptr(),
     rewrites_len: REWRITES.len(),
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
+    extensions: EXTENSIONS,
     ..statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
 };
 
@@ -161,7 +167,7 @@ fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
 
 /// One opened instance.
 #[derive(Debug)]
-pub struct Webhook {
+struct Webhook {
     /// Its settings, when they parse (the host refused the configuration otherwise; a sink opened
     /// only to validate or check settings still opens).
     settings: RwLock<Option<Settings>>,
@@ -254,7 +260,7 @@ impl Webhook {
 /// `content-type: application/json`, then the auth header — each appended as an `http::HeaderMap`
 /// appends, so a configured auth header named `Authorization` is sent too, after the userinfo's,
 /// as 1.5.5 sent both.
-pub fn request(s: &Settings, line: &[u8]) -> Request {
+fn request(s: &Settings, line: &[u8]) -> Request {
     let mut fields = Vec::new();
     if let Some(basic) = basic_authorization(&s.url) {
         append(&mut fields, b"authorization", &basic);
@@ -314,7 +320,7 @@ fn append(fields: &mut Vec<(Vec<u8>, Vec<u8>)>, name: &[u8], value: &[u8]) {
 /// all; a password that is not is left out), and, when either was set, wrote `basic_auth`:
 /// `Basic ` and the padded standard base64 of `{username}:` followed by the password, if any. The
 /// host's connector drops the userinfo from the target the `url` setting gives the need.
-pub fn basic_authorization(url: &str) -> Option<Vec<u8>> {
+fn basic_authorization(url: &str) -> Option<Vec<u8>> {
     let u = url::Url::parse(url).ok()?;
     if !u.has_authority() {
         return None;
@@ -355,7 +361,7 @@ fn base64(bytes: &[u8]) -> String {
 /// URL; a parseable `https://` target the host refused is the destination guard, the only rule
 /// left on that path. Userinfo is masked as 1.5.5 masked it. A host that gave no verdict, or any
 /// failure that is not a refusal, is said in the host's words.
-pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
+fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
     match (url, refused) {
         (Some(u), ConnFailure::Refused(_)) if !is_https(u) => format!(
             "observability.request_log_webhook_url must be an https:// URL (got '{}')",
@@ -382,7 +388,7 @@ fn is_https(url: &str) -> bool {
 /// What became of one line: nothing to say for a 2xx; BUSBAR-7071 for any other status,
 /// BUSBAR-7072 for a transport failure — each at WARN, as 1.5.5 warned them
 /// (`warn_webhook_delivery_failed`), the target's userinfo masked.
-pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
+fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
     match answered {
         Ok(r) if (200..300).contains(&r.status) => {}
         Ok(r) => tracing::warn!(
@@ -412,7 +418,7 @@ pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
 /// one permit (export/webhook.rs:97-104), as the host's export axis clamps each instance's bound
 /// now. An instance stating `0` beside a larger sibling therefore validates and runs at one permit;
 /// refusing it per instance would be a customer-visible tightening the owner has not signed.
-pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
+fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
     let parsed: Vec<Settings> = instances
         .iter()
         .filter_map(|(_, s)| serde_json::from_value(s.clone()).ok())
@@ -470,7 +476,7 @@ fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
 
 /// `url` with any userinfo (`scheme://user:pass@host/…`) replaced by `***`, safe for a log line;
 /// a URL with none, or a string that is not a URL, unchanged.
-pub fn mask_userinfo(url: &str) -> String {
+fn mask_userinfo(url: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
         return mask_unparsed(url);
     };
@@ -532,7 +538,7 @@ struct Posting {
 
 /// `deliver`: each line of the batch POSTed in order, one exchange after another; fire-and-forget,
 /// so READY whatever became of the lines, PENDING while an exchange runs.
-pub struct Deliver;
+struct Deliver;
 
 impl SafeSlot for Deliver {
     type In = DeliverIn;
@@ -620,7 +626,7 @@ impl SafeSlot for Deliver {
 }
 
 /// `scrape`: a push sink renders no exposition.
-pub struct Scrape;
+struct Scrape;
 
 impl SafeSlot for Scrape {
     type In = ScrapeIn;
@@ -632,7 +638,7 @@ impl SafeSlot for Scrape {
 }
 
 /// `status`: nothing to report.
-pub struct Status;
+struct Status;
 
 impl SafeSlot for Status {
     type In = InHead;
@@ -644,7 +650,7 @@ impl SafeSlot for Status {
 }
 
 /// `check`: [`check`] at the phase asked, its lines as a JSON array under a lease.
-pub struct Check;
+struct Check;
 
 impl SafeSlot for Check {
     type In = CheckIn;
@@ -674,7 +680,7 @@ impl SafeSlot for Check {
 }
 
 /// `serve`: no route, so any request is `404`.
-pub struct Serve;
+struct Serve;
 
 impl SafeSlot for Serve {
     type In = ServeIn;

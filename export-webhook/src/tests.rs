@@ -414,7 +414,7 @@ fn the_statement_states_the_sink() {
 /// The declaration both doors state: the shed counter and the three catalogue codes it raises.
 #[test]
 fn the_declaration_states_the_shed_counter_and_the_codes() {
-    let d: serde_json::Value = serde_json::from_str(DECLARES).unwrap();
+    let d: serde_json::Value = serde_json::from_str(include_str!("../declares.json")).unwrap();
     assert_eq!(ALIAS, "request-log-webhook");
     assert_eq!(
         d["metrics"],
@@ -433,7 +433,7 @@ fn the_declaration_states_the_shed_counter_and_the_codes() {
 /// states, not a Rust constant's name (EHOOK-14).
 #[test]
 fn a_catalogue_action_cites_only_declared_metrics() {
-    let d: serde_json::Value = serde_json::from_str(DECLARES).unwrap();
+    let d: serde_json::Value = serde_json::from_str(include_str!("../declares.json")).unwrap();
     let declared: Vec<&str> = d["metrics"]
         .as_array()
         .unwrap()
