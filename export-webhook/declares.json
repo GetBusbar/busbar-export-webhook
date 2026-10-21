@@ -1,8 +1,4 @@
 {
-  "contract_abi": {
-    "min": 3,
-    "max": 3
-  },
   "metrics": [
     {
       "name": "busbar_webhook_logs_dropped_total",
