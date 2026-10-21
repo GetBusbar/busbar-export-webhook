@@ -398,16 +398,16 @@ fn an_unadmitted_target_disables_the_instance_once() {
 /// outbound open-web need targeted by the `url` setting.
 #[test]
 fn the_statement_states_the_sink() {
-    assert_eq!(STATEMENT.name.len, NAME.len());
+    assert_eq!(STATEMENT.name.len(), NAME.len());
     assert_eq!(STATEMENT.max_inflight, u32::MAX);
     assert_eq!(REWRITES[0].class, REWRITE_ALIAS);
-    assert_eq!(REWRITES[0].from.len, ALIAS.len());
+    assert_eq!(REWRITES[0].from.len(), ALIAS.len());
     assert_eq!(STREAMS, &[ExportStream::Logs as u8]);
-    assert_eq!(TAIL.routes_len, 0);
-    assert_eq!(STATEMENT.needs_len, 1);
+    assert_eq!(TAIL.routes_len(), 0);
+    assert_eq!(STATEMENT.needs_len(), 1);
     assert_eq!(NEEDS[0].direction, DIRECTION_OUTBOUND);
     assert_eq!(NEEDS[0].egress_class, EGRESS_OPEN_WEB);
-    assert_eq!(NEEDS[0].target_from.len, "settings.url".len());
+    assert_eq!(NEEDS[0].target_from.len(), "settings.url".len());
     assert_eq!(TARGET_FROM, "settings.url");
 }
 
@@ -494,6 +494,7 @@ fn validation_errors_mask_the_targets_userinfo() {
 /// tables with no connector the target is unadmitted, so BUSBAR-7070 is raised there, at ERROR, and
 /// the instance stays disabled; the first delivery asks nothing again.
 #[test]
+#[allow(unsafe_code)]
 fn ready_asks_the_verdict_at_boot_and_never_refuses_it() {
     use busbar_contract::abi::mechanism::ticket::{HostTables, Ticket};
     use std::task::Poll;
@@ -506,7 +507,8 @@ fn ready_asks_the_verdict_at_boot_and_never_refuses_it() {
         services: std::ptr::null(),
         io: std::ptr::null(),
     };
-    let host = busbar_contract::abi::sdk::conn::Host::of(&tables);
+    // SAFETY: `tables` outlives `host`; every table it names is null, as the test states.
+    let host = unsafe { busbar_contract::abi::sdk::conn::Host::from_raw(&tables) };
     let w = Webhook::open(br#"{"url":"http://127.0.0.1:4000/sidecar"}"#, &[], 1).expect("opens");
     let got = logged(|| assert!(matches!(w.ready(&host, Ticket::NONE), Poll::Ready(Ok(())))));
     assert_eq!(got.len(), 1, "{got:?}");

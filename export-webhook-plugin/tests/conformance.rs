@@ -42,7 +42,7 @@ fn host(
 }
 
 busbar_plugin_loader::conformance_suite! {
-    door: busbar_export_webhook::door,
+    door: busbar_export_webhook::MACRO_DOOR,
     cdylib: "busbar_export_webhook_plugin",
     inputs: include_str!("conformance.json"),
     host: host,
