@@ -33,7 +33,6 @@
 
 #![deny(unsafe_code)]
 
-use std::mem::size_of;
 use std::sync::{Mutex, PoisonError, RwLock};
 use std::task::Poll;
 
@@ -42,8 +41,8 @@ use busbar_contract::abi::export::{
     ServeOut, StatusOut, Tail, CHECK_PHASE_INSTANCES, CHECK_PHASE_LIMITS,
 };
 use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome, BLOB_JSON};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement, REWRITE_ALIAS};
+use busbar_contract::abi::mechanism::call::{AbiStr, InHead, OutHead, Outcome, BLOB_JSON};
+use busbar_contract::abi::mechanism::door::{Rewrite, Statement, REWRITE_ALIAS};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
@@ -95,48 +94,29 @@ use config::{ExportAuthHeader, WebhookSettings};
 /// This sink's settings (the configuration's `WebhookSettings`).
 type Settings = WebhookSettings;
 
-const NONE: AbiStr = AbiStr {
-    ptr: std::ptr::null(),
-    len: 0,
-};
+const NONE: AbiStr = AbiStr::ABSENT;
 
 /// The one need: outbound over a secure connection to the `url` setting's target, public
 /// destinations only (1.5.5's https-only policy refusing loopback, link-local, private, CGNAT and
 /// cloud-metadata targets). It is framed by the `http` transport — the scheme its claim names; an
 /// `https://` target is secured by the host's connector, and the open-web egress class refuses any
 /// target that is not secure before a byte leaves.
-const NEEDS: &[Need] = &[Need {
-    direction: DIRECTION_OUTBOUND,
-    egress_class: EGRESS_OPEN_WEB,
-    transport: abi_str("http"),
-    auth: NONE,
-    target_from: abi_str(TARGET_FROM),
-    trust_from: NONE,
-    details: Blob::ABSENT,
-    keep_response_headers: std::ptr::null(),
-    keep_response_headers_len: 0,
-    timeout_ms: 0,
+const NEEDS: &[Need] = &[{
+    let mut n = Need::EMPTY;
+    n.direction = DIRECTION_OUTBOUND;
+    n.egress_class = EGRESS_OPEN_WEB;
+    n.transport = abi_str("http");
+    n.target_from = abi_str(TARGET_FROM);
     // The receiver's response head is not read: the named (empty) list, nothing denied beyond it.
-    keep_mode: busbar_contract::abi::host::conn::connector::KEEP_NAMED,
-    _reserved: 0,
-    deny_response_headers: std::ptr::null(),
-    deny_response_headers_len: 0,
+    n.keep_mode = busbar_contract::abi::host::conn::connector::KEEP_NAMED;
+    n
 }];
 
 /// The streams this sink carries: the request log.
 const STREAMS: &[u8] = &[ExportStream::Logs as u8];
 
 /// The export kind's Statement tail: `logs`, and no route (a push-only sink).
-const TAIL: Tail = Tail {
-    head: KindTailHead {
-        size: size_of::<Tail>() as u32,
-        _reserved: 0,
-    },
-    streams: STREAMS.as_ptr(),
-    streams_len: STREAMS.len(),
-    routes: std::ptr::null(),
-    routes_len: 0,
-};
+const TAIL: Tail = Tail::EMPTY.with_streams(STREAMS);
 
 /// The module name an operator writes, as the alias the registry holds beside [`NAME`].
 const REWRITES: &[Rewrite] = &[Rewrite {
@@ -147,14 +127,13 @@ const REWRITES: &[Rewrite] = &[Rewrite {
 }];
 
 /// This plugin's Statement: its name, version, its in-flight ceiling, alias, stream and need.
-const STATEMENT: Statement = Statement {
-    kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
-    rewrites: REWRITES.as_ptr(),
-    rewrites_len: REWRITES.len(),
-    needs: NEEDS.as_ptr(),
-    needs_len: NEEDS.len(),
-    extensions: EXTENSIONS,
-    ..statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
+const STATEMENT: Statement = {
+    let mut s = statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
+        .with_rewrites(REWRITES)
+        .with_needs(NEEDS)
+        .with_kind_tail(&TAIL);
+    s.extensions = EXTENSIONS;
+    s
 };
 
 /// The settings, parsed as the configuration grammar parses them (empty is `{}`).
@@ -515,9 +494,8 @@ fn instances(input: Lent<'_, CheckIn>) -> Vec<(String, serde_json::Value)> {
         .iter()
         .map(|c| {
             (
-                String::from_utf8_lossy(c.field(|c| &c.name).bytes()).into_owned(),
-                serde_json::from_slice(c.field(|c| &c.settings).bytes())
-                    .unwrap_or(serde_json::Value::Null),
+                String::from_utf8_lossy(c.name().bytes()).into_owned(),
+                serde_json::from_slice(c.settings().bytes()).unwrap_or(serde_json::Value::Null),
             )
         })
         .collect()
@@ -577,7 +555,7 @@ impl SafeSlot for Deliver {
             }
         };
         let lines: Vec<&[u8]> = input
-            .field(|i| &i.batch)
+            .batch()
             .bytes()
             .split(|b| *b == b'\n')
             .filter(|l| !l.is_empty())
@@ -664,7 +642,7 @@ impl SafeSlot for Check {
         let Some(h) = instance.get() else {
             return Outcome::Refused;
         };
-        let phase = match input.phase {
+        let phase = match input.phase() {
             CHECK_PHASE_LIMITS => CheckPhase::Limits,
             CHECK_PHASE_INSTANCES => CheckPhase::Instances,
             // A phase this sink does not know is refused, never run as another.

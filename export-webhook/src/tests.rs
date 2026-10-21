@@ -398,16 +398,16 @@ fn an_unadmitted_target_disables_the_instance_once() {
 /// outbound open-web need targeted by the `url` setting.
 #[test]
 fn the_statement_states_the_sink() {
-    assert_eq!(STATEMENT.name.len, NAME.len());
+    assert_eq!(STATEMENT.name.len(), NAME.len());
     assert_eq!(STATEMENT.max_inflight, u32::MAX);
     assert_eq!(REWRITES[0].class, REWRITE_ALIAS);
-    assert_eq!(REWRITES[0].from.len, ALIAS.len());
+    assert_eq!(REWRITES[0].from.len(), ALIAS.len());
     assert_eq!(STREAMS, &[ExportStream::Logs as u8]);
-    assert_eq!(TAIL.routes_len, 0);
-    assert_eq!(STATEMENT.needs_len, 1);
+    assert_eq!(TAIL.routes_len(), 0);
+    assert_eq!(STATEMENT.needs_len(), 1);
     assert_eq!(NEEDS[0].direction, DIRECTION_OUTBOUND);
     assert_eq!(NEEDS[0].egress_class, EGRESS_OPEN_WEB);
-    assert_eq!(NEEDS[0].target_from.len, "settings.url".len());
+    assert_eq!(NEEDS[0].target_from.len(), "settings.url".len());
     assert_eq!(TARGET_FROM, "settings.url");
 }
 
@@ -495,17 +495,11 @@ fn validation_errors_mask_the_targets_userinfo() {
 /// the instance stays disabled; the first delivery asks nothing again.
 #[test]
 fn ready_asks_the_verdict_at_boot_and_never_refuses_it() {
-    use busbar_contract::abi::mechanism::ticket::{HostTables, Ticket};
+    use busbar_contract::abi::mechanism::ticket::Ticket;
+    use busbar_contract::abi::sdk::test_support::FakeHost;
     use std::task::Poll;
-    let tables = HostTables {
-        size: std::mem::size_of::<HostTables>() as u32,
-        _reserved: 0,
-        ctx: busbar_contract::abi::mechanism::ticket::HostCtx::NONE,
-        wake: None,
-        conns: std::ptr::null(),
-        services: std::ptr::null(),
-        io: std::ptr::null(),
-    };
+    let fake = FakeHost::new();
+    let tables = fake.lent();
     let host = busbar_contract::abi::sdk::conn::Host::of(&tables);
     let w = Webhook::open(br#"{"url":"http://127.0.0.1:4000/sidecar"}"#, &[], 1).expect("opens");
     let got = logged(|| assert!(matches!(w.ready(&host, Ticket::NONE), Poll::Ready(Ok(())))));
