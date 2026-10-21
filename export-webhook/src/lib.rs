@@ -387,13 +387,13 @@ pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
         Ok(r) if (200..300).contains(&r.status) => {}
         Ok(r) => tracing::warn!(
             diag = %NON_2XX,
-            webhook_url = ?mask_userinfo(url),
-            status = %r.status,
+            webhook_url = mask_userinfo(url).as_str(),
+            status = r.status,
             "request-log webhook delivery returned a non-2xx status; this log was dropped"
         ),
         Err(e) => tracing::warn!(
             diag = %TRANSPORT_ERROR,
-            webhook_url = ?mask_userinfo(url),
+            webhook_url = mask_userinfo(url).as_str(),
             error_kind = %e,
             "request-log webhook delivery failed (transport error); this log was dropped"
         ),
@@ -447,6 +447,17 @@ pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Ve
 /// Each instance's delivery deadline, numbered by its position among the instances.
 fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
     for (i, w) in parsed.iter().enumerate() {
+        if let Some(h) = w.auth_header.as_ref().filter(|h| !header_builds(h)) {
+            errors.push(format!(
+                "the `module: request-log-webhook` export instance targeting '{}' (#{i}) sets \
+                 settings.auth_header with a name or value that is not a valid HTTP header \
+                 (name {:?}: the name must be a non-empty RFC 9110 token, and the value may hold \
+                 no control byte other than tab); 1.5.5 left such a header out and sent the log \
+                 without it, and so does this sink — fix or remove the header",
+                mask_userinfo(&w.url),
+                h.name
+            ));
+        }
         if w.delivery_timeout_secs > MAX_DURATION_SECS {
             errors.push(format!(
                 "the `module: request-log-webhook` export instance targeting '{}' (#{i}) sets \
@@ -607,7 +618,7 @@ impl SafeSlot for Deliver {
             if left > 0 && hook.settings().as_ref() != Some(&at.settings) {
                 tracing::warn!(
                     diag = %RELOAD_CUT,
-                    webhook_url = ?mask_userinfo(&at.settings.url),
+                    webhook_url = mask_userinfo(&at.settings.url).as_str(),
                     dropped = left,
                     "request-log webhook settings were reloaded during a delivery; the batch's \
                      remaining log lines were dropped"
