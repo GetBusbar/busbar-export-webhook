@@ -5,8 +5,8 @@
 //! export kind's memory ABI (`busbar_contract::abi::export`, THE DESIGN §11):
 //! `export.<name>.module: request-log-webhook`. ONE door ([`door`], `plugin_door!`), linked into
 //! the binary as a compiled-in row or exported by the sibling `busbar-export-webhook-plugin` cdylib
-//! as its one symbol; its manifest still carries `DECLARES` (the shed counter and the four
-//! catalogue codes it raises).
+//! as its one symbol; its `declares.json` (the shed counter and the four catalogue codes it
+//! raises) rides the Statement under `EXT_DECLARES`.
 //!
 //! Each request-log line of a delivered batch is POSTed, as the compact JSON line it is, with
 //! `content-type: application/json`, the instance's optional `auth_header` (left out, as 1.5.5 left
