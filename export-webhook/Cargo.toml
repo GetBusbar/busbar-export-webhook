@@ -31,3 +31,5 @@ tracing = { workspace = true }
 # A userinfo's percent-decoding and its Basic base64, as 1.5.5's reqwest made them.
 percent-encoding = { workspace = true }
 base64 = { workspace = true }
+# The auth header's credential is wiped when its holder drops.
+zeroize = { workspace = true }
