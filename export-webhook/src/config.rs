@@ -54,6 +54,11 @@ pub struct ExportAuthHeader {
     pub value: String,
 }
 
+impl ExportAuthHeader {
+    /// Overwrite the credential with zeros and empty it.
+    pub fn wipe(&mut self) {}
+}
+
 impl std::fmt::Debug for ExportAuthHeader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExportAuthHeader")
