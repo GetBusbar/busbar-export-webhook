@@ -695,7 +695,11 @@ fn an_auth_header_that_cannot_be_built_is_refused_at_validation() {
         assert_eq!(lines.len(), 1, "{name:?}: {lines:?}");
         assert!(lines[0].contains("settings.auth_header"), "{}", lines[0]);
         assert!(lines[0].contains("https://a.example/"), "{}", lines[0]);
-        assert!(!lines[0].contains("s3cret"), "the value leaked: {}", lines[0]);
+        assert!(
+            !lines[0].contains("s3cret"),
+            "the value leaked: {}",
+            lines[0]
+        );
     }
     let ok = [(
         "w".to_string(),
