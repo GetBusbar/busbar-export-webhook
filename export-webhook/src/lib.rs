@@ -58,7 +58,7 @@ busbar_contract::statement_extensions!(
     /// The manifest `declares` section (`--declares-file` for the signed tarball).
     EXTENSIONS: [(
         busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
-        include_bytes!("../declares.json"),
+        include_bytes!("../declares.json")
     )]
 );
 
