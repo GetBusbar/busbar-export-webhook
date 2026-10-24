@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "busbar-export-webhook"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2021"
 rust-version = "1.97"
 description = "The request-log WEBHOOK export sink as a kind:export plugin: POSTs each request-log line to the operator's https:// target through the host's connector (it never dials), linked into the busbar binary or dropped into plugins/ — one crate, one registration."
