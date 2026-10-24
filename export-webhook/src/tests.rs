@@ -114,6 +114,16 @@ struct Capture(Arc<Mutex<Vec<Event>>>);
 struct Fields(Event);
 
 impl tracing::field::Visit for Fields {
+    /// A string value is recorded with its kind, so a test can tell `record_str` from a Debug
+    /// rendering (1.5.5's `webhook_url` was a string value, its `status` an integer).
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0
+            .push((field.name().to_string(), format!("str:{value}")));
+    }
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.0
+            .push((field.name().to_string(), format!("u64:{value}")));
+    }
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         self.0
             .push((field.name().to_string(), format!("{value:?}")));
@@ -314,9 +324,9 @@ fn a_failed_delivery_raises_its_code_once() {
     assert_eq!(field(&got[0], "diag"), "BUSBAR-7071");
     assert_eq!(
         field(&got[0], "webhook_url"),
-        "\"https://***@siem.example/in\""
+        "str:https://***@siem.example/in"
     );
-    assert_eq!(field(&got[0], "status"), "503");
+    assert_eq!(field(&got[0], "status"), "u64:503");
     assert_eq!(names(&got[1]), ["diag", "webhook_url", "error_kind"]);
     assert_eq!(field(&got[1], "diag"), "BUSBAR-7072");
     assert_eq!(field(&got[1], "error_kind"), "timed out");
@@ -663,4 +673,49 @@ fn the_url_userinfo_is_masked_in_debug() {
         assert!(!text.contains("hunter2"), "the password leaked: {text}");
         assert!(text.contains("siem.example"), "the host is kept: {text}");
     }
+}
+
+/// AN AUTH HEADER 1.5.5 COULD NOT BUILD IS REFUSED AT VALIDATION, with a message that names the
+/// instance and the header's name but never its value (coordinator ruling (a)): the delivery still
+/// leaves the header out (see the test above), so the refusal is the operator's early notice.
+/// RED before the fix: `check` said nothing about the header.
+#[test]
+fn an_auth_header_that_cannot_be_built_is_refused_at_validation() {
+    for (name, value) in [
+        (":authority", "k"),
+        ("Bad Name", "k"),
+        ("Authorization", "Bearer s3cret\r\nX-Injected: 1"),
+        ("Authorization", "Bearer s3cret\n"),
+    ] {
+        let instances = [(
+            "w".to_string(),
+            json!({"url": "https://a.example/", "auth_header": {"name": name, "value": value}}),
+        )];
+        let lines = check(CheckPhase::Instances, &instances);
+        assert_eq!(lines.len(), 1, "{name:?}: {lines:?}");
+        assert!(lines[0].contains("settings.auth_header"), "{}", lines[0]);
+        assert!(lines[0].contains("https://a.example/"), "{}", lines[0]);
+        assert!(
+            !lines[0].contains("s3cret"),
+            "the value leaked: {}",
+            lines[0]
+        );
+    }
+    let ok = [(
+        "w".to_string(),
+        json!({"url": "https://a.example/", "auth_header": {"name": "Authorization", "value": "Bearer x"}}),
+    )];
+    assert!(check(CheckPhase::Instances, &ok).is_empty());
+}
+
+/// THE CREDENTIAL IS WIPED (A.5): `wipe`, which `Drop` calls, leaves no value behind.
+/// RED before the fix: no wipe existed.
+#[test]
+fn the_auth_header_value_is_wiped() {
+    let mut h = ExportAuthHeader {
+        name: "Authorization".into(),
+        value: "Bearer s3cret".into(),
+    };
+    h.wipe();
+    assert!(h.value.is_empty());
 }
