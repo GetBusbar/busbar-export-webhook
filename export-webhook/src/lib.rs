@@ -160,8 +160,12 @@ fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
     let bytes = if settings.is_empty() { b"{}" } else { settings };
     // The credentials are sealed as they are read, and a shape refusal names a path and a type,
     // never a value (`abi::sdk::cred::settings`).
-    let settings: Settings = busbar_contract::abi::sdk::cred::settings(bytes)
+    let mut settings: Settings = busbar_contract::abi::sdk::cred::settings(bytes)
         .map_err(|e| Refusal::failed(e.to_string()))?;
+    // The auth header goes only to `url`: an `https` one requires a secured connection.
+    if let Some(h) = settings.auth_header.as_mut() {
+        h.value = h.value.clone().secure_for(settings.url.public());
+    }
     let unencoded = settings.url.password_at() == Some(PasswordAt::UserinfoUnencoded);
     if let Some(refusal) = ambiguous_url(settings.url.public(), unencoded) {
         return Err(Refusal::failed(refusal));
