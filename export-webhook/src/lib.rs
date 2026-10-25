@@ -84,8 +84,10 @@ const MAX_INFLIGHT: u32 = u32::MAX;
 const NEED: u32 = 0;
 
 mod config;
+mod redact;
 use config::DEFAULT_MAX_INFLIGHT;
 pub use config::{ExportAuthHeader, WebhookSettings};
+pub use redact::{log_target, scrub};
 
 /// This sink's settings (the configuration's `WebhookSettings`).
 pub type Settings = WebhookSettings;
@@ -155,9 +157,14 @@ pub const STATEMENT: Statement = Statement {
 /// credential would be misread as its host is refused ([`ambiguous_url`]).
 fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
     let bytes = if settings.is_empty() { b"{}" } else { settings };
-    let settings: Settings = serde_json::from_slice::<serde_json::Value>(bytes)
-        .and_then(serde_json::from_value)
+    let value = serde_json::from_slice::<serde_json::Value>(bytes)
         .map_err(|e| Refusal::failed(format!("settings: {e}")))?;
+    // serde's shape refusal quotes the offending value (`invalid type: string "Bearer …"`): the
+    // settings' credential strings are cut from it, the words otherwise serde's (H2).
+    let credentials = redact::settings_credentials(&value);
+    let settings: Settings = serde_json::from_value(value).map_err(|e| {
+        Refusal::failed(redact::replace_all(&format!("settings: {e}"), credentials))
+    })?;
     if let Some(refusal) = ambiguous_url(&settings.url) {
         return Err(Refusal::failed(refusal));
     }
@@ -410,7 +417,8 @@ pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
                 mask_userinfo(u)
             ),
         },
-        _ => refused.to_string(),
+        (Some(u), _) => scrub(&refused.to_string(), u),
+        (None, _) => refused.to_string(),
     }
 }
 
@@ -422,20 +430,22 @@ fn is_https(url: &str) -> bool {
 
 /// What became of one line: nothing to say for a 2xx; BUSBAR-7071 for any other status,
 /// BUSBAR-7072 for a transport failure — each at WARN, as 1.5.5 warned them
-/// (`warn_webhook_delivery_failed`), the target's userinfo masked.
+/// (`warn_webhook_delivery_failed`). The target is named by scheme and host only ([`log_target`]:
+/// its userinfo, path and query can each carry the webhook's secret) and the host's failure text is
+/// scrubbed of the target's parts ([`scrub`]).
 pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
     match answered {
         Ok(r) if (200..300).contains(&r.status) => {}
         Ok(r) => tracing::warn!(
             diag = %NON_2XX,
-            webhook_url = ?mask_userinfo(url),
+            webhook_url = ?log_target(url),
             status = %r.status,
             "request-log webhook delivery returned a non-2xx status; this log was dropped"
         ),
         Err(e) => tracing::warn!(
             diag = %TRANSPORT_ERROR,
-            webhook_url = ?mask_userinfo(url),
-            error_kind = %e,
+            webhook_url = ?log_target(url),
+            error_kind = %scrub(&e.to_string(), url),
             "request-log webhook delivery failed (transport error); this log was dropped"
         ),
     }
@@ -658,7 +668,7 @@ impl SafeSlot for Deliver {
             if left > 0 && hook.settings().as_ref() != Some(&at.settings) {
                 tracing::warn!(
                     diag = %RELOAD_CUT,
-                    webhook_url = ?mask_userinfo(&at.settings.url),
+                    webhook_url = ?log_target(&at.settings.url),
                     dropped = left,
                     "request-log webhook settings were reloaded during a delivery; the batch's \
                      remaining log lines were dropped"
