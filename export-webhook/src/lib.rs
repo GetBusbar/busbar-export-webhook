@@ -253,7 +253,8 @@ impl Webhook {
 /// `authorization: Basic …` the URL's userinfo became ([`basic_authorization`]), then
 /// `content-type: application/json`, then the auth header — each appended as an `http::HeaderMap`
 /// appends, so a configured auth header named `Authorization` is sent too, after the userinfo's,
-/// as 1.5.5 sent both.
+/// as 1.5.5 sent both. The configured name goes lower-cased, as 1.5.5's `HeaderName` made it (the
+/// contract's field block is lower-case).
 pub fn request(s: &Settings, line: &[u8]) -> Request {
     let mut fields = Vec::new();
     if let Some(basic) = basic_authorization(&s.url) {
@@ -261,7 +262,11 @@ pub fn request(s: &Settings, line: &[u8]) -> Request {
     }
     append(&mut fields, b"content-type", b"application/json");
     if let Some(h) = s.auth_header.as_ref().filter(|h| header_builds(h)) {
-        append(&mut fields, h.name.as_bytes(), h.value.as_bytes());
+        append(
+            &mut fields,
+            h.name.to_ascii_lowercase().as_bytes(),
+            h.value.as_bytes(),
+        );
     }
     let target = match url::Url::parse(&s.url) {
         Ok(u) => match u.query() {
