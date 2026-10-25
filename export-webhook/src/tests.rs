@@ -541,6 +541,33 @@ fn ready_asks_the_verdict_at_boot_and_never_refuses_it() {
     );
 }
 
+/// RED (audit export-webhook round 1): a reload publishes the new settings and clears the cached
+/// verdict as ONE step, so a delivery never reads the new target's settings paired with the old
+/// target's verdict. While the verdict is held, the settings still name the old target.
+#[test]
+fn a_refresh_never_shows_new_settings_beside_the_old_verdict() {
+    let w = Webhook::open(br#"{"url":"https://a.example/x"}"#, &[], 1).expect("opens");
+    *w.live.lock().unwrap() = Some(false);
+    std::thread::scope(|scope| {
+        let guard = w.live.lock().unwrap();
+        scope.spawn(|| {
+            w.refresh(br#"{"url":"https://b.example/x"}"#, &[], 2)
+                .expect("refreshes")
+        });
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            assert_eq!(
+                w.settings().expect("parsed").url,
+                "https://a.example/x",
+                "new settings visible while the old verdict is still held"
+            );
+        }
+        drop(guard);
+    });
+    assert_eq!(w.settings().expect("parsed").url, "https://b.example/x");
+    assert_eq!(*w.live.lock().unwrap(), None);
+}
+
 /// RED (audit export-webhook #4): PARITY WITH 1.5.5, which added the configured auth header only
 /// when `HeaderName::from_bytes` and `HeaderValue::from_str` both took it and otherwise POSTed the
 /// line without it (v1.5.5 `crates/busbar/src/export/webhook.rs` `deliver_logs`). A name that is not
