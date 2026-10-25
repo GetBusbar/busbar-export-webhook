@@ -600,6 +600,75 @@ fn ready_reads_the_hosts_refusal_and_names_the_scheme_rule() {
     );
 }
 
+/// THE CHECK SLOT THROUGH THE DOOR: the phase maps to its check (an instance whose
+/// `delivery_timeout_secs` is 0 is found at `CHECK_PHASE_INSTANCES` and not at
+/// `CHECK_PHASE_LIMITS`), the findings are leased as a JSON array, and a phase the sink does not
+/// know is refused. Mutation proof: swapping the two phase arms turns it red.
+#[test]
+fn the_check_slot_maps_its_phase_and_leases_the_findings() {
+    use busbar_contract::abi::export::{
+        CheckIn, CheckInstance, CheckOut, Ops, CHECK_PHASE_INSTANCES, CHECK_PHASE_LIMITS,
+    };
+    use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome};
+    use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut};
+    use busbar_contract::abi::sdk::test_support::reply::{call_in, close_in};
+    use busbar_contract::abi::sdk::test_support::test_in::TestIn;
+    use busbar_contract::abi::sdk::test_support::{zeroed, DoorView};
+
+    let settings = br#"{"url":"https://a.example/x","delivery_timeout_secs":0}"#;
+    let view = DoorView::of(crate::table::MACRO_DOOR);
+    let open = view.op::<Ops>(|t| &t.head.open).expect("open");
+    let close = view.op::<Ops>(|t| &t.head.close).expect("close");
+    let check_op = view.op::<Ops>(|t| &t.check).expect("check");
+    let mut opened = call_in(
+        open,
+        None,
+        &TestIn::<OpenIn>::new()
+            .set(|i| &i.head.op, slot::OPEN)
+            .settings(settings),
+        zeroed::<OpenOut>(),
+    );
+    assert_eq!(opened.outcome, Outcome::Ready);
+    let instance = opened.take_instance().expect("an instance");
+
+    let rows = [CheckInstance {
+        name: AbiStr::of("w"),
+        settings: Blob::json(settings),
+    }];
+    let check = |phase: u32| {
+        call_in(
+            check_op,
+            Some(&instance),
+            &TestIn::<CheckIn>::new()
+                .set(|i| &i.head.op, check_op.index())
+                .set(|i| &i.phase, phase)
+                .list(|i| &i.instances, |i| &i.instances_len, &rows),
+            zeroed::<CheckOut>(),
+        )
+    };
+    let expected = crate::check(
+        CheckPhase::Instances,
+        &[("w".to_string(), serde_json::from_slice(settings).unwrap())],
+    );
+    assert!(!expected.is_empty(), "a 0-second deadline is a finding");
+    let found = check(CHECK_PHASE_INSTANCES);
+    assert_eq!(found.outcome, Outcome::Ready);
+    let lines: Vec<String> = serde_json::from_slice(&found.owned).expect("a JSON array");
+    assert_eq!(lines, expected);
+    let limits = check(CHECK_PHASE_LIMITS);
+    assert_eq!(limits.outcome, Outcome::Ready);
+    assert!(limits.owned.is_empty(), "{:?}", limits.owned);
+    assert_eq!(check(7).outcome, Outcome::Refused);
+
+    let closed = close_in(
+        close,
+        instance,
+        &TestIn::<busbar_contract::abi::mechanism::call::InHead>::new().set(|i| &i.op, slot::CLOSE),
+        zeroed::<busbar_contract::abi::mechanism::call::OutHead>(),
+    );
+    assert_eq!(closed.outcome, Outcome::Ready);
+}
+
 /// RED (audit export-webhook #4): PARITY WITH 1.5.5, which added the configured auth header only
 /// when `HeaderName::from_bytes` and `HeaderValue::from_str` both took it and otherwise POSTed the
 /// line without it (v1.5.5 `crates/busbar/src/export/webhook.rs` `deliver_logs`). A name that is not
