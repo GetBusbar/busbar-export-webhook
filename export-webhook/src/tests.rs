@@ -292,6 +292,25 @@ fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
     assert_eq!(request(&alone, b"{}").fields, vec![basic, json]);
 }
 
+/// RED (audit export-webhook round 1): the contract's field block carries lower-case names, and
+/// 1.5.5's `HeaderName::from_bytes` lower-cased the configured name, so 1.5.5 sent
+/// `authorization` / `x-api-key` whatever the operator's spelling.
+#[test]
+fn a_configured_auth_header_name_goes_lower_case_as_1_5_5_sent_it() {
+    for (name, sent) in [("Authorization", "authorization"), ("X-Api-Key", "x-api-key")] {
+        let s = settings(json!({
+            "url": "https://siem.example/in",
+            "auth_header": {"name": name, "value": "k"}
+        }));
+        assert!(
+            request(&s, b"{}")
+                .fields
+                .contains(&(sent.as_bytes().to_vec(), b"k".to_vec())),
+            "{name}"
+        );
+    }
+}
+
 /// A non-2xx answer and a transport failure each drop the line and raise their code at WARN (1.5.5's
 /// `warn_webhook_delivery_failed`), with the fields in the compiled-in site's order, the target's
 /// userinfo masked.
