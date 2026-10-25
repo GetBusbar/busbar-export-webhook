@@ -31,7 +31,7 @@
 //!
 //! No `unsafe`: `check`'s instance list is read through the SDK's safe lend (`instances()`).
 
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 use std::mem::size_of;
 use std::sync::{Mutex, PoisonError, RwLock};
@@ -151,19 +151,50 @@ pub const STATEMENT: Statement = Statement {
     ..statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
 };
 
-/// The settings, parsed as the configuration grammar parses them (empty is `{}`).
+/// The settings, parsed as the configuration grammar parses them (empty is `{}`); a `url` whose
+/// credential would be misread as its host is refused ([`ambiguous_url`]).
 fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
     let bytes = if settings.is_empty() { b"{}" } else { settings };
-    serde_json::from_slice::<serde_json::Value>(bytes)
+    let settings: Settings = serde_json::from_slice::<serde_json::Value>(bytes)
         .and_then(serde_json::from_value)
-        .map_err(|e| Refusal::failed(format!("settings: {e}")))
+        .map_err(|e| Refusal::failed(format!("settings: {e}")))?;
+    if let Some(refusal) = ambiguous_url(&settings.url) {
+        return Err(Refusal::failed(refusal));
+    }
+    Ok(settings)
+}
+
+/// THE AMBIGUOUS-URL REFUSAL (owner ruling 2026-10-24): `Some(the refusal)` when `url` parses but
+/// carries an `@` after its host — `https://tok/en@siem.example/…` or `https://u:123/x@siem.example/…`,
+/// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
+/// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
+/// lines. The refusal shows the url with everything between `://` and its last `@` cut, never the
+/// credential. A url that does not parse, or has no `@` after its host, is not ambiguous here.
+pub fn ambiguous_url(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    if !parsed[url::Position::BeforePath..].contains('@') {
+        return None;
+    }
+    let shown = match url.split_once("://") {
+        Some((scheme, rest)) => match rest.rfind('@') {
+            Some(at) => format!("{scheme}://***@{}", &rest[at + 1..]),
+            None => url.to_string(),
+        },
+        None => url.to_string(),
+    };
+    Some(format!(
+        "settings: url `{shown}` is ambiguous: it has an `@` after its host, so what comes before \
+         that `@` would be read as the host and path, not as a credential. Percent-encode a `/`, \
+         `?` or `#` inside the credential (`%2F`, `%3F`, `%23`), or write an `@` meant for the path \
+         as `%40`"
+    ))
 }
 
 /// One opened instance.
 #[derive(Debug)]
 pub struct Webhook {
-    /// Its settings, when they parse (the host refused the configuration otherwise; a sink opened
-    /// only to validate or check settings still opens).
+    /// Its settings. Always `Some` once opened: `open` and `refresh` refuse settings that do not
+    /// parse, so an instance never holds unparsed ones and never sits silently dead.
     settings: RwLock<Option<Settings>>,
     /// The host's verdict on the target, asked once: at boot by `ready` (and again after a
     /// `refresh` clears it, by the next delivery or readiness ask); `None` until then.
@@ -178,11 +209,11 @@ impl Life for Webhook {
         parse(settings).map(|_| ())
     }
 
-    /// Never refuses: settings that do not parse are the configuration's refusal, reported by
-    /// `validate` — a sink opened only to answer that must open.
+    /// Refuses settings that do not parse, in the same words as [`Life::validate`]: an instance
+    /// that opened on them would drop every delivery without a word.
     fn open(settings: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
         Ok(Self {
-            settings: RwLock::new(parse(settings).ok()),
+            settings: RwLock::new(Some(parse(settings)?)),
             live: Mutex::new(None),
         })
     }
@@ -203,15 +234,17 @@ impl Life for Webhook {
         Poll::Ready(Ok(()))
     }
 
-    /// A reload's settings replace the instance's, and its target is asked about afresh.
+    /// A reload's settings replace the instance's, and its target is asked about afresh; settings
+    /// that do not parse are refused and the old ones (and their verdict) stay.
     fn refresh(&self, settings: &[u8], _: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
+        let parsed = parse(settings)?;
         // Hold the verdict across the settings write (lock order live -> settings, as `admitted`),
         // so no delivery reads the new settings beside the old target's cached verdict.
         let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
         *self
             .settings
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = parse(settings).ok();
+            .unwrap_or_else(PoisonError::into_inner) = Some(parsed);
         *live = None;
         Ok(Refreshed::default())
     }
@@ -528,6 +561,16 @@ fn instances(input: Lent<'_, CheckIn>) -> Vec<(String, serde_json::Value)> {
 /// The instance state every slot reads.
 type State = Held<Webhook>;
 
+/// The error texts of the door's REFUSED answers: one per cause, so the host's line names why
+/// instead of a bare outcome.
+pub const NO_INSTANCE: &str = "no opened request-log-webhook instance";
+/// `scrape` on a push sink: it carries no `metrics` stream.
+pub const NO_EXPOSITION: &str = "this sink carries no metrics stream, so it renders no exposition";
+/// `serve` on a sink that declares no route.
+pub const NO_ROUTE: &str = "this sink declares no route, so it serves no request";
+/// `check` at a phase this sink does not know.
+pub const UNKNOWN_PHASE: &str = "not a check phase this sink knows (limits or instances)";
+
 /// What a delivery parks across PENDING: the settings it started under (a reload mid-batch changes
 /// nothing for it: its lines go, and are reported, to the target it began with), the line it is on,
 /// the handles issued before that line's exchange, and the exchange.
@@ -549,10 +592,10 @@ impl SafeSlot for Deliver {
     fn call(
         instance: Instance<'_, State>,
         input: Lent<'_, DeliverIn>,
-        _: Out<'_, OutHead>,
+        mut out: Out<'_, OutHead>,
     ) -> Outcome {
         let Some(h) = instance.get() else {
-            return Outcome::Refused;
+            return out.fail(Refusal::refused(NO_INSTANCE));
         };
         let hook = h.life();
         // A RESUMED delivery finishes its parked exchange whatever a reload changed meanwhile: it
@@ -627,15 +670,16 @@ impl SafeSlot for Deliver {
     }
 }
 
-/// `scrape`: a push sink renders no exposition.
+/// `scrape`: REFUSED, saying why — a push sink carries no `metrics` stream and renders no
+/// exposition (the host scrapes only the sink that carries `metrics`).
 pub struct Scrape;
 
 impl SafeSlot for Scrape {
     type In = ScrapeIn;
     type Out = ScrapeOut;
     type State = State;
-    fn call(_: Instance<'_, State>, _: Lent<'_, ScrapeIn>, _: Out<'_, ScrapeOut>) -> Outcome {
-        Outcome::Ready
+    fn call(_: Instance<'_, State>, _: Lent<'_, ScrapeIn>, mut out: Out<'_, ScrapeOut>) -> Outcome {
+        out.fail(Refusal::refused(NO_EXPOSITION))
     }
 }
 
@@ -664,13 +708,13 @@ impl SafeSlot for Check {
         mut out: Out<'_, CheckOut>,
     ) -> Outcome {
         let Some(h) = instance.get() else {
-            return Outcome::Refused;
+            return out.fail(Refusal::refused(NO_INSTANCE));
         };
         let phase = match input.phase {
             CHECK_PHASE_LIMITS => CheckPhase::Limits,
             CHECK_PHASE_INSTANCES => CheckPhase::Instances,
             // A phase this sink does not know is refused, never run as another.
-            _ => return Outcome::Refused,
+            _ => return out.fail(Refusal::refused(UNKNOWN_PHASE)),
         };
         let lines = check(phase, &instances(input));
         if !lines.is_empty() {
@@ -681,7 +725,8 @@ impl SafeSlot for Check {
     }
 }
 
-/// `serve`: no route, so any request is `404`.
+/// `serve`: REFUSED, saying why — the sink declares no route (the host serves only declared
+/// routes).
 pub struct Serve;
 
 impl SafeSlot for Serve {
@@ -689,8 +734,7 @@ impl SafeSlot for Serve {
     type Out = ServeOut;
     type State = State;
     fn call(_: Instance<'_, State>, _: Lent<'_, ServeIn>, mut out: Out<'_, ServeOut>) -> Outcome {
-        out.set(|o| &o.status_code, 404_u16);
-        Outcome::Ready
+        out.fail(Refusal::refused(NO_ROUTE))
     }
 }
 
