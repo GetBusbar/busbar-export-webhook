@@ -182,7 +182,7 @@ fn a_delivery_posts_the_line() {
             target: b"/in?k=v".to_vec(),
             fields: vec![
                 (b"content-type".to_vec(), b"application/json".to_vec()),
-                (b"Authorization".to_vec(), b"Bearer x".to_vec()),
+                (b"authorization".to_vec(), b"Bearer x".to_vec()),
             ],
             body: line.to_vec(),
             timeout_ms: 9000,
@@ -271,7 +271,7 @@ fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
         r.fields,
         vec![
             basic.clone(),
-            (b"Authorization".to_vec(), b"Bearer x".to_vec()),
+            (b"authorization".to_vec(), b"Bearer x".to_vec()),
             json.clone(),
         ]
     );
@@ -285,11 +285,33 @@ fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
         vec![
             basic.clone(),
             json.clone(),
-            (b"X-Api-Key".to_vec(), b"k".to_vec()),
+            (b"x-api-key".to_vec(), b"k".to_vec()),
         ]
     );
     let alone = settings(json!({"url": "https://user:pass@siem.example/in"}));
     assert_eq!(request(&alone, b"{}").fields, vec![basic, json]);
+}
+
+/// RED (audit export-webhook round 1): the contract's field block carries lower-case names, and
+/// 1.5.5's `HeaderName::from_bytes` lower-cased the configured name, so 1.5.5 sent
+/// `authorization` / `x-api-key` whatever the operator's spelling.
+#[test]
+fn a_configured_auth_header_name_goes_lower_case_as_1_5_5_sent_it() {
+    for (name, sent) in [
+        ("Authorization", "authorization"),
+        ("X-Api-Key", "x-api-key"),
+    ] {
+        let s = settings(json!({
+            "url": "https://siem.example/in",
+            "auth_header": {"name": name, "value": "k"}
+        }));
+        assert!(
+            request(&s, b"{}")
+                .fields
+                .contains(&(sent.as_bytes().to_vec(), b"k".to_vec())),
+            "{name}"
+        );
+    }
 }
 
 /// A non-2xx answer and a transport failure each drop the line and raise their code at WARN (1.5.5's
@@ -411,7 +433,7 @@ fn the_statement_states_the_sink() {
     assert_eq!(TARGET_FROM, "settings.url");
 }
 
-/// The declaration both doors state: the shed counter and the three catalogue codes it raises.
+/// The declaration both doors state: the shed counter and the four catalogue codes it raises.
 #[test]
 fn the_declaration_states_the_shed_counter_and_the_codes() {
     let d: serde_json::Value = serde_json::from_str(DECLARES).unwrap();
@@ -519,6 +541,134 @@ fn ready_asks_the_verdict_at_boot_and_never_refuses_it() {
     );
 }
 
+/// RED (audit export-webhook round 1): a reload publishes the new settings and clears the cached
+/// verdict as ONE step, so a delivery never reads the new target's settings paired with the old
+/// target's verdict. While the verdict is held, the settings still name the old target.
+#[test]
+fn a_refresh_never_shows_new_settings_beside_the_old_verdict() {
+    let w = Webhook::open(br#"{"url":"https://a.example/x"}"#, &[], 1).expect("opens");
+    *w.live.lock().unwrap() = Some(false);
+    std::thread::scope(|scope| {
+        let guard = w.live.lock().unwrap();
+        scope.spawn(|| {
+            w.refresh(br#"{"url":"https://b.example/x"}"#, &[], 2)
+                .expect("refreshes")
+        });
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            assert_eq!(
+                w.settings().expect("parsed").url,
+                "https://a.example/x",
+                "new settings visible while the old verdict is still held"
+            );
+        }
+        drop(guard);
+    });
+    assert_eq!(w.settings().expect("parsed").url, "https://b.example/x");
+    assert_eq!(*w.live.lock().unwrap(), None);
+}
+
+/// `ready` reads the HOST's verdict, not "no host": over a fake host whose `need.admit` refuses, an
+/// `http://` target is named in the scheme rule's 1.5.5 words, which only a Refused verdict from
+/// the host yields (no host to ask says its own words). Mutation proof: with `ready` calling
+/// `self.admitted(None)` this test fails on the message.
+#[test]
+fn ready_reads_the_hosts_refusal_and_names_the_scheme_rule() {
+    use busbar_contract::abi::mechanism::call::Outcome;
+    use busbar_contract::abi::mechanism::ticket::Ticket;
+    use busbar_contract::abi::sdk::conn::Host;
+    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use std::task::Poll;
+    struct Refuses;
+    impl FakeService for Refuses {
+        type In = busbar_contract::abi::host::service::NeedAdmitIn;
+        fn serve(call: &mut ServiceCall<Self::In>) -> Outcome {
+            call.set_error("destination refused");
+            Outcome::Refused
+        }
+    }
+    let fake_host = FakeHost::new().serve(fake::host::NEED_ADMIT, Refuses);
+    let tables = fake_host.lent();
+    let host = Host::of(&tables);
+    let w = Webhook::open(br#"{"url":"http://127.0.0.1:4000/sidecar"}"#, &[], 1).expect("opens");
+    let got = logged(|| assert!(matches!(w.ready(&host, Ticket::NONE), Poll::Ready(Ok(())))));
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(field(&got[0], "diag"), "BUSBAR-7070");
+    assert!(
+        field(&got[0], "message").contains("must be an https:// URL"),
+        "{got:?}"
+    );
+}
+
+/// THE CHECK SLOT THROUGH THE DOOR: the phase maps to its check (an instance whose
+/// `delivery_timeout_secs` is 0 is found at `CHECK_PHASE_INSTANCES` and not at
+/// `CHECK_PHASE_LIMITS`), the findings are leased as a JSON array, and a phase the sink does not
+/// know is refused. Mutation proof: swapping the two phase arms turns it red.
+#[test]
+fn the_check_slot_maps_its_phase_and_leases_the_findings() {
+    use busbar_contract::abi::export::{
+        CheckIn, CheckInstance, CheckOut, Ops, CHECK_PHASE_INSTANCES, CHECK_PHASE_LIMITS,
+    };
+    use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome};
+    use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut};
+    use busbar_contract::abi::sdk::test_support::reply::{call_in, close_in};
+    use busbar_contract::abi::sdk::test_support::test_in::TestIn;
+    use busbar_contract::abi::sdk::test_support::{zeroed, DoorView};
+
+    let settings = br#"{"url":"https://a.example/x","delivery_timeout_secs":0}"#;
+    let view = DoorView::of(crate::table::MACRO_DOOR);
+    let open = view.op::<Ops>(|t| &t.head.open).expect("open");
+    let close = view.op::<Ops>(|t| &t.head.close).expect("close");
+    let check_op = view.op::<Ops>(|t| &t.check).expect("check");
+    let mut opened = call_in(
+        open,
+        None,
+        &TestIn::<OpenIn>::new()
+            .set(|i| &i.head.op, slot::OPEN)
+            .settings(settings),
+        zeroed::<OpenOut>(),
+    );
+    assert_eq!(opened.outcome, Outcome::Ready);
+    let instance = opened.take_instance().expect("an instance");
+
+    let rows = [CheckInstance {
+        name: AbiStr::of("w"),
+        settings: Blob::json(settings),
+    }];
+    let check = |phase: u32| {
+        call_in(
+            check_op,
+            Some(&instance),
+            &TestIn::<CheckIn>::new()
+                .set(|i| &i.head.op, check_op.index())
+                .set(|i| &i.phase, phase)
+                .list(|i| &i.instances, |i| &i.instances_len, &rows),
+            zeroed::<CheckOut>(),
+        )
+    };
+    let expected = crate::check(
+        CheckPhase::Instances,
+        &[("w".to_string(), serde_json::from_slice(settings).unwrap())],
+    );
+    assert!(!expected.is_empty(), "a 0-second deadline is a finding");
+    let found = check(CHECK_PHASE_INSTANCES);
+    assert_eq!(found.outcome, Outcome::Ready);
+    let lines: Vec<String> = serde_json::from_slice(&found.owned).expect("a JSON array");
+    assert_eq!(lines, expected);
+    let limits = check(CHECK_PHASE_LIMITS);
+    assert_eq!(limits.outcome, Outcome::Ready);
+    assert!(limits.owned.is_empty(), "{:?}", limits.owned);
+    assert_eq!(check(7).outcome, Outcome::Refused);
+
+    let closed = close_in(
+        close,
+        instance,
+        &TestIn::<busbar_contract::abi::mechanism::call::InHead>::new().set(|i| &i.op, slot::CLOSE),
+        zeroed::<busbar_contract::abi::mechanism::call::OutHead>(),
+    );
+    assert_eq!(closed.outcome, Outcome::Ready);
+}
+
 /// RED (audit export-webhook #4): PARITY WITH 1.5.5, which added the configured auth header only
 /// when `HeaderName::from_bytes` and `HeaderValue::from_str` both took it and otherwise POSTed the
 /// line without it (v1.5.5 `crates/busbar/src/export/webhook.rs` `deliver_logs`). A name that is not
@@ -559,7 +709,10 @@ fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
             request(&s, b"{}").fields,
             vec![
                 json.clone(),
-                (name.as_bytes().to_vec(), value.as_bytes().to_vec())
+                (
+                    name.to_ascii_lowercase().into_bytes(),
+                    value.as_bytes().to_vec()
+                )
             ],
             "{name:?}: {value:?}"
         );

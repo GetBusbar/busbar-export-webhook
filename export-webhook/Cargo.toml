@@ -31,3 +31,7 @@ tracing = { workspace = true }
 # A userinfo's percent-decoding and its Basic base64, as 1.5.5's reqwest made them.
 percent-encoding = { workspace = true }
 base64 = { workspace = true }
+
+[dev-dependencies]
+# The plugin test support (a fake host over safe Rust): dev-only, never in a shipped image.
+busbar-contract = { workspace = true, features = ["test-seal"] }
