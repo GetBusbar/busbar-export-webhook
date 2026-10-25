@@ -7,7 +7,7 @@
 //! in the path (`/services/T…/B…/X…`), others in the query (`?api_key=…`). And the host's failure
 //! text may quote the target. So a delivery LOG line names only the target's scheme and host
 //! ([`log_target`]), and any text that came from elsewhere is scrubbed of the target's parts
-//! ([`scrub`]) and of the settings' credential strings ([`settings_credentials`]).
+//! ([`scrub`]).
 //!
 //! The 1.5.5 REFUSAL lines that name the target (BUSBAR-7070, the delivery-deadline check) are left
 //! as they were: the shadow oracle records them with the path, and only their userinfo is masked.
@@ -71,34 +71,6 @@ pub fn scrub(text: &str, url: &str) -> String {
         .collect();
     parts.extend(decoded);
     replace_all(text, parts)
-}
-
-/// Every credential-bearing string the settings JSON holds: every string (and map key) under
-/// `auth_header` except the header's `name`. These are what serde may quote back in a shape refusal.
-pub fn settings_credentials(settings: &serde_json::Value) -> Vec<String> {
-    fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
-        match v {
-            serde_json::Value::String(s) => out.push(s.clone()),
-            serde_json::Value::Array(a) => a.iter().for_each(|v| walk(v, out)),
-            serde_json::Value::Object(o) => {
-                for (k, v) in o {
-                    if k == "name" && v.is_string() {
-                        continue;
-                    }
-                    if k != "name" && k != "value" {
-                        out.push(k.clone());
-                    }
-                    walk(v, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    if let Some(h) = settings.get("auth_header") {
-        walk(h, &mut out);
-    }
-    out
 }
 
 /// `text` with each of `secrets` (as written, and as serde's `{:?}` escapes it inside a quoted

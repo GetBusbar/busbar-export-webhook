@@ -1,5 +1,6 @@
 {
-  "settings": { "url": "https://localhost:51655/busbar" },
+  "settings": { "url": "https://conf:CANARY-wh-url-91d3@localhost:51655/busbar", "auth_header": { "name": "X-Api-Key", "value": "CANARY-wh-key-4b70" } },
+  "credentials": ["CANARY-wh-url-91d3", "CANARY-wh-key-4b70"],
   "dialing_steps": ["deliver #0"],
   "export": {
     "bad_settings": [
@@ -7,7 +8,7 @@
       { "settings": { "url": "https://x.example.com", "bogus": 1 },
         "refusal": "settings: unknown field `bogus`, expected one of `url`, `auth_header`, `max_inflight_deliveries`, `delivery_timeout_secs`" },
       { "settings": { "url": 5 },
-        "refusal": "settings: invalid type: integer `5`, expected a string" }
+        "refusal": "settings: invalid type: integer `***`, expected a string" }
     ],
     "deliver": [
       { "stream": "logs",

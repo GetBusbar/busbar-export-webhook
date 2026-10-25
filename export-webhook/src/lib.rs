@@ -45,6 +45,7 @@ use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRE
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement, REWRITE_ALIAS};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
+use busbar_contract::abi::sdk::cred::{Cred, PasswordAt, Seal, UserinfoUrl};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
@@ -157,15 +158,12 @@ pub const STATEMENT: Statement = Statement {
 /// credential would be misread as its host is refused ([`ambiguous_url`]).
 fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
     let bytes = if settings.is_empty() { b"{}" } else { settings };
-    let value = serde_json::from_slice::<serde_json::Value>(bytes)
-        .map_err(|e| Refusal::failed(format!("settings: {e}")))?;
-    // serde's shape refusal quotes the offending value (`invalid type: string "Bearer …"`): the
-    // settings' credential strings are cut from it, the words otherwise serde's (H2).
-    let credentials = redact::settings_credentials(&value);
-    let settings: Settings = serde_json::from_value(value).map_err(|e| {
-        Refusal::failed(redact::replace_all(&format!("settings: {e}"), credentials))
-    })?;
-    if let Some(refusal) = ambiguous_url(&settings.url) {
+    // The credentials are sealed as they are read, and a shape refusal names a path and a type,
+    // never a value (`abi::sdk::cred::settings`).
+    let settings: Settings = busbar_contract::abi::sdk::cred::settings(bytes)
+        .map_err(|e| Refusal::failed(e.to_string()))?;
+    let unencoded = settings.url.password_at() == Some(PasswordAt::UserinfoUnencoded);
+    if let Some(refusal) = ambiguous_url(settings.url.public(), unencoded) {
         return Err(Refusal::failed(refusal));
     }
     Ok(settings)
@@ -177,9 +175,9 @@ fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
 /// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
 /// lines. The refusal shows the url with everything between `://` and its last `@` cut, never the
 /// credential. A url that does not parse, or has no `@` after its host, is not ambiguous here.
-pub fn ambiguous_url(url: &str) -> Option<String> {
+pub fn ambiguous_url(url: &str, unencoded: bool) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
-    if !parsed[url::Position::BeforePath..].contains('@') {
+    if !unencoded && !parsed[url::Position::BeforePath..].contains('@') {
         return None;
     }
     let shown = match url.split_once("://") {
@@ -281,7 +279,7 @@ impl Webhook {
             Ok(()) => true,
             Err(e) => {
                 let url = self.settings().map(|s| s.url);
-                let words = refusal_words(url.as_deref(), &e);
+                let words = refusal_words(url.as_ref().map(|u| u.public()), &e);
                 tracing::error!(diag = %DISABLED, "{words}; disabling this webhook exporter");
                 false
             }
@@ -298,33 +296,39 @@ impl Webhook {
 /// appends, so a configured auth header named `Authorization` is sent too, after the userinfo's,
 /// as 1.5.5 sent both. The configured name goes lower-cased, as 1.5.5's `HeaderName` made it (the
 /// contract's field block is lower-case).
-pub fn request(s: &Settings, line: &[u8]) -> Request {
-    let mut fields = Vec::new();
-    if let Some(basic) = basic_authorization(&s.url) {
-        append(&mut fields, b"authorization", &basic);
+pub fn request(s: &Settings, line: &[u8]) -> (Request, Vec<(usize, Vec<u8>, Seal)>) {
+    let mut sealed = Vec::new();
+    let basic = basic_authorization(&s.url);
+    let has_basic = basic.is_some();
+    if let Some(b) = basic {
+        sealed.push((0, b"authorization".to_vec(), b));
     }
-    append(&mut fields, b"content-type", b"application/json");
+    let fields = vec![(b"content-type".to_vec(), b"application/json".to_vec())];
     if let Some(h) = s.auth_header.as_ref().filter(|h| header_builds(h)) {
-        append(
-            &mut fields,
-            h.name.to_ascii_lowercase().as_bytes(),
-            h.value.as_bytes(),
-        );
+        let name = h.name.to_ascii_lowercase().into_bytes();
+        // Placed as `http::HeaderMap` appends: after the last field of the same name, else last.
+        let at = if name == b"authorization" && has_basic {
+            0
+        } else {
+            fields.len()
+        };
+        sealed.push((at, name, h.value.field()));
     }
-    let target = match url::Url::parse(&s.url) {
+    let target = match url::Url::parse(s.url.public()) {
         Ok(u) => match u.query() {
             Some(q) => format!("{}?{q}", u.path()),
             None => u.path().to_string(),
         },
         Err(_) => "/".to_string(),
     };
-    Request {
+    let request = Request {
         method: b"POST".to_vec(),
         target: target.into_bytes(),
         fields,
         body: line.to_vec(),
         timeout_ms: s.delivery_timeout_secs.saturating_mul(1000),
-    }
+    };
+    (request, sealed)
 }
 
 /// Whether 1.5.5 could build the auth header, and so sent it: `HeaderName::from_bytes` took a name
@@ -336,23 +340,7 @@ fn header_builds(h: &ExportAuthHeader) -> bool {
     let name = h.name.as_bytes();
     (1..=usize::from(u16::MAX)).contains(&name.len())
         && name.iter().all(token)
-        && h.value
-            .bytes()
-            .all(|b| b == b'\t' || (b >= 0x20 && b != 0x7f))
-}
-
-/// One field appended as an `http::HeaderMap` appends it, the map 1.5.5's request held its fields
-/// in and wrote them from: after the last field of the same name (names compared without case),
-/// or last when there is none.
-fn append(fields: &mut Vec<(Vec<u8>, Vec<u8>)>, name: &[u8], value: &[u8]) {
-    let field = (name.to_vec(), value.to_vec());
-    match fields
-        .iter()
-        .rposition(|(n, _)| n.eq_ignore_ascii_case(name))
-    {
-        Some(i) => fields.insert(i + 1, field),
-        None => fields.push(field),
-    }
+        && h.value.is_field_value()
 }
 
 /// THE USERINFO AS 1.5.5 SENT IT: the `authorization` value a target URL's userinfo became, `None`
@@ -362,25 +350,22 @@ fn append(fields: &mut Vec<(Vec<u8>, Vec<u8>)>, name: &[u8], value: &[u8]) {
 /// all; a password that is not is left out), and, when either was set, wrote `basic_auth`:
 /// `Basic ` and the padded standard base64 of `{username}:` followed by the password, if any. The
 /// host's connector drops the userinfo from the target the `url` setting gives the need.
-pub fn basic_authorization(url: &str) -> Option<Vec<u8>> {
-    let u = url::Url::parse(url).ok()?;
+pub fn basic_authorization(url: &UserinfoUrl) -> Option<Seal> {
+    let u = url::Url::parse(url.public()).ok()?;
     if !u.has_authority() {
         return None;
     }
     let username = String::from_utf8(percent_decode(u.username().as_bytes())).ok()?;
-    let password = u
-        .password()
-        .and_then(|p| String::from_utf8(percent_decode(p.as_bytes())).ok());
+    let password = url.password().filter(|p| p.is_text());
     if username.is_empty() && password.is_none() {
         return None;
     }
-    let mut credentials = format!("{username}:").into_bytes();
-    if let Some(p) = password {
-        credentials.extend_from_slice(p.as_bytes());
-    }
-    let mut value = b"Basic ".to_vec();
-    value.extend_from_slice(base64(&credentials).as_bytes());
-    Some(value)
+    Some(
+        password
+            .cloned()
+            .unwrap_or_else(Cred::empty)
+            .basic(&username),
+    )
 }
 
 /// `%XX` (two hex digits, either case) decoded to its byte; any other byte, a `%` not followed by
@@ -388,13 +373,6 @@ pub fn basic_authorization(url: &str) -> Option<Vec<u8>> {
 /// decoder 1.5.5's reqwest used through `url`.
 fn percent_decode(s: &[u8]) -> Vec<u8> {
     percent_encoding::percent_decode(s).collect()
-}
-
-/// The standard base64 alphabet, padded (RFC 4648 §4): the `base64` crate's `STANDARD` engine,
-/// the encoder 1.5.5's reqwest `basic_auth` used.
-fn base64(bytes: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// BUSBAR-7070's words for a refused target, in 1.5.5's words byte for byte, in 1.5.5's order (v1.5.5
@@ -504,7 +482,7 @@ fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
                  settings.delivery_timeout_secs: {}, above the {MAX_DURATION_SECS}-second (30-year) \
                  ceiling every duration is bounded by — a delivery deadline that far out overflows \
                  the clock",
-                mask_userinfo(&w.url),
+                mask_userinfo(w.url.public()),
                 w.delivery_timeout_secs
             ));
         }
@@ -513,7 +491,7 @@ fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
                 "the `module: request-log-webhook` export instance targeting '{}' (#{i}) sets \
                  settings.delivery_timeout_secs: 0, which would abort every delivery — it must be \
                  >= 1",
-                mask_userinfo(&w.url)
+                mask_userinfo(w.url.public())
             ));
         }
     }
@@ -525,7 +503,11 @@ pub fn mask_userinfo(url: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
         return mask_unparsed(url);
     };
-    if parsed.username().is_empty() && parsed.password().is_none() {
+    // A userinfo whose password was sealed at parse keeps its `@` (`https://@h/` for `:pw@`).
+    let at_in_authority = url.split_once("://").is_some_and(|(_, rest)| {
+        rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())].contains('@')
+    });
+    if parsed.username().is_empty() && parsed.password().is_none() && !at_in_authority {
         return url.to_string();
     }
     if parsed.set_password(None).is_err() || parsed.set_username("***").is_err() {
@@ -644,7 +626,10 @@ impl SafeSlot for Deliver {
                     let mut c = host.connector_from(instance.ticket(), at.issued);
                     let started = match at.exchange.take() {
                         Some(ex) => Ok(ex),
-                        None => Exchange::request(request(&at.settings, line)),
+                        None => {
+                            let (r, sealed) = request(&at.settings, line);
+                            Exchange::request_sealed(r, sealed)
+                        }
                     };
                     match started {
                         Err(e) => Err(e),
@@ -662,13 +647,13 @@ impl SafeSlot for Deliver {
                     }
                 }
             };
-            report(&at.settings.url, answered);
+            report(at.settings.url.public(), answered);
             at.line += 1;
             let left = lines.len().saturating_sub(at.line);
             if left > 0 && hook.settings().as_ref() != Some(&at.settings) {
                 tracing::warn!(
                     diag = %RELOAD_CUT,
-                    webhook_url = ?log_target(&at.settings.url),
+                    webhook_url = ?log_target(at.settings.url.public()),
                     dropped = left,
                     "request-log webhook settings were reloaded during a delivery; the batch's \
                      remaining log lines were dropped"

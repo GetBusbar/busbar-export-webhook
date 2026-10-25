@@ -4,6 +4,7 @@
 //! The `settings:` grammar of an `export.<name>.module: request-log-webhook` instance — config
 //! grammar, tracked by the config-schema gate here, where the sink that reads it lives (K9c).
 
+use busbar_contract::abi::sdk::cred::{Cred, UserinfoUrl};
 use serde::Deserialize;
 
 /// `settings:` of an `export.<name>.module: request-log-webhook` instance — relocated from the retired
@@ -18,7 +19,7 @@ use serde::Deserialize;
 pub struct WebhookSettings {
     /// The webhook target URL — REQUIRED, `https://`-only, refused by the host's policy when it
     /// targets an internal host (relocated from the retired `observability.request_log_webhook_url`).
-    pub url: String,
+    pub url: UserinfoUrl,
     /// An optional auth header applied to every delivery from THIS instance (e.g.
     /// `{ name: Authorization, value: "Bearer ${WEBHOOK_TOKEN}" }`). The `value` rides the config's
     /// `${VAR}` env interpolation, so a secret is never stored literally.
@@ -36,7 +37,7 @@ pub struct WebhookSettings {
 impl std::fmt::Debug for WebhookSettings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WebhookSettings")
-            .field("url", &crate::mask_userinfo(&self.url))
+            .field("url", &crate::mask_userinfo(self.url.public()))
             .field("auth_header", &self.auth_header)
             .field("max_inflight_deliveries", &self.max_inflight_deliveries)
             .field("delivery_timeout_secs", &self.delivery_timeout_secs)
@@ -44,14 +45,13 @@ impl std::fmt::Debug for WebhookSettings {
     }
 }
 
-/// One `{ name, value }` auth header for a webhook export instance. Its `value` is the credential:
-/// `Debug` names the header and prints the value as `<redacted>`, so no formatted settings, header
-/// or instance carries it.
+/// One `{ name, value }` auth header for a webhook export instance. Its `value` is the credential,
+/// sealed at parse: it reaches the wire only as a sealed field.
 #[derive(Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ExportAuthHeader {
     pub name: String,
-    pub value: String,
+    pub value: Cred,
 }
 
 impl std::fmt::Debug for ExportAuthHeader {

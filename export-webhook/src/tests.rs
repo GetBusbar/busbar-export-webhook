@@ -5,7 +5,37 @@
 //! compiled-in sink's (1.5.5); what it asks the host to carry; and what it reports.
 
 use super::*;
+use busbar_contract::abi::sdk::cred::CredUrl;
+use busbar_contract::abi::sdk::test_support::chip::sealed_bytes;
 use serde_json::json;
+
+/// The request as the wire carries it: the sealed fields' bytes read back through the dev-only
+/// test support, in their place (the plugin itself never reads them).
+fn request(s: &Settings, line: &[u8]) -> Request {
+    let (mut r, sealed) = crate::request(s, line);
+    let public = std::mem::take(&mut r.fields);
+    let mut fields = Vec::new();
+    for at in 0..=public.len() {
+        for (_, name, seal) in sealed.iter().filter(|(a, ..)| (*a).min(public.len()) == at) {
+            fields.push((name.clone(), sealed_bytes(seal)));
+        }
+        if let Some(f) = public.get(at) {
+            fields.push(f.clone());
+        }
+    }
+    r.fields = fields;
+    r
+}
+
+fn userinfo_url(text: &str) -> UserinfoUrl {
+    UserinfoUrl(CredUrl::parse_userinfo(text).expect("splits"))
+}
+
+/// The `authorization` value a url's userinfo becomes, as the wire carries it.
+fn basic_authorization(url: &str) -> Option<Vec<u8>> {
+    let u = UserinfoUrl(CredUrl::parse_userinfo(url).ok()?);
+    crate::basic_authorization(&u).map(|s| sealed_bytes(&s))
+}
 use std::sync::{Arc, Mutex};
 
 fn refused(settings: serde_json::Value) -> String {
@@ -238,19 +268,6 @@ fn a_userinfo_in_the_url_is_sent_as_basic_as_1_5_5_sent_it() {
             "{url}"
         );
     }
-    // The base64 is the padded standard alphabet (RFC 4648 section 10's vectors).
-    for (plain, encoded) in [
-        ("", ""),
-        ("f", "Zg=="),
-        ("fo", "Zm8="),
-        ("foo", "Zm9v"),
-        ("foob", "Zm9vYg=="),
-        ("fooba", "Zm9vYmE="),
-        ("foobar", "Zm9vYmFy"),
-    ] {
-        assert_eq!(base64(plain.as_bytes()), encoded, "{plain}");
-    }
-    assert_eq!(base64(&[0xfb, 0xff, 0xbf]), "+/+/");
 }
 
 /// RED (audit export-webhook #1, ARCHITECT ruling (c)): the userinfo's field rides every POST
@@ -413,7 +430,10 @@ fn an_unadmitted_target_disables_the_instance_once() {
     w.refresh(br#"{"url":"https://b.example/"}"#, &[], 2)
         .expect("a refresh applies");
     assert_eq!(logged(|| assert!(!w.admitted(None))).len(), 1);
-    assert_eq!(w.settings().expect("parsed").url, "https://b.example/");
+    assert_eq!(
+        w.settings().expect("parsed").url.public(),
+        "https://b.example/"
+    );
 }
 
 /// The Statement: name, NO in-flight ceiling of its own (`u32::MAX`: the operator's
@@ -558,14 +578,17 @@ fn a_refresh_never_shows_new_settings_beside_the_old_verdict() {
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_millis(10));
             assert_eq!(
-                w.settings().expect("parsed").url,
+                w.settings().expect("parsed").url.public(),
                 "https://a.example/x",
                 "new settings visible while the old verdict is still held"
             );
         }
         drop(guard);
     });
-    assert_eq!(w.settings().expect("parsed").url, "https://b.example/x");
+    assert_eq!(
+        w.settings().expect("parsed").url.public(),
+        "https://b.example/x"
+    );
     assert_eq!(*w.live.lock().unwrap(), None);
 }
 
@@ -781,10 +804,10 @@ fn the_settings_schema_marks_no_nested_secret() {
 fn the_auth_header_value_is_redacted_from_debug() {
     let header = ExportAuthHeader {
         name: "Authorization".into(),
-        value: "Bearer s3cret-token".into(),
+        value: busbar_contract::abi::sdk::test_support::chip::cred("Bearer s3cret-token"),
     };
     let settings = WebhookSettings {
-        url: "https://siem.example/in".into(),
+        url: userinfo_url("https://siem.example/in"),
         auth_header: Some(header.clone()),
         max_inflight_deliveries: 1,
         delivery_timeout_secs: 1,
@@ -810,7 +833,7 @@ fn the_auth_header_value_is_redacted_from_debug() {
 #[test]
 fn the_url_userinfo_is_masked_in_debug() {
     let settings = WebhookSettings {
-        url: "https://ops:hunter2@siem.example/in".into(),
+        url: userinfo_url("https://ops:hunter2@siem.example/in"),
         auth_header: None,
         max_inflight_deliveries: 1,
         delivery_timeout_secs: 1,
@@ -912,7 +935,7 @@ fn open_and_refresh_refuse_settings_that_do_not_parse() {
     let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
     assert_eq!(w.refresh(bad, &[], 2).expect_err("refresh refuses"), want);
     assert_eq!(
-        w.settings().map(|s| s.url).as_deref(),
+        w.settings().map(|s| s.url.public().to_owned()).as_deref(),
         Some("https://a.example/"),
         "a refused refresh keeps the old settings"
     );
