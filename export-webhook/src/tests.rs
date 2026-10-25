@@ -658,7 +658,9 @@ fn the_check_slot_maps_its_phase_and_leases_the_findings() {
     let limits = check(CHECK_PHASE_LIMITS);
     assert_eq!(limits.outcome, Outcome::Ready);
     assert!(limits.owned.is_empty(), "{:?}", limits.owned);
-    assert_eq!(check(7).outcome, Outcome::Refused);
+    let unknown = check(7);
+    assert_eq!(unknown.outcome, Outcome::Refused);
+    assert_eq!(unknown.error.as_deref(), Some(crate::UNKNOWN_PHASE));
 
     let closed = close_in(
         close,
@@ -816,4 +818,96 @@ fn the_url_userinfo_is_masked_in_debug() {
         assert!(!text.contains("hunter2"), "the password leaked: {text}");
         assert!(text.contains("siem.example"), "the host is kept: {text}");
     }
+}
+
+// ── SIBLING ALIGNMENT (export kind) ─────────────────────────────────────────────────────────────
+
+/// RED before: `open` took settings that do not parse and opened a dead instance whose every
+/// delivery returned READY without a word; `refresh` replaced good settings with none the same way.
+/// Both now refuse in `validate`'s words, and a refused refresh keeps the old settings — as every
+/// export sibling does.
+#[test]
+fn open_and_refresh_refuse_settings_that_do_not_parse() {
+    let bad = br#"{"url":"https://a.example/","bogus":1}"#;
+    let want = Webhook::validate(bad).expect_err("refused");
+    let opened = Webhook::open(bad, &[], 1).expect_err("open refuses");
+    assert_eq!(opened, want);
+    let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
+    assert_eq!(w.refresh(bad, &[], 2).expect_err("refresh refuses"), want);
+    assert_eq!(
+        w.settings().map(|s| s.url).as_deref(),
+        Some("https://a.example/"),
+        "a refused refresh keeps the old settings"
+    );
+}
+
+/// OWNER RULING 2026-10-24, RED before: a url that parses but reads its credential as host and
+/// path (`https://tok/en@host`, `https://u:123/x@host`) was taken. It is refused at validate, open
+/// and refresh, naming the problem, the credential cut from the url it shows.
+#[test]
+fn an_ambiguous_url_is_refused_without_its_credential() {
+    for (url, secret) in [
+        ("https://tok/en@siem.example/in", "tok/en"),
+        ("https://u:123/x@siem.example/in", "u:123/x"),
+        ("https://siem.example/in?k=a@b", "k=a"),
+    ] {
+        let settings = json!({ "url": url }).to_string();
+        let refusal = Webhook::validate(settings.as_bytes()).expect_err(url);
+        let text = refusal.text().expect("a refusal says why");
+        assert!(text.contains("is ambiguous"), "{text}");
+        assert!(text.contains("%2F"), "{text}");
+        assert!(!text.contains(secret), "{url}: {text}");
+        assert!(Webhook::open(settings.as_bytes(), &[], 1).is_err(), "{url}");
+    }
+    for url in [
+        "https://u:p@siem.example/in",
+        "https://tok%2Fen@siem.example/in",
+        "https://siem.example/%40in",
+    ] {
+        let settings = json!({ "url": url }).to_string();
+        assert!(Webhook::validate(settings.as_bytes()).is_ok(), "{url}");
+    }
+}
+
+/// RED before: `serve` answered READY `404` for a sink that declares no route, a silent "nothing".
+/// It is now REFUSED, saying why, in the words every export sibling uses (`scrape`: the plugin
+/// crate's `tests/refusals.rs`, as the test kit copies no `ScrapeOut`).
+#[test]
+fn serve_is_refused_saying_why_through_the_door() {
+    use busbar_contract::abi::export::{Ops, ServeIn, ServeOut};
+    use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
+    use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut};
+    use busbar_contract::abi::sdk::test_support::reply::{call_in, close_in};
+    use busbar_contract::abi::sdk::test_support::test_in::TestIn;
+    use busbar_contract::abi::sdk::test_support::{zeroed, DoorView};
+
+    let view = DoorView::of(crate::table::MACRO_DOOR);
+    let open = view.op::<Ops>(|t| &t.head.open).expect("open");
+    let close = view.op::<Ops>(|t| &t.head.close).expect("close");
+    let serve = view.op::<Ops>(|t| &t.serve).expect("serve");
+    let mut opened = call_in(
+        open,
+        None,
+        &TestIn::<OpenIn>::new()
+            .set(|i| &i.head.op, slot::OPEN)
+            .settings(br#"{"url":"https://a.example/x"}"#),
+        zeroed::<OpenOut>(),
+    );
+    assert_eq!(opened.outcome, Outcome::Ready);
+    let instance = opened.take_instance().expect("an instance");
+    let c = call_in(
+        serve,
+        Some(&instance),
+        &TestIn::<ServeIn>::new().set(|i| &i.head.op, busbar_contract::abi::export::slot::SERVE),
+        zeroed::<ServeOut>(),
+    );
+    assert_eq!(c.outcome, Outcome::Refused);
+    assert_eq!(c.error.as_deref(), Some(crate::NO_ROUTE));
+    let closed = close_in(
+        close,
+        instance,
+        &TestIn::<InHead>::new().set(|i| &i.op, slot::CLOSE),
+        zeroed::<OutHead>(),
+    );
+    assert_eq!(closed.outcome, Outcome::Ready);
 }
