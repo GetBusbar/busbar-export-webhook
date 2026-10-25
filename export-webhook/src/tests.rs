@@ -182,7 +182,7 @@ fn a_delivery_posts_the_line() {
             target: b"/in?k=v".to_vec(),
             fields: vec![
                 (b"content-type".to_vec(), b"application/json".to_vec()),
-                (b"Authorization".to_vec(), b"Bearer x".to_vec()),
+                (b"authorization".to_vec(), b"Bearer x".to_vec()),
             ],
             body: line.to_vec(),
             timeout_ms: 9000,
@@ -271,7 +271,7 @@ fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
         r.fields,
         vec![
             basic.clone(),
-            (b"Authorization".to_vec(), b"Bearer x".to_vec()),
+            (b"authorization".to_vec(), b"Bearer x".to_vec()),
             json.clone(),
         ]
     );
@@ -285,7 +285,7 @@ fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
         vec![
             basic.clone(),
             json.clone(),
-            (b"X-Api-Key".to_vec(), b"k".to_vec()),
+            (b"x-api-key".to_vec(), b"k".to_vec()),
         ]
     );
     let alone = settings(json!({"url": "https://user:pass@siem.example/in"}));
@@ -297,7 +297,10 @@ fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
 /// `authorization` / `x-api-key` whatever the operator's spelling.
 #[test]
 fn a_configured_auth_header_name_goes_lower_case_as_1_5_5_sent_it() {
-    for (name, sent) in [("Authorization", "authorization"), ("X-Api-Key", "x-api-key")] {
+    for (name, sent) in [
+        ("Authorization", "authorization"),
+        ("X-Api-Key", "x-api-key"),
+    ] {
         let s = settings(json!({
             "url": "https://siem.example/in",
             "auth_header": {"name": name, "value": "k"}
@@ -578,7 +581,10 @@ fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
             request(&s, b"{}").fields,
             vec![
                 json.clone(),
-                (name.as_bytes().to_vec(), value.as_bytes().to_vec())
+                (
+                    name.to_ascii_lowercase().into_bytes(),
+                    value.as_bytes().to_vec()
+                )
             ],
             "{name:?}: {value:?}"
         );
