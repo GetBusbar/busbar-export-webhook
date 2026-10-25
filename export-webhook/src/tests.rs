@@ -568,6 +568,38 @@ fn a_refresh_never_shows_new_settings_beside_the_old_verdict() {
     assert_eq!(*w.live.lock().unwrap(), None);
 }
 
+/// `ready` reads the HOST's verdict, not "no host": over a fake host whose `need.admit` refuses, an
+/// `http://` target is named in the scheme rule's 1.5.5 words, which only a Refused verdict from
+/// the host yields (no host to ask says its own words). Mutation proof: with `ready` calling
+/// `self.admitted(None)` this test fails on the message.
+#[test]
+fn ready_reads_the_hosts_refusal_and_names_the_scheme_rule() {
+    use busbar_contract::abi::mechanism::call::Outcome;
+    use busbar_contract::abi::mechanism::ticket::Ticket;
+    use busbar_contract::abi::sdk::conn::Host;
+    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use std::task::Poll;
+    struct Refuses;
+    impl FakeService for Refuses {
+        type In = busbar_contract::abi::host::service::NeedAdmitIn;
+        fn serve(call: &mut ServiceCall<Self::In>) -> Outcome {
+            call.set_error("destination refused");
+            Outcome::Refused
+        }
+    }
+    let fake_host = FakeHost::new().serve(fake::host::NEED_ADMIT, Refuses);
+    let tables = fake_host.lent();
+    let host = Host::of(&tables);
+    let w = Webhook::open(br#"{"url":"http://127.0.0.1:4000/sidecar"}"#, &[], 1).expect("opens");
+    let got = logged(|| assert!(matches!(w.ready(&host, Ticket::NONE), Poll::Ready(Ok(())))));
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(field(&got[0], "diag"), "BUSBAR-7070");
+    assert!(
+        field(&got[0], "message").contains("must be an https:// URL"),
+        "{got:?}"
+    );
+}
+
 /// RED (audit export-webhook #4): PARITY WITH 1.5.5, which added the configured auth header only
 /// when `HeaderName::from_bytes` and `HeaderValue::from_str` both took it and otherwise POSTed the
 /// line without it (v1.5.5 `crates/busbar/src/export/webhook.rs` `deliver_logs`). A name that is not
