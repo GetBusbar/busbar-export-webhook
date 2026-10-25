@@ -14,9 +14,8 @@
         "batch": "{\"outcome\":\"ok\",\"ts\":1}\n",
         "observed": [] }
     ],
-    "scrape": [ { "families": [], "cap": 64, "exposition": "" } ],
     "status": { "outcome": "Ready" },
     "check": { "outcome": "Ready" },
-    "serve": [ { "method": "GET", "path": "/exports/tail/x", "outcome": "Ready", "status_code": 404 } ]
+    "serve": [ { "method": "GET", "path": "/exports/tail/x", "outcome": "Refused" } ]
   }
 }
