@@ -433,7 +433,7 @@ fn the_statement_states_the_sink() {
     assert_eq!(TARGET_FROM, "settings.url");
 }
 
-/// The declaration both doors state: the shed counter and the three catalogue codes it raises.
+/// The declaration both doors state: the shed counter and the four catalogue codes it raises.
 #[test]
 fn the_declaration_states_the_shed_counter_and_the_codes() {
     let d: serde_json::Value = serde_json::from_str(DECLARES).unwrap();
