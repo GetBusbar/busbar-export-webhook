@@ -315,8 +315,8 @@ fn a_configured_auth_header_name_goes_lower_case_as_1_5_5_sent_it() {
 }
 
 /// A non-2xx answer and a transport failure each drop the line and raise their code at WARN (1.5.5's
-/// `warn_webhook_delivery_failed`), with the fields in the compiled-in site's order, the target's
-/// userinfo masked.
+/// `warn_webhook_delivery_failed`), with the fields in the compiled-in site's order, the target
+/// named by scheme and host only.
 #[test]
 fn a_failed_delivery_raises_its_code_once() {
     let url = "https://user:pw@siem.example/in";
@@ -334,9 +334,10 @@ fn a_failed_delivery_raises_its_code_once() {
     assert_eq!(got.len(), 2, "{got:?}");
     assert_eq!(names(&got[0]), ["diag", "webhook_url", "status"]);
     assert_eq!(field(&got[0], "diag"), "BUSBAR-7071");
+    // The target by scheme and host: its userinfo, path and query can each carry the secret (H3).
     assert_eq!(
         field(&got[0], "webhook_url"),
-        "\"https://***@siem.example/in\""
+        "\"https://***@siem.example/***\""
     );
     assert_eq!(field(&got[0], "status"), "503");
     assert_eq!(names(&got[1]), ["diag", "webhook_url", "error_kind"]);
@@ -816,4 +817,80 @@ fn the_url_userinfo_is_masked_in_debug() {
         assert!(!text.contains("hunter2"), "the password leaked: {text}");
         assert!(text.contains("siem.example"), "the host is kept: {text}");
     }
+}
+
+// ── Credential-echo canaries (CREDENTIAL-LOCKDOWN H2, H3) ────────────────────────────────────────
+
+const CANARY: &str = "CANARY7f2a9e";
+
+/// Every string any captured event carries, flattened, for a canary search.
+fn all_text(events: &[Event]) -> String {
+    events
+        .iter()
+        .flat_map(|e| e.iter().map(|(n, v)| format!("{n}={v}\n")))
+        .collect()
+}
+
+/// H2: an `auth_header` written as a bare string (`auth_header: "Bearer …"`, where a `{name, value}`
+/// map is expected) used to be quoted back by serde into the refusal and so into the log.
+#[test]
+fn a_mistyped_auth_header_never_reaches_the_refusal() {
+    let r =
+        refused(json!({"url": "https://a.example/", "auth_header": format!("Bearer {CANARY}")}));
+    assert!(
+        !r.contains(CANARY),
+        "the refusal carried the credential: {r}"
+    );
+    // The words are serde's otherwise: only the credential bytes are gone.
+    assert!(r.starts_with("settings: invalid type: string "), "{r}");
+    assert!(r.contains("expected struct ExportAuthHeader"), "{r}");
+
+    // The same through `value` given the wrong type alongside a credential-bearing sibling.
+    let r = refused(
+        json!({"url": "https://a.example/", "auth_header": {"name": "Authorization", "value": [format!("Bearer {CANARY}")]}}),
+    );
+    assert!(
+        !r.contains(CANARY),
+        "the refusal carried the credential: {r}"
+    );
+}
+
+/// H3: a delivery failure logged the target's path and query (where Slack-style and `?api_key=`
+/// webhooks carry their secret) and the host's failure text verbatim (which may quote the URL).
+#[test]
+fn a_failed_delivery_never_logs_the_targets_path_query_or_the_hosts_echo_of_them() {
+    let url = format!("https://hooks.example/services/T000/B000/{CANARY}?api_key={CANARY}x");
+    let got = logged(|| {
+        report(&url, reply(503));
+        report(
+            &url,
+            Err(ConnFailure::Failed(format!(
+                "error sending request for url ({url}): connection reset"
+            ))),
+        );
+    });
+    assert_eq!(got.len(), 2, "{got:?}");
+    let text = all_text(&got);
+    assert!(
+        !text.contains(CANARY),
+        "a delivery log carried the credential:\n{text}"
+    );
+    // The host stays named, so the operator can still tell which target failed.
+    assert!(text.contains("hooks.example"), "{text}");
+}
+
+/// The log target keeps scheme, host and port; everything that can carry a secret is `***`.
+#[test]
+fn the_log_target_names_only_scheme_host_and_port() {
+    assert_eq!(log_target("https://a.example/"), "https://a.example");
+    assert_eq!(
+        log_target("https://a.example:8443"),
+        "https://a.example:8443"
+    );
+    assert_eq!(
+        log_target("https://u:p@a.example/s/T/B/X?k=v#f"),
+        "https://***@a.example/***?***"
+    );
+    assert_eq!(log_target("https://u:p@/x"), "https://***@/***");
+    assert_eq!(log_target("not a url"), "***");
 }
