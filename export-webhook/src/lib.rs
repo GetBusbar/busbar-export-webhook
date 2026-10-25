@@ -205,11 +205,14 @@ impl Life for Webhook {
 
     /// A reload's settings replace the instance's, and its target is asked about afresh.
     fn refresh(&self, settings: &[u8], _: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
+        // Hold the verdict across the settings write (lock order live -> settings, as `admitted`),
+        // so no delivery reads the new settings beside the old target's cached verdict.
+        let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
         *self
             .settings
             .write()
             .unwrap_or_else(PoisonError::into_inner) = parse(settings).ok();
-        *self.live.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        *live = None;
         Ok(Refreshed::default())
     }
 }
