@@ -47,3 +47,62 @@ busbar_plugin_loader::conformance_suite! {
     host: host,
     tls: conformance_host::anchors(),
 }
+
+/// The sink's declared secret fields, as the kernel resolves them (busbar #1699; OWNER RULING,
+/// CHIP-REVIEW-v4 change 2): a `{env: …}` reference at a declared field resolves in place, and
+/// one at any other field is refused. The export host lends nothing; the sink receives the
+/// resolved string.
+mod declared_secrets {
+    use std::sync::Arc;
+
+    use busbar_plugin_loader::conformance::settings_as_the_kernel_resolves;
+    use busbar_plugin_loader::dispatch::kinds::export::Export;
+    use busbar_plugin_loader::dispatch::{
+        load_linked, Bind, ConnTable, DispatchConfig, Dispatcher, LinkedRow, NoSink, Plugin,
+    };
+    use serde_json::{json, Value};
+
+    fn load() -> Plugin<Export> {
+        let d = Arc::new(Dispatcher::new(DispatchConfig::default()));
+        load_linked::<Export>(
+            &LinkedRow::of(busbar_export_webhook::door).expect("the linked door renders"),
+            Bind {
+                instance: Arc::from("declared"),
+                max_inflight_cap: 64,
+                sink: Arc::new(NoSink),
+                dispatcher: d.adopter(),
+                conns: ConnTable::Host(super::conformance_host::host(Arc::new(|_, _| {}), None)),
+            },
+        )
+        .expect("the linked door loads")
+    }
+
+    fn resolved(_: &str, _: &busbar_contract::secret_ref::SecretRef) -> Result<String, String> {
+        Ok("resolved-value".to_string())
+    }
+
+    #[test]
+    fn a_reference_at_each_declared_field_resolves_in_place() {
+        let out = settings_as_the_kernel_resolves(
+            &load(),
+            br#"{"url":{"env":"X"},"auth_header":{"name":"Authorization","value":{"env":"X"}}}"#,
+            resolved,
+        )
+        .expect("the declared fields take a reference");
+        let v: Value = serde_json::from_slice(&out).expect("json");
+        assert_eq!(v["url"], json!("resolved-value"), "{v}");
+        assert_eq!(v["auth_header"]["value"], json!("resolved-value"), "{v}");
+        assert_eq!(v["auth_header"]["name"], json!("Authorization"), "{v}");
+    }
+
+    #[test]
+    fn a_reference_at_an_undeclared_field_is_refused() {
+        let e = settings_as_the_kernel_resolves(
+            &load(),
+            br#"{"url":"https://h.example/hook","auth_header":{"name":{"env":"X"},"value":"v"}}"#,
+            resolved,
+        )
+        .expect_err("an undeclared field takes no reference");
+        assert!(e.contains("did not declare it as a secret"), "{e}");
+    }
+}
