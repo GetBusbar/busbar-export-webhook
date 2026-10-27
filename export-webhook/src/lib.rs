@@ -144,8 +144,16 @@ const REWRITES: &[Rewrite] = &[Rewrite {
     to: NONE,
 }];
 
+/// The settings fields that may carry a credential, declared so the kernel resolves a
+/// `{env:}`/`{file:}`/`{module:}` reference written there (OWNER RULING, CHIP-REVIEW-v4 change 2).
+/// `url`: its userinfo is a credential. `auth_header.value`: the header's value is the credential.
+/// The export host lends nothing; the sink receives the resolved string.
+const SECRET_REFS: &[AbiStr] = &[abi_str("url"), abi_str("auth_header.value")];
+
 /// This plugin's Statement: its name, version, its in-flight ceiling, alias, stream and need.
 pub const STATEMENT: Statement = Statement {
+    secret_refs: SECRET_REFS.as_ptr(),
+    secret_refs_len: SECRET_REFS.len(),
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
     rewrites: REWRITES.as_ptr(),
     rewrites_len: REWRITES.len(),
