@@ -1025,3 +1025,30 @@ fn an_auth_header_that_cannot_be_built_is_refused_at_validation() {
     )];
     assert!(check(CheckPhase::Instances, &ok).is_empty());
 }
+
+/// A reload that lands back on the settings a batch started under (A -> B -> A) is no reload for
+/// that batch: it continues. A reload to different settings cuts it.
+#[test]
+fn a_reload_back_to_the_same_settings_does_not_cut_the_batch() {
+    let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
+    let (settings, generation) = w.current();
+    let mut at = Posting {
+        settings,
+        generation,
+        line: 0,
+        issued: 0,
+        exchange: None,
+    };
+    assert!(!w.reloaded_since(&mut at));
+    w.refresh(br#"{"url":"https://b.example/"}"#, &[], 2)
+        .expect("B");
+    w.refresh(br#"{"url":"https://a.example/"}"#, &[], 3)
+        .expect("A");
+    assert!(
+        !w.reloaded_since(&mut at),
+        "A -> B -> A continues the batch"
+    );
+    w.refresh(br#"{"url":"https://b.example/"}"#, &[], 4)
+        .expect("B");
+    assert!(w.reloaded_since(&mut at), "a different target cuts it");
+}
