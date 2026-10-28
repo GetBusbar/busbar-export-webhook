@@ -34,7 +34,9 @@
 #![forbid(unsafe_code)]
 
 use std::mem::size_of;
-use std::sync::{Mutex, PoisonError, RwLock};
+use std::ops::Deref;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
 
 use busbar_contract::abi::export::{
@@ -208,9 +210,12 @@ pub fn ambiguous_url(url: &str) -> Option<String> {
 /// One opened instance.
 #[derive(Debug)]
 pub struct Webhook {
-    /// Its settings. Always `Some` once opened: `open` and `refresh` refuse settings that do not
-    /// parse, so an instance never holds unparsed ones and never sits silently dead.
-    settings: RwLock<Option<Settings>>,
+    /// Its settings and the request every line shares. `open` and `refresh` refuse settings that do
+    /// not parse, so an instance never holds unparsed ones and never sits silently dead.
+    settings: RwLock<Arc<Prepared>>,
+    /// Counts the reloads that changed the settings, bumped under the `settings` write lock: a
+    /// delivery compares it instead of cloning the settings per line.
+    generation: AtomicU64,
     /// The host's verdict on the target, asked once: at boot by `ready` (and again after a
     /// `refresh` clears it, by the next delivery or readiness ask); `None` until then.
     live: Mutex<Option<bool>>,
@@ -228,7 +233,8 @@ impl Life for Webhook {
     /// that opened on them would drop every delivery without a word.
     fn open(settings: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
         Ok(Self {
-            settings: RwLock::new(Some(parse(settings)?)),
+            settings: RwLock::new(Arc::new(Prepared::new(parse(settings)?))),
+            generation: AtomicU64::new(0),
             live: Mutex::new(None),
         })
     }
@@ -243,9 +249,7 @@ impl Life for Webhook {
         host: &Host,
         _: busbar_contract::abi::mechanism::ticket::Ticket,
     ) -> Poll<Result<(), Refusal>> {
-        if self.settings().is_some() {
-            let _ = self.admitted(Some(host));
-        }
+        let _ = self.admitted(Some(host));
         Poll::Ready(Ok(()))
     }
 
@@ -256,22 +260,34 @@ impl Life for Webhook {
         // Hold the verdict across the settings write (lock order live -> settings, as `admitted`),
         // so no delivery reads the new settings beside the old target's cached verdict.
         let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
-        *self
+        let mut current = self
             .settings
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = Some(parsed);
+            .unwrap_or_else(PoisonError::into_inner);
+        // Settings equal to the held ones are no reload for a delivery in flight.
+        if current.settings != parsed {
+            *current = Arc::new(Prepared::new(parsed));
+            self.generation.fetch_add(1, Ordering::Release);
+        }
+        drop(current);
         *live = None;
         Ok(Refreshed::default())
     }
 }
 
 impl Webhook {
-    /// The instance's settings, when they parsed.
-    pub fn settings(&self) -> Option<Settings> {
-        self.settings
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+    /// The instance's settings (with their prepared request).
+    pub fn settings(&self) -> Arc<Prepared> {
+        self.current().0
+    }
+
+    /// The settings and the generation they are, read together.
+    fn current(&self) -> (Arc<Prepared>, u64) {
+        let settings = self.settings.read().unwrap_or_else(PoisonError::into_inner);
+        (
+            Arc::clone(&settings),
+            self.generation.load(Ordering::Acquire),
+        )
     }
 
     /// Whether the host admitted the target, asked once: a refusal (or no host to ask) raises
@@ -288,8 +304,7 @@ impl Webhook {
         let ok = match verdict {
             Ok(()) => true,
             Err(e) => {
-                let url = self.settings().map(|s| s.url);
-                let words = refusal_words(url.as_deref(), &e);
+                let words = refusal_words(Some(&self.settings().url), &e);
                 tracing::error!(diag = %DISABLED, "{words}; disabling this webhook exporter");
                 false
             }
@@ -299,39 +314,65 @@ impl Webhook {
     }
 }
 
-/// The request one line is POSTed as: compact JSON to the target's path and query, under the
-/// instance's deadline, with the fields 1.5.5's reqwest request held, in its order: the
-/// `authorization: Basic …` the URL's userinfo became ([`basic_authorization`]), then
-/// `content-type: application/json`, then the auth header — each appended as an `http::HeaderMap`
-/// appends, so a configured auth header named `Authorization` is sent too, after the userinfo's,
-/// as 1.5.5 sent both. The configured name goes lower-cased, as 1.5.5's `HeaderName` made it (the
-/// contract's field block is lower-case).
-pub fn request(s: &Settings, line: &[u8]) -> Request {
-    let mut fields = Vec::new();
-    if let Some(basic) = basic_authorization(&s.url) {
-        append(&mut fields, b"authorization", &basic);
+/// The settings of one opened instance with the request every line of theirs is POSTed as, built
+/// once: compact JSON to the target's path and query, under the instance's deadline, with the fields
+/// 1.5.5's reqwest request held, in its order: the `authorization: Basic …` the URL's userinfo
+/// became ([`basic_authorization`]), then `content-type: application/json`, then the auth header —
+/// each appended as an `http::HeaderMap` appends, so a configured auth header named `Authorization`
+/// is sent too, after the userinfo's, as 1.5.5 sent both. The configured name goes lower-cased, as
+/// 1.5.5's `HeaderName` made it (the contract's field block is lower-case).
+#[derive(Debug)]
+pub struct Prepared {
+    settings: Settings,
+    target: Vec<u8>,
+    fields: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl Deref for Prepared {
+    type Target = Settings;
+    fn deref(&self) -> &Settings {
+        &self.settings
     }
-    append(&mut fields, b"content-type", b"application/json");
-    if let Some(h) = s.auth_header.as_ref().filter(|h| header_builds(h)) {
-        append(
-            &mut fields,
-            h.name.to_ascii_lowercase().as_bytes(),
-            h.value.as_bytes(),
-        );
+}
+
+impl Prepared {
+    fn new(settings: Settings) -> Self {
+        let mut fields = Vec::new();
+        if let Some(basic) = basic_authorization(&settings.url) {
+            append(&mut fields, b"authorization", &basic);
+        }
+        append(&mut fields, b"content-type", b"application/json");
+        if let Some(h) = settings.auth_header.as_ref().filter(|h| header_builds(h)) {
+            append(
+                &mut fields,
+                h.name.to_ascii_lowercase().as_bytes(),
+                h.value.as_bytes(),
+            );
+        }
+        let target = match url::Url::parse(&settings.url) {
+            Ok(u) => match u.query() {
+                Some(q) => format!("{}?{q}", u.path()),
+                None => u.path().to_string(),
+            },
+            Err(_) => "/".to_string(),
+        }
+        .into_bytes();
+        Self {
+            settings,
+            target,
+            fields,
+        }
     }
-    let target = match url::Url::parse(&s.url) {
-        Ok(u) => match u.query() {
-            Some(q) => format!("{}?{q}", u.path()),
-            None => u.path().to_string(),
-        },
-        Err(_) => "/".to_string(),
-    };
-    Request {
-        method: b"POST".to_vec(),
-        target: target.into_bytes(),
-        fields,
-        body: line.to_vec(),
-        timeout_ms: s.delivery_timeout_secs.saturating_mul(1000),
+
+    /// The request that POSTs `line`.
+    pub fn request(&self, line: &[u8]) -> Request {
+        Request {
+            method: b"POST".to_vec(),
+            target: self.target.clone(),
+            fields: self.fields.clone(),
+            body: line.to_vec(),
+            timeout_ms: self.settings.delivery_timeout_secs.saturating_mul(1000),
+        }
     }
 }
 
@@ -601,11 +642,12 @@ pub const NO_ROUTE: &str = "this sink declares no route, so it serves no request
 /// `check` at a phase this sink does not know.
 pub const UNKNOWN_PHASE: &str = "not a check phase this sink knows (limits or instances)";
 
-/// What a delivery parks across PENDING: the settings it started under (a reload mid-batch changes
-/// nothing for it: its lines go, and are reported, to the target it began with), the line it is on,
-/// the handles issued before that line's exchange, and the exchange.
+/// What a delivery parks across PENDING: the settings it started under and their generation (a
+/// reload mid-batch changes nothing for it: its lines go, and are reported, to the target it began
+/// with), the line it is on, the handles issued before that line's exchange, and the exchange.
 struct Posting {
-    settings: Settings,
+    settings: Arc<Prepared>,
+    generation: u64,
     line: usize,
     issued: u32,
     exchange: Option<Exchange>,
@@ -637,14 +679,13 @@ impl SafeSlot for Deliver {
         let mut at = match parked {
             Some(p) => p,
             None => {
-                let Some(settings) = hook.settings() else {
-                    return Outcome::Ready;
-                };
                 if !hook.admitted(h.host()) {
                     return Outcome::Ready;
                 }
+                let (settings, generation) = hook.current();
                 Posting {
                     settings,
+                    generation,
                     line: 0,
                     issued: 0,
                     exchange: None,
@@ -664,7 +705,7 @@ impl SafeSlot for Deliver {
                     let mut c = host.connector_from(instance.ticket(), at.issued);
                     let started = match at.exchange.take() {
                         Some(ex) => Ok(ex),
-                        None => Exchange::request(request(&at.settings, line)),
+                        None => Exchange::request(at.settings.request(line)),
                     };
                     match started {
                         Err(e) => Err(e),
@@ -685,7 +726,7 @@ impl SafeSlot for Deliver {
             report(&at.settings.url, answered);
             at.line += 1;
             let left = lines.len().saturating_sub(at.line);
-            if left > 0 && hook.settings().as_ref() != Some(&at.settings) {
+            if left > 0 && hook.generation.load(Ordering::Acquire) != at.generation {
                 tracing::warn!(
                     diag = %RELOAD_CUT,
                     webhook_url = ?log_target(&at.settings.url),
