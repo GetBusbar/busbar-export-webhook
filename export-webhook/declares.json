@@ -1,8 +1,4 @@
 {
-  "contract_abi": {
-    "min": 3,
-    "max": 3
-  },
   "metrics": [
     {
       "name": "busbar_webhook_logs_dropped_total",
@@ -39,7 +35,7 @@
       "since": "1.6.0"
     },
     {
-      "code": 7100,
+      "code": 7107,
       "slug": "webhook-batch-dropped-on-reload",
       "title": "Webhook log batch cut short by a settings reload (logs dropped)",
       "severity": "actionable",

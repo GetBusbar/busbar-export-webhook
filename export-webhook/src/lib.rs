@@ -5,7 +5,7 @@
 //! export kind's memory ABI (`busbar_contract::abi::export`, THE DESIGN §11):
 //! `export.<name>.module: request-log-webhook`. ONE door ([`door`], `plugin_door!`), linked into
 //! the binary as a compiled-in row or exported by the sibling `busbar-export-webhook-plugin` cdylib
-//! as its one symbol; its manifest still carries [`DECLARES`] (the shed counter and the three
+//! as its one symbol; its manifest still carries [`DECLARES`] (the shed counter and the four
 //! catalogue codes it raises).
 //!
 //! Each request-log line of a delivered batch is POSTed, as the compact JSON line it is, with
@@ -31,7 +31,7 @@
 //!
 //! No `unsafe`: `check`'s instance list is read through the SDK's safe lend (`instances()`).
 
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 use std::mem::size_of;
 use std::sync::{Mutex, PoisonError, RwLock};
@@ -68,7 +68,7 @@ const MAX_DURATION_SECS: u64 = 30 * 365 * 86_400;
 const DISABLED: &str = "BUSBAR-7070";
 const NON_2XX: &str = "BUSBAR-7071";
 const TRANSPORT_ERROR: &str = "BUSBAR-7072";
-const RELOAD_CUT: &str = "BUSBAR-7100";
+const RELOAD_CUT: &str = "BUSBAR-7107";
 
 /// The config path the target comes from: the `url` setting (`settings.<key>`, the path the host's
 /// connection-table fill resolves, spec PB-100). A bare key resolves to nothing, and the host's
@@ -84,8 +84,10 @@ const MAX_INFLIGHT: u32 = u32::MAX;
 const NEED: u32 = 0;
 
 mod config;
+mod redact;
 use config::DEFAULT_MAX_INFLIGHT;
 pub use config::{ExportAuthHeader, WebhookSettings};
+pub use redact::{log_target, scrub};
 
 /// This sink's settings (the configuration's `WebhookSettings`).
 pub type Settings = WebhookSettings;
@@ -141,8 +143,16 @@ const REWRITES: &[Rewrite] = &[Rewrite {
     to: NONE,
 }];
 
+/// The settings fields that may carry a credential, declared so the kernel resolves a
+/// `{env:}`/`{file:}`/`{module:}` reference written there (OWNER RULING, CHIP-REVIEW-v4 change 2).
+/// `url`: its userinfo is a credential. `auth_header.value`: the header's value is the credential.
+/// The export host lends nothing; the sink receives the resolved string.
+const SECRET_REFS: &[AbiStr] = &[abi_str("url"), abi_str("auth_header.value")];
+
 /// This plugin's Statement: its name, version, its in-flight ceiling, alias, stream and need.
 pub const STATEMENT: Statement = Statement {
+    secret_refs: SECRET_REFS.as_ptr(),
+    secret_refs_len: SECRET_REFS.len(),
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
     rewrites: REWRITES.as_ptr(),
     rewrites_len: REWRITES.len(),
@@ -151,19 +161,55 @@ pub const STATEMENT: Statement = Statement {
     ..statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
 };
 
-/// The settings, parsed as the configuration grammar parses them (empty is `{}`).
+/// The settings, parsed as the configuration grammar parses them (empty is `{}`); a `url` whose
+/// credential would be misread as its host is refused ([`ambiguous_url`]).
 fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
     let bytes = if settings.is_empty() { b"{}" } else { settings };
-    serde_json::from_slice::<serde_json::Value>(bytes)
-        .and_then(serde_json::from_value)
-        .map_err(|e| Refusal::failed(format!("settings: {e}")))
+    let value = serde_json::from_slice::<serde_json::Value>(bytes)
+        .map_err(|e| Refusal::failed(format!("settings: {e}")))?;
+    // serde's shape refusal quotes the offending value (`invalid type: string "Bearer …"`): the
+    // settings' credential strings are cut from it, the words otherwise serde's (H2).
+    let credentials = redact::settings_credentials(&value);
+    let settings: Settings = serde_json::from_value(value).map_err(|e| {
+        Refusal::failed(redact::replace_all(&format!("settings: {e}"), credentials))
+    })?;
+    if let Some(refusal) = ambiguous_url(&settings.url) {
+        return Err(Refusal::failed(refusal));
+    }
+    Ok(settings)
+}
+
+/// THE AMBIGUOUS-URL REFUSAL (owner ruling 2026-10-24): `Some(the refusal)` when `url` parses but
+/// carries an `@` after its host — `https://tok/en@siem.example/…` or `https://u:123/x@siem.example/…`,
+/// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
+/// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
+/// lines. The refusal shows the url with everything between `://` and its last `@` cut, never the
+/// credential. A url that does not parse, or has no `@` after its host, is not ambiguous here.
+pub fn ambiguous_url(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    if !parsed[url::Position::BeforePath..].contains('@') {
+        return None;
+    }
+    let shown = match url.split_once("://") {
+        Some((scheme, rest)) => match rest.rfind('@') {
+            Some(at) => format!("{scheme}://***@{}", &rest[at + 1..]),
+            None => url.to_string(),
+        },
+        None => url.to_string(),
+    };
+    Some(format!(
+        "settings: url `{shown}` is ambiguous: it has an `@` after its host, so what comes before \
+         that `@` would be read as the host and path, not as a credential. Percent-encode a `/`, \
+         `?` or `#` inside the credential (`%2F`, `%3F`, `%23`), or write an `@` meant for the path \
+         as `%40`"
+    ))
 }
 
 /// One opened instance.
 #[derive(Debug)]
 pub struct Webhook {
-    /// Its settings, when they parse (the host refused the configuration otherwise; a sink opened
-    /// only to validate or check settings still opens).
+    /// Its settings. Always `Some` once opened: `open` and `refresh` refuse settings that do not
+    /// parse, so an instance never holds unparsed ones and never sits silently dead.
     settings: RwLock<Option<Settings>>,
     /// The host's verdict on the target, asked once: at boot by `ready` (and again after a
     /// `refresh` clears it, by the next delivery or readiness ask); `None` until then.
@@ -178,11 +224,11 @@ impl Life for Webhook {
         parse(settings).map(|_| ())
     }
 
-    /// Never refuses: settings that do not parse are the configuration's refusal, reported by
-    /// `validate` — a sink opened only to answer that must open.
+    /// Refuses settings that do not parse, in the same words as [`Life::validate`]: an instance
+    /// that opened on them would drop every delivery without a word.
     fn open(settings: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
         Ok(Self {
-            settings: RwLock::new(parse(settings).ok()),
+            settings: RwLock::new(Some(parse(settings)?)),
             live: Mutex::new(None),
         })
     }
@@ -203,13 +249,18 @@ impl Life for Webhook {
         Poll::Ready(Ok(()))
     }
 
-    /// A reload's settings replace the instance's, and its target is asked about afresh.
+    /// A reload's settings replace the instance's, and its target is asked about afresh; settings
+    /// that do not parse are refused and the old ones (and their verdict) stay.
     fn refresh(&self, settings: &[u8], _: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
+        let parsed = parse(settings)?;
+        // Hold the verdict across the settings write (lock order live -> settings, as `admitted`),
+        // so no delivery reads the new settings beside the old target's cached verdict.
+        let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
         *self
             .settings
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = parse(settings).ok();
-        *self.live.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            .unwrap_or_else(PoisonError::into_inner) = Some(parsed);
+        *live = None;
         Ok(Refreshed::default())
     }
 }
@@ -253,7 +304,8 @@ impl Webhook {
 /// `authorization: Basic …` the URL's userinfo became ([`basic_authorization`]), then
 /// `content-type: application/json`, then the auth header — each appended as an `http::HeaderMap`
 /// appends, so a configured auth header named `Authorization` is sent too, after the userinfo's,
-/// as 1.5.5 sent both.
+/// as 1.5.5 sent both. The configured name goes lower-cased, as 1.5.5's `HeaderName` made it (the
+/// contract's field block is lower-case).
 pub fn request(s: &Settings, line: &[u8]) -> Request {
     let mut fields = Vec::new();
     if let Some(basic) = basic_authorization(&s.url) {
@@ -261,7 +313,11 @@ pub fn request(s: &Settings, line: &[u8]) -> Request {
     }
     append(&mut fields, b"content-type", b"application/json");
     if let Some(h) = s.auth_header.as_ref().filter(|h| header_builds(h)) {
-        append(&mut fields, h.name.as_bytes(), h.value.as_bytes());
+        append(
+            &mut fields,
+            h.name.to_ascii_lowercase().as_bytes(),
+            h.value.as_bytes(),
+        );
     }
     let target = match url::Url::parse(&s.url) {
         Ok(u) => match u.query() {
@@ -282,7 +338,8 @@ pub fn request(s: &Settings, line: &[u8]) -> Request {
 /// Whether 1.5.5 could build the auth header, and so sent it: `HeaderName::from_bytes` took a name
 /// of 1 to 65535 RFC 9110 token bytes, and `HeaderValue::from_str` a value of visible ASCII, space,
 /// tab and non-ASCII bytes (no other control byte, no DEL). A header that fails either was left out
-/// and the line POSTed without it (v1.5.5 `crates/busbar/src/export/webhook.rs` `deliver_logs`).
+/// and the line POSTed without it (v1.5.5 `crates/busbar/src/export/webhook.rs` `deliver_logs`); this
+/// sink also refuses such a header at validation (owner 2026-10-27).
 fn header_builds(h: &ExportAuthHeader) -> bool {
     let token = |b: &u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b);
     let name = h.name.as_bytes();
@@ -369,7 +426,8 @@ pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
                 mask_userinfo(u)
             ),
         },
-        _ => refused.to_string(),
+        (Some(u), _) => scrub(&refused.to_string(), u),
+        (None, _) => refused.to_string(),
     }
 }
 
@@ -381,20 +439,22 @@ fn is_https(url: &str) -> bool {
 
 /// What became of one line: nothing to say for a 2xx; BUSBAR-7071 for any other status,
 /// BUSBAR-7072 for a transport failure — each at WARN, as 1.5.5 warned them
-/// (`warn_webhook_delivery_failed`), the target's userinfo masked.
+/// (`warn_webhook_delivery_failed`). The target is named by scheme and host only ([`log_target`]:
+/// its userinfo, path and query can each carry the webhook's secret) and the host's failure text is
+/// scrubbed of the target's parts ([`scrub`]).
 pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
     match answered {
         Ok(r) if (200..300).contains(&r.status) => {}
         Ok(r) => tracing::warn!(
             diag = %NON_2XX,
-            webhook_url = mask_userinfo(url).as_str(),
-            status = r.status,
+            webhook_url = ?log_target(url),
+            status = %r.status,
             "request-log webhook delivery returned a non-2xx status; this log was dropped"
         ),
         Err(e) => tracing::warn!(
             diag = %TRANSPORT_ERROR,
-            webhook_url = mask_userinfo(url).as_str(),
-            error_kind = %e,
+            webhook_url = ?log_target(url),
+            error_kind = %scrub(&e.to_string(), url),
             "request-log webhook delivery failed (transport error); this log was dropped"
         ),
     }
@@ -453,7 +513,7 @@ fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
                  settings.auth_header with a name or value that is not a valid HTTP header \
                  (name {:?}: the name must be a non-empty RFC 9110 token, and the value may hold \
                  no control byte other than tab); 1.5.5 left such a header out and sent the log \
-                 without it, and so does this sink — fix or remove the header",
+                 without it — fix or remove the header",
                 mask_userinfo(&w.url),
                 h.name
             ));
@@ -531,6 +591,16 @@ fn instances(input: Lent<'_, CheckIn>) -> Vec<(String, serde_json::Value)> {
 /// The instance state every slot reads.
 type State = Held<Webhook>;
 
+/// The error texts of the door's REFUSED answers: one per cause, so the host's line names why
+/// instead of a bare outcome.
+pub const NO_INSTANCE: &str = "no opened request-log-webhook instance";
+/// `scrape` on a push sink: it carries no `metrics` stream.
+pub const NO_EXPOSITION: &str = "this sink carries no metrics stream, so it renders no exposition";
+/// `serve` on a sink that declares no route.
+pub const NO_ROUTE: &str = "this sink declares no route, so it serves no request";
+/// `check` at a phase this sink does not know.
+pub const UNKNOWN_PHASE: &str = "not a check phase this sink knows (limits or instances)";
+
 /// What a delivery parks across PENDING: the settings it started under (a reload mid-batch changes
 /// nothing for it: its lines go, and are reported, to the target it began with), the line it is on,
 /// the handles issued before that line's exchange, and the exchange.
@@ -552,10 +622,10 @@ impl SafeSlot for Deliver {
     fn call(
         instance: Instance<'_, State>,
         input: Lent<'_, DeliverIn>,
-        _: Out<'_, OutHead>,
+        mut out: Out<'_, OutHead>,
     ) -> Outcome {
         let Some(h) = instance.get() else {
-            return Outcome::Refused;
+            return out.fail(Refusal::refused(NO_INSTANCE));
         };
         let hook = h.life();
         // A RESUMED delivery finishes its parked exchange whatever a reload changed meanwhile: it
@@ -618,7 +688,7 @@ impl SafeSlot for Deliver {
             if left > 0 && hook.settings().as_ref() != Some(&at.settings) {
                 tracing::warn!(
                     diag = %RELOAD_CUT,
-                    webhook_url = mask_userinfo(&at.settings.url).as_str(),
+                    webhook_url = ?log_target(&at.settings.url),
                     dropped = left,
                     "request-log webhook settings were reloaded during a delivery; the batch's \
                      remaining log lines were dropped"
@@ -630,15 +700,16 @@ impl SafeSlot for Deliver {
     }
 }
 
-/// `scrape`: a push sink renders no exposition.
+/// `scrape`: REFUSED, saying why — a push sink carries no `metrics` stream and renders no
+/// exposition (the host scrapes only the sink that carries `metrics`).
 pub struct Scrape;
 
 impl SafeSlot for Scrape {
     type In = ScrapeIn;
     type Out = ScrapeOut;
     type State = State;
-    fn call(_: Instance<'_, State>, _: Lent<'_, ScrapeIn>, _: Out<'_, ScrapeOut>) -> Outcome {
-        Outcome::Ready
+    fn call(_: Instance<'_, State>, _: Lent<'_, ScrapeIn>, mut out: Out<'_, ScrapeOut>) -> Outcome {
+        out.fail(Refusal::refused(NO_EXPOSITION))
     }
 }
 
@@ -667,13 +738,13 @@ impl SafeSlot for Check {
         mut out: Out<'_, CheckOut>,
     ) -> Outcome {
         let Some(h) = instance.get() else {
-            return Outcome::Refused;
+            return out.fail(Refusal::refused(NO_INSTANCE));
         };
         let phase = match input.phase {
             CHECK_PHASE_LIMITS => CheckPhase::Limits,
             CHECK_PHASE_INSTANCES => CheckPhase::Instances,
             // A phase this sink does not know is refused, never run as another.
-            _ => return Outcome::Refused,
+            _ => return out.fail(Refusal::refused(UNKNOWN_PHASE)),
         };
         let lines = check(phase, &instances(input));
         if !lines.is_empty() {
@@ -684,7 +755,8 @@ impl SafeSlot for Check {
     }
 }
 
-/// `serve`: no route, so any request is `404`.
+/// `serve`: REFUSED, saying why — the sink declares no route (the host serves only declared
+/// routes).
 pub struct Serve;
 
 impl SafeSlot for Serve {
@@ -692,8 +764,7 @@ impl SafeSlot for Serve {
     type Out = ServeOut;
     type State = State;
     fn call(_: Instance<'_, State>, _: Lent<'_, ServeIn>, mut out: Out<'_, ServeOut>) -> Outcome {
-        out.set(|o| &o.status_code, 404_u16);
-        Outcome::Ready
+        out.fail(Refusal::refused(NO_ROUTE))
     }
 }
 
