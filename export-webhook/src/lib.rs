@@ -281,6 +281,18 @@ impl Webhook {
         self.current().0
     }
 
+    /// Whether the settings now differ in content from those `at` started under. The generation
+    /// is the fast path; when it moved, the content is compared (a reload back to the same
+    /// settings is no reload for the batch, as in 1.5.5) and `at` takes the new generation.
+    fn reloaded_since(&self, at: &mut Posting) -> bool {
+        if self.generation.load(Ordering::Acquire) == at.generation {
+            return false;
+        }
+        let (now, generation) = self.current();
+        at.generation = generation;
+        now.settings != at.settings.settings
+    }
+
     /// The settings and the generation they are, read together.
     fn current(&self) -> (Arc<Prepared>, u64) {
         let settings = self.settings.read().unwrap_or_else(PoisonError::into_inner);
@@ -726,7 +738,7 @@ impl SafeSlot for Deliver {
             report(&at.settings.url, answered);
             at.line += 1;
             let left = lines.len().saturating_sub(at.line);
-            if left > 0 && hook.generation.load(Ordering::Acquire) != at.generation {
+            if left > 0 && hook.reloaded_since(&mut at) {
                 tracing::warn!(
                     diag = %RELOAD_CUT,
                     webhook_url = ?log_target(&at.settings.url),
