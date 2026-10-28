@@ -988,3 +988,35 @@ fn serve_is_refused_saying_why_through_the_door() {
     );
     assert_eq!(closed.outcome, Outcome::Ready);
 }
+
+/// AN AUTH HEADER 1.5.5 COULD NOT BUILD IS REFUSED AT VALIDATION (owner 2026-10-27), with a message
+/// that names the instance and the header's name but never its value: the delivery still leaves the
+/// header out, so the refusal is the operator's early notice.
+#[test]
+fn an_auth_header_that_cannot_be_built_is_refused_at_validation() {
+    for (name, value) in [
+        (":authority", "k"),
+        ("Bad Name", "k"),
+        ("Authorization", "Bearer s3cret\r\nX-Injected: 1"),
+        ("Authorization", "Bearer s3cret\n"),
+    ] {
+        let instances = [(
+            "w".to_string(),
+            json!({"url": "https://a.example/", "auth_header": {"name": name, "value": value}}),
+        )];
+        let lines = check(CheckPhase::Instances, &instances);
+        assert_eq!(lines.len(), 1, "{name:?}: {lines:?}");
+        assert!(lines[0].contains("settings.auth_header"), "{}", lines[0]);
+        assert!(lines[0].contains("https://a.example/"), "{}", lines[0]);
+        assert!(
+            !lines[0].contains("s3cret"),
+            "the value leaked: {}",
+            lines[0]
+        );
+    }
+    let ok = [(
+        "w".to_string(),
+        json!({"url": "https://a.example/", "auth_header": {"name": "Authorization", "value": "Bearer x"}}),
+    )];
+    assert!(check(CheckPhase::Instances, &ok).is_empty());
+}
