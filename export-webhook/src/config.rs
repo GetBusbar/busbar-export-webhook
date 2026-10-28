@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The `settings:` grammar of an `export.<name>.module: request-log-webhook` instance — config
-//! grammar, tracked by the config-schema gate here, where the sink that reads it lives (K9c).
+//! grammar, tracked by the config-schema gate here, where the sink that reads it lives.
 
 use serde::Deserialize;
 
