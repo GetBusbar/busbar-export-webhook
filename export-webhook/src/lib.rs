@@ -69,7 +69,7 @@ const MAX_DURATION_SECS: u64 = 30 * 365 * 86_400;
 const DISABLED: &str = "BUSBAR-7070";
 const NON_2XX: &str = "BUSBAR-7071";
 const TRANSPORT_ERROR: &str = "BUSBAR-7072";
-const RELOAD_CUT: &str = "BUSBAR-7100";
+const RELOAD_CUT: &str = "BUSBAR-7107";
 
 /// The config path the target comes from: the `url` setting (`settings.<key>`, the path the host's
 /// connection-table fill resolves, spec PB-100). A bare key resolves to nothing, and the host's
@@ -346,7 +346,8 @@ pub fn request(s: &Settings, line: &[u8]) -> (Request, Vec<(usize, Vec<u8>, Seal
 /// Whether 1.5.5 could build the auth header, and so sent it: `HeaderName::from_bytes` took a name
 /// of 1 to 65535 RFC 9110 token bytes, and `HeaderValue::from_str` a value of visible ASCII, space,
 /// tab and non-ASCII bytes (no other control byte, no DEL). A header that fails either was left out
-/// and the line POSTed without it (v1.5.5 `crates/busbar/src/export/webhook.rs` `deliver_logs`).
+/// and the line POSTed without it (v1.5.5 `crates/busbar/src/export/webhook.rs` `deliver_logs`); this
+/// sink also refuses such a header at validation (owner 2026-10-27).
 fn header_builds(h: &ExportAuthHeader) -> bool {
     let token = |b: &u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b);
     let name = h.name.as_bytes();
@@ -488,6 +489,17 @@ pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Ve
 /// Each instance's delivery deadline, numbered by its position among the instances.
 fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
     for (i, w) in parsed.iter().enumerate() {
+        if let Some(h) = w.auth_header.as_ref().filter(|h| !header_builds(h)) {
+            errors.push(format!(
+                "the `module: request-log-webhook` export instance targeting '{}' (#{i}) sets \
+                 settings.auth_header with a name or value that is not a valid HTTP header \
+                 (name {:?}: the name must be a non-empty RFC 9110 token, and the value may hold \
+                 no control byte other than tab); 1.5.5 left such a header out and sent the log \
+                 without it — fix or remove the header",
+                mask_userinfo(&w.url),
+                h.name
+            ));
+        }
         if w.delivery_timeout_secs > MAX_DURATION_SECS {
             errors.push(format!(
                 "the `module: request-log-webhook` export instance targeting '{}' (#{i}) sets \
