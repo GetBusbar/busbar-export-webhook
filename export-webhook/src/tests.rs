@@ -8,6 +8,11 @@ use super::*;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
+/// The request one line is POSTed as, under `s`.
+fn request(s: &Settings, line: &[u8]) -> Request {
+    Prepared::new(s.clone()).request(line)
+}
+
 fn refused(settings: serde_json::Value) -> String {
     let r = Webhook::validate(settings.to_string().as_bytes()).expect_err("refused");
     assert_eq!(r.outcome(), Outcome::Failed);
@@ -413,7 +418,7 @@ fn an_unadmitted_target_disables_the_instance_once() {
     w.refresh(br#"{"url":"https://b.example/"}"#, &[], 2)
         .expect("a refresh applies");
     assert_eq!(logged(|| assert!(!w.admitted(None))).len(), 1);
-    assert_eq!(w.settings().expect("parsed").url, "https://b.example/");
+    assert_eq!(w.settings().url, "https://b.example/");
 }
 
 /// The Statement: name, NO in-flight ceiling of its own (`u32::MAX`: the operator's
@@ -449,7 +454,7 @@ fn the_declaration_states_the_shed_counter_and_the_codes() {
         .iter()
         .map(|c| c["code"].as_u64().unwrap())
         .collect();
-    assert_eq!(codes, vec![7070, 7071, 7072, 7100]);
+    assert_eq!(codes, vec![7070, 7071, 7072, 7107]);
 }
 
 /// Every metric a catalogue action cites (a backticked `*_total` token) is a series the declaration
@@ -558,14 +563,14 @@ fn a_refresh_never_shows_new_settings_beside_the_old_verdict() {
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_millis(10));
             assert_eq!(
-                w.settings().expect("parsed").url,
+                w.settings().url,
                 "https://a.example/x",
                 "new settings visible while the old verdict is still held"
             );
         }
         drop(guard);
     });
-    assert_eq!(w.settings().expect("parsed").url, "https://b.example/x");
+    assert_eq!(w.settings().url, "https://b.example/x");
     assert_eq!(*w.live.lock().unwrap(), None);
 }
 
@@ -912,8 +917,8 @@ fn open_and_refresh_refuse_settings_that_do_not_parse() {
     let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
     assert_eq!(w.refresh(bad, &[], 2).expect_err("refresh refuses"), want);
     assert_eq!(
-        w.settings().map(|s| s.url).as_deref(),
-        Some("https://a.example/"),
+        w.settings().url,
+        "https://a.example/",
         "a refused refresh keeps the old settings"
     );
 }
@@ -987,4 +992,63 @@ fn serve_is_refused_saying_why_through_the_door() {
         zeroed::<OutHead>(),
     );
     assert_eq!(closed.outcome, Outcome::Ready);
+}
+
+/// AN AUTH HEADER 1.5.5 COULD NOT BUILD IS REFUSED AT VALIDATION (owner 2026-10-27), with a message
+/// that names the instance and the header's name but never its value: the delivery still leaves the
+/// header out, so the refusal is the operator's early notice.
+#[test]
+fn an_auth_header_that_cannot_be_built_is_refused_at_validation() {
+    for (name, value) in [
+        (":authority", "k"),
+        ("Bad Name", "k"),
+        ("Authorization", "Bearer s3cret\r\nX-Injected: 1"),
+        ("Authorization", "Bearer s3cret\n"),
+    ] {
+        let instances = [(
+            "w".to_string(),
+            json!({"url": "https://a.example/", "auth_header": {"name": name, "value": value}}),
+        )];
+        let lines = check(CheckPhase::Instances, &instances);
+        assert_eq!(lines.len(), 1, "{name:?}: {lines:?}");
+        assert!(lines[0].contains("settings.auth_header"), "{}", lines[0]);
+        assert!(lines[0].contains("https://a.example/"), "{}", lines[0]);
+        assert!(
+            !lines[0].contains("s3cret"),
+            "the value leaked: {}",
+            lines[0]
+        );
+    }
+    let ok = [(
+        "w".to_string(),
+        json!({"url": "https://a.example/", "auth_header": {"name": "Authorization", "value": "Bearer x"}}),
+    )];
+    assert!(check(CheckPhase::Instances, &ok).is_empty());
+}
+
+/// A reload that lands back on the settings a batch started under (A -> B -> A) is no reload for
+/// that batch: it continues. A reload to different settings cuts it.
+#[test]
+fn a_reload_back_to_the_same_settings_does_not_cut_the_batch() {
+    let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
+    let (settings, generation) = w.current();
+    let mut at = Posting {
+        settings,
+        generation,
+        line: 0,
+        issued: 0,
+        exchange: None,
+    };
+    assert!(!w.reloaded_since(&mut at));
+    w.refresh(br#"{"url":"https://b.example/"}"#, &[], 2)
+        .expect("B");
+    w.refresh(br#"{"url":"https://a.example/"}"#, &[], 3)
+        .expect("A");
+    assert!(
+        !w.reloaded_since(&mut at),
+        "A -> B -> A continues the batch"
+    );
+    w.refresh(br#"{"url":"https://b.example/"}"#, &[], 4)
+        .expect("B");
+    assert!(w.reloaded_since(&mut at), "a different target cuts it");
 }

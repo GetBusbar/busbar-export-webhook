@@ -4,7 +4,7 @@
 //! The **request-log WEBHOOK sink as a droppable busbar plugin** — the `cdylib` a signed tarball of
 //! the sink carries (`kind: export`, alias `request-log-webhook`): the logic crate re-exported
 //! whole, and its door (`busbar_export_webhook::door`) exported as this image's ONE symbol,
-//! `busbar_plugin_door` (`export_door!`, THE DESIGN §11.4). The logic crate exports nothing, so a
+//! `busbar_plugin_door` (`export_door!`). The logic crate exports nothing, so a
 //! build that links it carries no door symbol. Pack it with `busbar-plugin-pack --kind export
 //! --alias request-log-webhook --declares-file export-webhook/declares.json`.
 //!

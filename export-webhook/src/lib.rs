@@ -2,39 +2,40 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! **`busbar-export-webhook`** — the request-log WEBHOOK sink as a `kind: export` plugin on the
-//! export kind's memory ABI (`busbar_contract::abi::export`, THE DESIGN §11):
+//! export kind's memory ABI (`busbar_contract::abi::export`):
 //! `export.<name>.module: request-log-webhook`. ONE door ([`door`], `plugin_door!`), linked into
 //! the binary as a compiled-in row or exported by the sibling `busbar-export-webhook-plugin` cdylib
-//! as its one symbol; its manifest still carries [`DECLARES`] (the shed counter and the four
-//! catalogue codes it raises).
+//! as its one symbol; its manifest carries [`DECLARES`] (the shed counter and the four catalogue
+//! codes it raises).
 //!
 //! Each request-log line of a delivered batch is POSTed, as the compact JSON line it is, with
-//! `content-type: application/json`, the instance's optional `auth_header` (left out, as 1.5.5 left
-//! it out, when it is not a header 1.5.5 could build), and the
-//! `authorization: Basic …` a userinfo in the URL becomes (as 1.5.5's reqwest made it), to the
-//! instance's `https://` target — through the HOST's connector: the Statement declares ONE outbound
+//! `content-type: application/json`, the instance's optional `auth_header` (left out when it is not
+//! a header that can be built), and the `authorization: Basic …` a userinfo in the URL becomes, to
+//! the instance's `https://` target — through the HOST's connector: the Statement declares ONE outbound
 //! need whose target is the `url` setting (the host drops its userinfo), under the open-web egress
 //! class (public destinations over a secure connection only), and the request rides the SDK's
 //! framed `exchange` under the instance's `delivery_timeout_secs`. The sink never dials. A delivery
 //! is fire-and-forget and never retried: a non-2xx answer or a transport failure drops that one line
-//! and raises BUSBAR-7071 / BUSBAR-7072 at WARN, as 1.5.5 warned them.
+//! and raises BUSBAR-7071 / BUSBAR-7072 at WARN.
 //!
 //! **Admission.** The door states `ready`, so the host's verdict on the target (the need's admission
-//! at bind) is asked at boot, before the instance serves; a refused target raises BUSBAR-7070 (`…; disabling this webhook exporter`,
-//! in 1.5.5's words when the refusal is the `https://` scheme rule)
-//! once and the instance takes no delivery until a reload — its siblings keep delivering.
+//! at bind) is asked at boot, before the instance serves; a refused target raises BUSBAR-7070
+//! (`…; disabling this webhook exporter`) once and the instance takes no delivery until a reload —
+//! its siblings keep delivering.
 //!
-//! **Settings** are checked in two phases, as they always were: their SHAPE while the configuration
-//! is resolved (`validate`), and the delivery deadline and in-flight bound while it is validated
-//! (`check`, after the limits). Every line the sink raises is logged with the catalogue's `diag`
-//! banner field; the door's call capture carries it to the instance's plugin log (THE DESIGN §11.2).
+//! **Settings** are checked in two phases: their SHAPE while the configuration is resolved
+//! (`validate`), and the delivery deadline and in-flight bound while it is validated (`check`,
+//! after the limits). Every line the sink raises is logged with the catalogue's `diag` banner
+//! field; the door's call capture carries it to the instance's plugin log.
 //!
 //! No `unsafe`: `check`'s instance list is read through the SDK's safe lend (`instances()`).
 
 #![forbid(unsafe_code)]
 
 use std::mem::size_of;
-use std::sync::{Mutex, PoisonError, RwLock};
+use std::ops::Deref;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
 
 use busbar_contract::abi::export::{
@@ -57,10 +58,10 @@ pub const ALIAS: &str = "request-log-webhook";
 /// The manifest `declares` section (`--declares-file` for the signed tarball).
 pub const DECLARES: &str = include_str!("../declares.json");
 
-/// The in-flight ceiling `check` holds the largest instance's bound to, with 1.5.5's refusal text:
-/// 1.5.5's limit (`tokio::sync::Semaphore::MAX_PERMITS`, `usize::MAX >> 3`, past which its gate
-/// panicked), kept as parity. The 1.6.0 host builds no semaphore: its export axis saturates the
-/// bound into a `u32`, clamped to at least one, and caps the instance's in-flight deliveries at it.
+/// The in-flight ceiling `check` holds the largest instance's bound to
+/// (`tokio::sync::Semaphore::MAX_PERMITS`, `usize::MAX >> 3`). The host builds no semaphore: its
+/// export axis saturates the bound into a `u32`, clamped to at least one, and caps the instance's
+/// in-flight deliveries at it.
 const MAX_PERMITS: usize = usize::MAX >> 3;
 /// The ceiling every duration in a busbar configuration is bounded by (30 years, in seconds).
 const MAX_DURATION_SECS: u64 = 30 * 365 * 86_400;
@@ -68,17 +69,17 @@ const MAX_DURATION_SECS: u64 = 30 * 365 * 86_400;
 const DISABLED: &str = "BUSBAR-7070";
 const NON_2XX: &str = "BUSBAR-7071";
 const TRANSPORT_ERROR: &str = "BUSBAR-7072";
-const RELOAD_CUT: &str = "BUSBAR-7100";
+const RELOAD_CUT: &str = "BUSBAR-7107";
 
 /// The config path the target comes from: the `url` setting (`settings.<key>`, the path the host's
-/// connection-table fill resolves, spec PB-100). A bare key resolves to nothing, and the host's
+/// connection-table fill resolves). A bare key resolves to nothing, and the host's
 /// connector refuses a need whose target resolved to nothing.
 const TARGET_FROM: &str = "settings.url";
 
 /// The in-flight ceiling this sink declares: no bound of its own. The bound is the operator's
-/// `max_inflight_deliveries` (1.5.5's, 64 when unset), which the host applies per instance, clamped
-/// to at least one; `check` refuses the LARGEST instance's bound past [`MAX_PERMITS`] or below
-/// 1, 1.5.5's fold ([`check`]).
+/// `max_inflight_deliveries` (64 when unset), which the host applies per instance, clamped to at
+/// least one; `check` refuses the LARGEST instance's bound past [`MAX_PERMITS`] or below 1
+/// ([`check`]).
 const MAX_INFLIGHT: u32 = u32::MAX;
 /// The one need's index in the Statement.
 const NEED: u32 = 0;
@@ -98,8 +99,7 @@ const NONE: AbiStr = AbiStr {
 };
 
 /// The one need: outbound over a secure connection to the `url` setting's target, public
-/// destinations only (1.5.5's https-only policy refusing loopback, link-local, private, CGNAT and
-/// cloud-metadata targets). It is framed by the `http` transport — the scheme its claim names; an
+/// destinations only (refusing loopback, link-local, private, CGNAT and cloud-metadata targets). It is framed by the `http` transport — the scheme its claim names; an
 /// `https://` target is secured by the host's connector, and the open-web egress class refuses any
 /// target that is not secure before a byte leaves.
 const NEEDS: &[Need] = &[Need {
@@ -144,7 +144,7 @@ const REWRITES: &[Rewrite] = &[Rewrite {
 }];
 
 /// The settings fields that may carry a credential, declared so the kernel resolves a
-/// `{env:}`/`{file:}`/`{module:}` reference written there (OWNER RULING, CHIP-REVIEW-v4 change 2).
+/// `{env:}`/`{file:}`/`{module:}` reference written there.
 /// `url`: its userinfo is a credential. `auth_header.value`: the header's value is the credential.
 /// The export host lends nothing; the sink receives the resolved string.
 const SECRET_REFS: &[AbiStr] = &[abi_str("url"), abi_str("auth_header.value")];
@@ -179,7 +179,7 @@ fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
     Ok(settings)
 }
 
-/// THE AMBIGUOUS-URL REFUSAL (owner ruling 2026-10-24): `Some(the refusal)` when `url` parses but
+/// The ambiguous-URL refusal: `Some(the refusal)` when `url` parses but
 /// carries an `@` after its host — `https://tok/en@siem.example/…` or `https://u:123/x@siem.example/…`,
 /// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
 /// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
@@ -208,9 +208,12 @@ pub fn ambiguous_url(url: &str) -> Option<String> {
 /// One opened instance.
 #[derive(Debug)]
 pub struct Webhook {
-    /// Its settings. Always `Some` once opened: `open` and `refresh` refuse settings that do not
-    /// parse, so an instance never holds unparsed ones and never sits silently dead.
-    settings: RwLock<Option<Settings>>,
+    /// Its settings and the request every line shares. `open` and `refresh` refuse settings that do
+    /// not parse, so an instance never holds unparsed ones and never sits silently dead.
+    settings: RwLock<Arc<Prepared>>,
+    /// Counts the reloads that changed the settings, bumped under the `settings` write lock: a
+    /// delivery compares it instead of cloning the settings per line.
+    generation: AtomicU64,
     /// The host's verdict on the target, asked once: at boot by `ready` (and again after a
     /// `refresh` clears it, by the next delivery or readiness ask); `None` until then.
     live: Mutex<Option<bool>>,
@@ -228,24 +231,22 @@ impl Life for Webhook {
     /// that opened on them would drop every delivery without a word.
     fn open(settings: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
         Ok(Self {
-            settings: RwLock::new(Some(parse(settings)?)),
+            settings: RwLock::new(Arc::new(Prepared::new(parse(settings)?))),
+            generation: AtomicU64::new(0),
             live: Mutex::new(None),
         })
     }
 
-    /// DISCOVERY AT BOOT (the mechanism's `ready`, awaited after `open` before the instance serves):
+    /// Discovery at boot (the mechanism's `ready`, awaited after `open` before the instance serves):
     /// the host's verdict on the target is asked here, once, so a refused target raises BUSBAR-7070
-    /// at boot, as 1.5.5 refused it when the sink was configured. It never refuses the boot: the
-    /// instance is disabled and its siblings serve, as in 1.5.5. Settings that did not parse are the
+    /// at boot. It never refuses the boot: the instance is disabled and its siblings serve. Settings that did not parse are the
     /// configuration's refusal, not this one's.
     fn ready(
         &self,
         host: &Host,
         _: busbar_contract::abi::mechanism::ticket::Ticket,
     ) -> Poll<Result<(), Refusal>> {
-        if self.settings().is_some() {
-            let _ = self.admitted(Some(host));
-        }
+        let _ = self.admitted(Some(host));
         Poll::Ready(Ok(()))
     }
 
@@ -256,22 +257,46 @@ impl Life for Webhook {
         // Hold the verdict across the settings write (lock order live -> settings, as `admitted`),
         // so no delivery reads the new settings beside the old target's cached verdict.
         let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
-        *self
+        let mut current = self
             .settings
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = Some(parsed);
+            .unwrap_or_else(PoisonError::into_inner);
+        // Settings equal to the held ones are no reload for a delivery in flight.
+        if current.settings != parsed {
+            *current = Arc::new(Prepared::new(parsed));
+            self.generation.fetch_add(1, Ordering::Release);
+        }
+        drop(current);
         *live = None;
         Ok(Refreshed::default())
     }
 }
 
 impl Webhook {
-    /// The instance's settings, when they parsed.
-    pub fn settings(&self) -> Option<Settings> {
-        self.settings
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+    /// The instance's settings (with their prepared request).
+    pub fn settings(&self) -> Arc<Prepared> {
+        self.current().0
+    }
+
+    /// Whether the settings now differ in content from those `at` started under. The generation
+    /// is the fast path; when it moved, the content is compared (a reload back to the same
+    /// settings is no reload for the batch) and `at` takes the new generation.
+    fn reloaded_since(&self, at: &mut Posting) -> bool {
+        if self.generation.load(Ordering::Acquire) == at.generation {
+            return false;
+        }
+        let (now, generation) = self.current();
+        at.generation = generation;
+        now.settings != at.settings.settings
+    }
+
+    /// The settings and the generation they are, read together.
+    fn current(&self) -> (Arc<Prepared>, u64) {
+        let settings = self.settings.read().unwrap_or_else(PoisonError::into_inner);
+        (
+            Arc::clone(&settings),
+            self.generation.load(Ordering::Acquire),
+        )
     }
 
     /// Whether the host admitted the target, asked once: a refusal (or no host to ask) raises
@@ -288,8 +313,7 @@ impl Webhook {
         let ok = match verdict {
             Ok(()) => true,
             Err(e) => {
-                let url = self.settings().map(|s| s.url);
-                let words = refusal_words(url.as_deref(), &e);
+                let words = refusal_words(Some(&self.settings().url), &e);
                 tracing::error!(diag = %DISABLED, "{words}; disabling this webhook exporter");
                 false
             }
@@ -299,46 +323,72 @@ impl Webhook {
     }
 }
 
-/// The request one line is POSTed as: compact JSON to the target's path and query, under the
-/// instance's deadline, with the fields 1.5.5's reqwest request held, in its order: the
-/// `authorization: Basic …` the URL's userinfo became ([`basic_authorization`]), then
-/// `content-type: application/json`, then the auth header — each appended as an `http::HeaderMap`
-/// appends, so a configured auth header named `Authorization` is sent too, after the userinfo's,
-/// as 1.5.5 sent both. The configured name goes lower-cased, as 1.5.5's `HeaderName` made it (the
-/// contract's field block is lower-case).
-pub fn request(s: &Settings, line: &[u8]) -> Request {
-    let mut fields = Vec::new();
-    if let Some(basic) = basic_authorization(&s.url) {
-        append(&mut fields, b"authorization", &basic);
-    }
-    append(&mut fields, b"content-type", b"application/json");
-    if let Some(h) = s.auth_header.as_ref().filter(|h| header_builds(h)) {
-        append(
-            &mut fields,
-            h.name.to_ascii_lowercase().as_bytes(),
-            h.value.as_bytes(),
-        );
-    }
-    let target = match url::Url::parse(&s.url) {
-        Ok(u) => match u.query() {
-            Some(q) => format!("{}?{q}", u.path()),
-            None => u.path().to_string(),
-        },
-        Err(_) => "/".to_string(),
-    };
-    Request {
-        method: b"POST".to_vec(),
-        target: target.into_bytes(),
-        fields,
-        body: line.to_vec(),
-        timeout_ms: s.delivery_timeout_secs.saturating_mul(1000),
+/// The settings of one opened instance with the request every line of theirs is POSTed as, built
+/// once: compact JSON to the target's path and query, under the instance's deadline, with the
+/// fields in this order: the `authorization: Basic …` the URL's userinfo became
+/// ([`basic_authorization`]), then `content-type: application/json`, then the auth header — each
+/// appended as an `http::HeaderMap` appends, so a configured auth header named `Authorization` is
+/// sent too, after the userinfo's. The configured name goes lower-cased (the contract's field block
+/// is lower-case).
+#[derive(Debug)]
+pub struct Prepared {
+    settings: Settings,
+    target: Vec<u8>,
+    fields: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl Deref for Prepared {
+    type Target = Settings;
+    fn deref(&self) -> &Settings {
+        &self.settings
     }
 }
 
-/// Whether 1.5.5 could build the auth header, and so sent it: `HeaderName::from_bytes` took a name
-/// of 1 to 65535 RFC 9110 token bytes, and `HeaderValue::from_str` a value of visible ASCII, space,
-/// tab and non-ASCII bytes (no other control byte, no DEL). A header that fails either was left out
-/// and the line POSTed without it (v1.5.5 `crates/busbar/src/export/webhook.rs` `deliver_logs`).
+impl Prepared {
+    fn new(settings: Settings) -> Self {
+        let mut fields = Vec::new();
+        if let Some(basic) = basic_authorization(&settings.url) {
+            append(&mut fields, b"authorization", &basic);
+        }
+        append(&mut fields, b"content-type", b"application/json");
+        if let Some(h) = settings.auth_header.as_ref().filter(|h| header_builds(h)) {
+            append(
+                &mut fields,
+                h.name.to_ascii_lowercase().as_bytes(),
+                h.value.as_bytes(),
+            );
+        }
+        let target = match url::Url::parse(&settings.url) {
+            Ok(u) => match u.query() {
+                Some(q) => format!("{}?{q}", u.path()),
+                None => u.path().to_string(),
+            },
+            Err(_) => "/".to_string(),
+        }
+        .into_bytes();
+        Self {
+            settings,
+            target,
+            fields,
+        }
+    }
+
+    /// The request that POSTs `line`.
+    pub fn request(&self, line: &[u8]) -> Request {
+        Request {
+            method: b"POST".to_vec(),
+            target: self.target.clone(),
+            fields: self.fields.clone(),
+            body: line.to_vec(),
+            timeout_ms: self.settings.delivery_timeout_secs.saturating_mul(1000),
+        }
+    }
+}
+
+/// Whether the auth header can be built, and so is sent: `HeaderName::from_bytes` takes a name of 1
+/// to 65535 RFC 9110 token bytes, and `HeaderValue::from_str` a value of visible ASCII, space, tab
+/// and non-ASCII bytes (no other control byte, no DEL). A header that fails either is left out and
+/// the line POSTed without it; this sink also refuses such a header at validation.
 fn header_builds(h: &ExportAuthHeader) -> bool {
     let token = |b: &u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b);
     let name = h.name.as_bytes();
@@ -349,9 +399,8 @@ fn header_builds(h: &ExportAuthHeader) -> bool {
             .all(|b| b == b'\t' || (b >= 0x20 && b != 0x7f))
 }
 
-/// One field appended as an `http::HeaderMap` appends it, the map 1.5.5's request held its fields
-/// in and wrote them from: after the last field of the same name (names compared without case),
-/// or last when there is none.
+/// One field appended as an `http::HeaderMap` appends it: after the last field of the same name
+/// (names compared without case), or last when there is none.
 fn append(fields: &mut Vec<(Vec<u8>, Vec<u8>)>, name: &[u8], value: &[u8]) {
     let field = (name.to_vec(), value.to_vec());
     match fields
@@ -363,13 +412,12 @@ fn append(fields: &mut Vec<(Vec<u8>, Vec<u8>)>, name: &[u8], value: &[u8]) {
     }
 }
 
-/// THE USERINFO AS 1.5.5 SENT IT: the `authorization` value a target URL's userinfo became, `None`
-/// when it carries none. 1.5.5 POSTed through reqwest 0.12, whose `RequestBuilder::new`
-/// (`extract_authority`) took the parsed URL's username and password off the URL, each
-/// percent-decoded and kept only when that is UTF-8 (a username that is not leaves no field at
-/// all; a password that is not is left out), and, when either was set, wrote `basic_auth`:
-/// `Basic ` and the padded standard base64 of `{username}:` followed by the password, if any. The
-/// host's connector drops the userinfo from the target the `url` setting gives the need.
+/// The `authorization` value a target URL's userinfo becomes, `None` when it carries none. The
+/// parsed URL's username and password are each percent-decoded and kept only when that is UTF-8 (a
+/// username that is not leaves no field at all; a password that is not is left out), and, when
+/// either is set, the value is `Basic ` and the padded standard base64 of `{username}:` followed by
+/// the password, if any. The host's connector drops the userinfo from the target the `url` setting
+/// gives the need.
 pub fn basic_authorization(url: &str) -> Option<Vec<u8>> {
     let u = url::Url::parse(url).ok()?;
     if !u.has_authority() {
@@ -392,24 +440,21 @@ pub fn basic_authorization(url: &str) -> Option<Vec<u8>> {
 }
 
 /// `%XX` (two hex digits, either case) decoded to its byte; any other byte, a `%` not followed by
-/// two hex digits included, kept as it is: the `percent-encoding` crate's `percent_decode`, the
-/// decoder 1.5.5's reqwest used through `url`.
+/// two hex digits included, kept as it is: the `percent-encoding` crate's `percent_decode`.
 fn percent_decode(s: &[u8]) -> Vec<u8> {
     percent_encoding::percent_decode(s).collect()
 }
 
-/// The standard base64 alphabet, padded (RFC 4648 §4): the `base64` crate's `STANDARD` engine,
-/// the encoder 1.5.5's reqwest `basic_auth` used.
+/// The standard base64 alphabet, padded: the `base64` crate's `STANDARD` engine.
 fn base64(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-/// BUSBAR-7070's words for a refused target, in 1.5.5's words byte for byte, in 1.5.5's order (v1.5.5
-/// `crates/busbar/src/observability.rs` `validate_webhook_url`): a target that is not an `https://`
+/// BUSBAR-7070's words for a refused target: a target that is not an `https://`
 /// URL is the scheme rule (the scheme read without case); one that does not parse is an invalid
 /// URL; a parseable `https://` target the host refused is the destination guard, the only rule
-/// left on that path. Userinfo is masked as 1.5.5 masked it. A host that gave no verdict, or any
+/// left on that path. Userinfo is masked. A host that gave no verdict, or any
 /// failure that is not a refusal, is said in the host's words.
 pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
     match (url, refused) {
@@ -430,15 +475,14 @@ pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
     }
 }
 
-/// `url` names the `https` scheme, read without case (RFC 3986; 1.5.5's `scheme_is`).
+/// `url` names the `https` scheme, read without case (RFC 3986).
 fn is_https(url: &str) -> bool {
     url.split_once("://")
         .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
 }
 
 /// What became of one line: nothing to say for a 2xx; BUSBAR-7071 for any other status,
-/// BUSBAR-7072 for a transport failure — each at WARN, as 1.5.5 warned them
-/// (`warn_webhook_delivery_failed`). The target is named by scheme and host only ([`log_target`]:
+/// BUSBAR-7072 for a transport failure — each at WARN. The target is named by scheme and host only ([`log_target`]:
 /// its userinfo, path and query can each carry the webhook's secret) and the host's failure text is
 /// scrubbed of the target's parts ([`scrub`]).
 pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
@@ -459,18 +503,16 @@ pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
     }
 }
 
-/// The checks the configuration's VALIDATION runs across every webhook instance, each at the point
-/// of the validation it has always run at: AMONG the operational limits' checks
-/// ([`CheckPhase::Limits`]) the in-flight bound — one bound over the instances, the largest
-/// configured (64 with none), so a generous instance is never refused for a stingy sibling; AFTER
-/// them ([`CheckPhase::Instances`]) each instance's delivery deadline, numbered by its position.
+/// The checks the configuration's validation runs across every webhook instance: AMONG the
+/// operational limits' checks ([`CheckPhase::Limits`]) the in-flight bound — one bound over the
+/// instances, the largest configured (64 with none), so a generous instance is never refused for a
+/// stingy sibling; AFTER them ([`CheckPhase::Instances`]) each instance's delivery deadline,
+/// numbered by its position.
 ///
-/// THE FOLD IS 1.5.5'S, KEPT AS PARITY: 1.5.5 validated only the largest instance's bound (v1.5.5
-/// crates/busbar/src/config/mod.rs:4003-4008, "the shared bound must accommodate the most
-/// permissive sink"; config_validate/mod.rs:1406-1420) and clamped each target's gate to at least
-/// one permit (export/webhook.rs:97-104), as the host's export axis clamps each instance's bound
-/// now. An instance stating `0` beside a larger sibling therefore validates and runs at one permit;
-/// refusing it per instance would be a customer-visible tightening the owner has not signed.
+/// Only the largest instance's bound is validated (the shared bound must accommodate the most
+/// permissive sink), and the host's export axis clamps each instance's bound to at least one. An
+/// instance stating `0` beside a larger sibling therefore validates and runs at one permit; refusing
+/// it per instance would tighten customer-visible behaviour.
 pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
     let parsed: Vec<Settings> = instances
         .iter()
@@ -506,6 +548,17 @@ pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Ve
 /// Each instance's delivery deadline, numbered by its position among the instances.
 fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
     for (i, w) in parsed.iter().enumerate() {
+        if let Some(h) = w.auth_header.as_ref().filter(|h| !header_builds(h)) {
+            errors.push(format!(
+                "the `module: request-log-webhook` export instance targeting '{}' (#{i}) sets \
+                 settings.auth_header with a name or value that is not a valid HTTP header \
+                 (name {:?}: the name must be a non-empty RFC 9110 token, and the value may hold \
+                 no control byte other than tab); 1.5.5 left such a header out and sent the log \
+                 without it — fix or remove the header",
+                mask_userinfo(&w.url),
+                h.name
+            ));
+        }
         if w.delivery_timeout_secs > MAX_DURATION_SECS {
             errors.push(format!(
                 "the `module: request-log-webhook` export instance targeting '{}' (#{i}) sets \
@@ -589,11 +642,12 @@ pub const NO_ROUTE: &str = "this sink declares no route, so it serves no request
 /// `check` at a phase this sink does not know.
 pub const UNKNOWN_PHASE: &str = "not a check phase this sink knows (limits or instances)";
 
-/// What a delivery parks across PENDING: the settings it started under (a reload mid-batch changes
-/// nothing for it: its lines go, and are reported, to the target it began with), the line it is on,
-/// the handles issued before that line's exchange, and the exchange.
+/// What a delivery parks across PENDING: the settings it started under and their generation (a
+/// reload mid-batch changes nothing for it: its lines go, and are reported, to the target it began
+/// with), the line it is on, the handles issued before that line's exchange, and the exchange.
 struct Posting {
-    settings: Settings,
+    settings: Arc<Prepared>,
+    generation: u64,
     line: usize,
     issued: u32,
     exchange: Option<Exchange>,
@@ -625,14 +679,13 @@ impl SafeSlot for Deliver {
         let mut at = match parked {
             Some(p) => p,
             None => {
-                let Some(settings) = hook.settings() else {
-                    return Outcome::Ready;
-                };
                 if !hook.admitted(h.host()) {
                     return Outcome::Ready;
                 }
+                let (settings, generation) = hook.current();
                 Posting {
                     settings,
+                    generation,
                     line: 0,
                     issued: 0,
                     exchange: None,
@@ -652,7 +705,7 @@ impl SafeSlot for Deliver {
                     let mut c = host.connector_from(instance.ticket(), at.issued);
                     let started = match at.exchange.take() {
                         Some(ex) => Ok(ex),
-                        None => Exchange::request(request(&at.settings, line)),
+                        None => Exchange::request(at.settings.request(line)),
                     };
                     match started {
                         Err(e) => Err(e),
@@ -673,7 +726,7 @@ impl SafeSlot for Deliver {
             report(&at.settings.url, answered);
             at.line += 1;
             let left = lines.len().saturating_sub(at.line);
-            if left > 0 && hook.settings().as_ref() != Some(&at.settings) {
+            if left > 0 && hook.reloaded_since(&mut at) {
                 tracing::warn!(
                     diag = %RELOAD_CUT,
                     webhook_url = ?log_target(&at.settings.url),
