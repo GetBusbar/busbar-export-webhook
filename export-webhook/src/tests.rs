@@ -8,6 +8,11 @@ use super::*;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
+/// The request one line is POSTed as, under `s`.
+fn request(s: &Settings, line: &[u8]) -> Request {
+    Prepared::new(s.clone()).request(line)
+}
+
 fn refused(settings: serde_json::Value) -> String {
     let r = Webhook::validate(settings.to_string().as_bytes()).expect_err("refused");
     assert_eq!(r.outcome(), Outcome::Failed);
@@ -413,7 +418,7 @@ fn an_unadmitted_target_disables_the_instance_once() {
     w.refresh(br#"{"url":"https://b.example/"}"#, &[], 2)
         .expect("a refresh applies");
     assert_eq!(logged(|| assert!(!w.admitted(None))).len(), 1);
-    assert_eq!(w.settings().expect("parsed").url, "https://b.example/");
+    assert_eq!(w.settings().url, "https://b.example/");
 }
 
 /// The Statement: name, NO in-flight ceiling of its own (`u32::MAX`: the operator's
@@ -558,14 +563,14 @@ fn a_refresh_never_shows_new_settings_beside_the_old_verdict() {
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_millis(10));
             assert_eq!(
-                w.settings().expect("parsed").url,
+                w.settings().url,
                 "https://a.example/x",
                 "new settings visible while the old verdict is still held"
             );
         }
         drop(guard);
     });
-    assert_eq!(w.settings().expect("parsed").url, "https://b.example/x");
+    assert_eq!(w.settings().url, "https://b.example/x");
     assert_eq!(*w.live.lock().unwrap(), None);
 }
 
@@ -912,8 +917,8 @@ fn open_and_refresh_refuse_settings_that_do_not_parse() {
     let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
     assert_eq!(w.refresh(bad, &[], 2).expect_err("refresh refuses"), want);
     assert_eq!(
-        w.settings().map(|s| s.url).as_deref(),
-        Some("https://a.example/"),
+        w.settings().url,
+        "https://a.example/",
         "a refused refresh keeps the old settings"
     );
 }
