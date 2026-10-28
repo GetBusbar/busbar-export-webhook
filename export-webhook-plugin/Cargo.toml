@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "busbar-export-webhook-plugin"
-version = "1.5.0"
+version = "1.6.0"
 publish = false            # first-party signed cdylib, shipped as a packed/signed tarball, not to crates.io
 edition = "2021"
 rust-version = "1.97"
@@ -41,3 +41,5 @@ busbar-core-connector = { workspace = true }
 busbar-transport-tcp = { workspace = true }
 busbar-transport-http = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
+# The declared-secrets test reads the settings the kernel resolves.
+serde_json = { workspace = true }
