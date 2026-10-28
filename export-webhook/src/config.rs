@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The `settings:` grammar of an `export.<name>.module: request-log-webhook` instance — config
-//! grammar, tracked by the config-schema gate here, where the sink that reads it lives (K9c).
+//! grammar, tracked by the config-schema gate here, where the sink that reads it lives.
 
 use serde::Deserialize;
 
@@ -17,7 +17,7 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 pub struct WebhookSettings {
     /// The webhook target URL — REQUIRED, `https://`-only, refused by the host's policy when it
-    /// targets an internal host (relocated from the retired `observability.request_log_webhook_url`).
+    /// targets an internal host.
     pub url: String,
     /// An optional auth header applied to every delivery from THIS instance (e.g.
     /// `{ name: Authorization, value: "Bearer ${WEBHOOK_TOKEN}" }`). The `value` rides the config's
