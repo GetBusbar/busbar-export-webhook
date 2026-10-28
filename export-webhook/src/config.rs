@@ -17,7 +17,7 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 pub struct WebhookSettings {
     /// The webhook target URL — REQUIRED, `https://`-only, refused by the host's policy when it
-    /// targets an internal host (relocated from the retired `observability.request_log_webhook_url`).
+    /// targets an internal host.
     pub url: String,
     /// An optional auth header applied to every delivery from THIS instance (e.g.
     /// `{ name: Authorization, value: "Bearer ${WEBHOOK_TOKEN}" }`). The `value` rides the config's
