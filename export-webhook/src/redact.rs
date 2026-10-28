@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! Keeping credentials out of the sink's own words (CREDENTIAL-LOCKDOWN H2, H3).
+//! Keeping credentials out of the sink's own words.
 //!
 //! A webhook target carries its secret in more places than the userinfo: Slack-style targets put it
 //! in the path (`/services/T…/B…/X…`), others in the query (`?api_key=…`). And the host's failure
@@ -9,8 +9,8 @@
 //! ([`log_target`]), and any text that came from elsewhere is scrubbed of the target's parts
 //! ([`scrub`]) and of the settings' credential strings ([`settings_credentials`]).
 //!
-//! The 1.5.5 REFUSAL lines that name the target (BUSBAR-7070, the delivery-deadline check) are left
-//! as they were: the shadow oracle records them with the path, and only their userinfo is masked.
+//! The refusal lines that name the target (BUSBAR-7070, the delivery-deadline check) keep the path:
+//! only their userinfo is masked.
 
 /// What a redacted part becomes.
 const REDACTED: &str = "***";
