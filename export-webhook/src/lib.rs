@@ -69,7 +69,7 @@ const MAX_DURATION_SECS: u64 = 30 * 365 * 86_400;
 const DISABLED: &str = "BUSBAR-7070";
 const NON_2XX: &str = "BUSBAR-7071";
 const TRANSPORT_ERROR: &str = "BUSBAR-7072";
-const RELOAD_CUT: &str = "BUSBAR-7107";
+const RELOAD_CUT: &str = "BUSBAR-7109";
 
 /// The config path the target comes from: the `url` setting (`settings.<key>`, the path the host's
 /// connection-table fill resolves). A bare key resolves to nothing, and the host's
