@@ -132,16 +132,25 @@ const TAIL: Tail = tail(STREAMS, &[]);
 /// The module name an operator writes, as the alias the registry holds beside [`NAME`].
 const REWRITES: &[Rewrite] = &[alias(ALIAS)];
 
-/// The settings fields that may carry a credential, declared so the kernel resolves a
-/// `{env:}`/`{file:}`/`{module:}` reference written there.
-/// `url`: its userinfo is a credential. `auth_header.value`: the header's value is the credential.
-/// The export host lends nothing; the sink receives the resolved string.
-const SECRET_REFS: &[AbiStr] = &[abi_str("url"), abi_str("auth_header.value")];
+/// The settings field that is SECRET, declared so the kernel resolves a `{env:}`/`{file:}`/
+/// `{module:}` reference written there and refuses a literal: `auth_header.value`, the header's
+/// value is the credential. The export host lends nothing; the sink receives the resolved string.
+const SECRET_REFS: &[AbiStr] = &[abi_str("auth_header.value")];
+
+/// THE REFERENCE-CAPABLE, NOT-SECRET SETTINGS FIELDS (busbar lead ruling item 7a), stated in the
+/// Statement's extensions under the contract's `EXT_REFERENCE_FIELDS` key: a `{env:}`/`{file:}`/
+/// `{module:}` reference written at `url` is resolved by the kernel IN PLACE to its string (a 1.5.5
+/// config's `url: {env: VAR}` keeps booting), and a literal url passes as written (never refused
+/// as a secret literal). The value is not a secret: it is never lent.
+busbar_contract::statement_extensions!(EXTENSIONS: [
+    (busbar_contract::abi::mechanism::extensions::EXT_REFERENCE_FIELDS, br#"["url"]"#),
+]);
 
 /// This plugin's Statement: its name, version, its in-flight ceiling, alias, stream and need.
 pub const STATEMENT: Statement = Statement {
     secret_refs: SECRET_REFS.as_ptr(),
     secret_refs_len: SECRET_REFS.len(),
+    extensions: EXTENSIONS,
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
     rewrites: REWRITES.as_ptr(),
     rewrites_len: REWRITES.len(),
