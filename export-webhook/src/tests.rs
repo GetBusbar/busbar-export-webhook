@@ -1056,3 +1056,107 @@ fn a_reload_back_to_the_same_settings_does_not_cut_the_batch() {
         .expect("B");
     assert!(w.reloaded_since(&mut at), "a different target cuts it");
 }
+
+// ── The 1.5.5 upgrade (`busbar --migrate-config`) ────────────────────────────────────────────────
+
+/// The section `Migration` answers for `settings`, from 1.5.5.
+fn migrated(settings: serde_json::Value) -> Migrated {
+    Migration::migrate(settings, "1.5.5")
+}
+
+/// Whether 1.6.0's validation refuses `settings` for their auth header.
+fn auth_header_refused(settings: &serde_json::Value) -> bool {
+    check(
+        CheckPhase::Instances,
+        &[("w".to_string(), settings.clone())],
+    )
+    .iter()
+    .any(|l| l.contains("settings.auth_header"))
+}
+
+/// AN AUTH HEADER 1.5.5 COULD NOT BUILD IS REMOVED BY THE MIGRATION (FLEET "Plugin-side migrate
+/// entries", owner ruling 2026-10-27; export-webhook #33 W1): 1.5.5 left such a header out and sent
+/// every line without it, and 1.6.0 refuses it at validation, so the migration removes exactly the
+/// `auth_header` that refusal names, says so in one line that names neither the header's name nor its
+/// value, and raises nothing against core's keys. The rest of the section is kept as written, and the
+/// migrated section validates. RED before: the door stated no migration, so the section was carried
+/// over unchanged and 1.6.0 refused it.
+#[test]
+fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
+    for (name, value) in [
+        (":authority", "k"),
+        ("Bad Name", "Bearer s3cret"),
+        ("", "Bearer s3cret"),
+        ("X-K\u{e9}y", "k"),
+        ("Authorization:", "k"),
+        ("Authorization", "Bearer s3cret\r\nX-Injected: 1"),
+        ("Authorization", "Bearer s3cret\n"),
+        ("Authorization", "Bearer \u{7f}"),
+        ("Authorization", "Bearer \u{0}"),
+    ] {
+        let before = json!({
+            "url": "https://u:p@siem.example/in",
+            "auth_header": {"name": name, "value": value},
+            "delivery_timeout_secs": 5
+        });
+        assert!(auth_header_refused(&before), "{name:?}: {value:?}");
+        let m = migrated(before);
+        assert_eq!(
+            m.settings,
+            json!({"url": "https://u:p@siem.example/in", "delivery_timeout_secs": 5}),
+            "{name:?}: {value:?}"
+        );
+        assert_eq!(m.report, vec![REMOVED_AUTH_HEADER.to_string()]);
+        assert!(m.needs.is_empty());
+        assert!(!auth_header_refused(&m.settings));
+        assert!(Webhook::validate(m.settings.to_string().as_bytes()).is_ok());
+    }
+    assert!(REMOVED_AUTH_HEADER.starts_with("removed settings.auth_header"));
+    assert!(REMOVED_AUTH_HEADER.ends_with("; 1.5.5 never sent it"));
+}
+
+/// The header's value may be a reference the kernel resolves (`auth_header.value` is a declared
+/// secret field): a name that is not a token is refused whatever the value resolves to, so it is
+/// removed; a valid name beside a reference is not the migration's to judge, and stays.
+#[test]
+fn a_referenced_value_is_judged_by_the_headers_name_alone() {
+    let m = migrated(json!({
+        "url": "https://siem.example/in",
+        "auth_header": {"name": "Bad Name", "value": {"env": "WEBHOOK_TOKEN"}}
+    }));
+    assert_eq!(m.settings, json!({"url": "https://siem.example/in"}));
+    assert_eq!(m.report, vec![REMOVED_AUTH_HEADER.to_string()]);
+    let kept = json!({
+        "url": "https://siem.example/in",
+        "auth_header": {"name": "Authorization", "value": {"env": "WEBHOOK_TOKEN"}}
+    });
+    assert_eq!(migrated(kept.clone()), Migrated::unchanged(kept));
+}
+
+/// Everything 1.6.0 does not refuse for its auth header passes through unchanged, with nothing to
+/// report: a header that builds (a tab, a non-ASCII byte and an empty value included, as 1.5.5 sent
+/// them), no header, no section, and a section the configuration grammar refuses for its shape
+/// (that refusal is the operator's to read; the migration does not guess what was meant).
+#[test]
+fn a_section_1_6_0_does_not_refuse_for_its_header_is_unchanged() {
+    for settings in [
+        json!({"url": "https://siem.example/in", "auth_header": {"name": "Authorization", "value": "Bearer x"}}),
+        json!({"url": "https://siem.example/in", "auth_header": {"name": "X-Api-Key", "value": "k\tv"}}),
+        json!({"url": "https://siem.example/in", "auth_header": {"name": "x!#$%&'*+-.^_`|~1", "value": "caf\u{e9}"}}),
+        json!({"url": "https://siem.example/in", "auth_header": {"name": "Authorization", "value": ""}}),
+        json!({"url": "https://siem.example/in"}),
+        json!({"url": "https://siem.example/in", "auth_header": null}),
+        serde_json::Value::Null,
+        json!("not a section"),
+        json!({"url": "https://siem.example/in", "auth_header": {"name": "Bad Name", "value": "k"}, "bogus": 1}),
+        json!({"auth_header": {"name": "Bad Name", "value": "k"}}),
+        json!({"url": "https://siem.example/in", "auth_header": "Bearer s3cret"}),
+    ] {
+        assert!(!auth_header_refused(&settings), "{settings}");
+        assert_eq!(
+            migrated(settings.clone()),
+            Migrated::unchanged(settings.clone()),
+            "{settings}"
+        );
+    }
+}

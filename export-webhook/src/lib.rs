@@ -51,6 +51,7 @@ use busbar_contract::abi::sdk::export::tail;
 pub use busbar_contract::abi::sdk::export::{NO_EXPOSITION, NO_ROUTE};
 use busbar_contract::abi::sdk::life::{settings_value, Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::mask::mask_url;
+use busbar_contract::abi::sdk::migrate::{Migrate, Migrated};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 
 /// The plugin's canonical name.
@@ -568,6 +569,52 @@ fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
 
 /// `url` with any userinfo (`scheme://user:pass@host/…`) replaced by `***`, safe for a log line;
 /// a URL with none, or a string that is not a URL, unchanged.
+/// The migration's report line when it removes an `auth_header` 1.5.5 could not build.
+pub const REMOVED_AUTH_HEADER: &str = "removed settings.auth_header: its name or value is not a \
+     valid HTTP header, which 1.6.0 refuses at validation; 1.5.5 never sent it";
+
+/// THE 1.5.5 UPGRADE (`busbar --migrate-config`; owner ruling 2026-10-27): this sink's own
+/// migration of its settings section, stated on the door as `migrate`.
+///
+/// 1.5.5 left an `auth_header` it could not build out of every delivery and sent the line without
+/// it (export-webhook #33 W1); 1.6.0 refuses such a header at validation ([`check`]). The migration
+/// removes exactly the header that refusal names, reporting [`REMOVED_AUTH_HEADER`]: settings that
+/// parse as [`Settings`] and carry an `auth_header` that does not build ([`header_builds`]). A value
+/// written as a reference the kernel resolves (`auth_header.value` is a declared secret field) is
+/// unknown here, so only the header's name is judged. Anything else, a section the grammar refuses
+/// for its shape included, is unchanged: that refusal is the operator's to read.
+pub struct Migration;
+
+impl Migrate for Migration {
+    fn migrate(mut settings: serde_json::Value, _: &str) -> Migrated {
+        if !auth_header_unbuildable(&settings) {
+            return Migrated::unchanged(settings);
+        }
+        if let Some(section) = settings.as_object_mut() {
+            section.remove("auth_header");
+        }
+        Migrated {
+            settings,
+            report: vec![REMOVED_AUTH_HEADER.to_string()],
+            needs: Vec::new(),
+        }
+    }
+}
+
+/// Whether `settings` are refused at validation for their auth header ([`instance_checks`]), a
+/// referenced value read as one that builds.
+fn auth_header_unbuildable(settings: &serde_json::Value) -> bool {
+    let mut probe = settings.clone();
+    if let Some(value) = probe
+        .pointer_mut("/auth_header/value")
+        .filter(|v| v.is_object())
+    {
+        *value = serde_json::Value::String(String::new());
+    }
+    serde_json::from_value::<Settings>(probe)
+        .is_ok_and(|s| s.auth_header.is_some_and(|h| !header_builds(&h)))
+}
+
 /// `check`'s instances, `(name, settings)` in configuration order (settings that are not JSON read
 /// as `null`, which no check parses), through the SDK's safe lend.
 fn instances(input: Lent<'_, CheckIn>) -> Vec<(String, serde_json::Value)> {
@@ -730,6 +777,7 @@ mod table {
         ops: busbar_contract::abi::export::Ops,
         statement: super::STATEMENT,
         lifecycle: life(Webhook, ready),
+        migrate: busbar_contract::abi::sdk::migrate::Migrator<super::Migration>,
         kind_ops: {
             deliver: Safe<Deliver>, scrape: Safe<NoScrape<Webhook>>, status: Safe<Quiet<Webhook>>,
             check: Safe<Check>, serve: Safe<NoServe<Webhook>>,
