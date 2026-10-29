@@ -367,8 +367,9 @@ fn the_success_boundary_is_200_to_299() {
 
 /// A target the host refused is named in 1.5.5's words, as 1.5.5's `validate_webhook_url` named it:
 /// the `https://` scheme rule (the scheme read without case), a URL that does not parse, or the
-/// destination guard, the userinfo masked as 1.5.5 masked it; a host that gave no verdict is named
-/// as such.
+/// destination guard; a host that gave no verdict is named as such. The target is masked by the
+/// SDK's `mask_url` (coordinator ruling 2026-10-28, FAMILY.md export): as written, the userinfo cut
+/// to `***`, where 1.5.5 wrote it re-serialised by its URL parser (a lower-cased scheme).
 #[test]
 fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     let refused = ConnFailure::Refused("destination refused".into());
@@ -378,7 +379,7 @@ fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     );
     assert_eq!(
         refusal_words(Some("HTTP://u:p@siem.example/in"), &refused),
-        "observability.request_log_webhook_url must be an https:// URL (got 'http://***@siem.example/in')"
+        "observability.request_log_webhook_url must be an https:// URL (got 'HTTP://***@siem.example/in')"
     );
     // RED (Q128 export-webhook LOW, src/lib.rs:391-403): 1.5.5 named the other two refusals on this
     // path in its own words too (v1.5.5 observability.rs validate_webhook_url): a URL that does not
@@ -390,7 +391,7 @@ fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     assert_eq!(
         refusal_words(Some("HTTPS://u:p@169.254.169.254/in"), &refused),
         "observability.request_log_webhook_url must not target a loopback/link-local/private/CGNAT/\
-         cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/in'"
+         cloud-metadata host (SSRF guard); got 'HTTPS://***@169.254.169.254/in'"
     );
     assert_eq!(
         refusal_words(Some("http://siem.example/in"), &ConnFailure::Unarmed),
@@ -428,7 +429,10 @@ fn an_unadmitted_target_disables_the_instance_once() {
 fn the_statement_states_the_sink() {
     assert_eq!(STATEMENT.name.len, NAME.len());
     assert_eq!(STATEMENT.max_inflight, u32::MAX);
-    assert_eq!(REWRITES[0].class, REWRITE_ALIAS);
+    assert_eq!(
+        REWRITES[0].class,
+        busbar_contract::abi::mechanism::door::REWRITE_ALIAS
+    );
     assert_eq!(REWRITES[0].from.len, ALIAS.len());
     assert_eq!(STREAMS, &[ExportStream::Logs as u8]);
     assert_eq!(TAIL.routes_len, 0);
@@ -515,7 +519,85 @@ fn validation_errors_mask_the_targets_userinfo() {
         );
         assert!(!lines[0].contains("s3cret"), "{lines:?}");
     }
-    assert_eq!(mask_userinfo("https://u:p@/x"), "https://***@/x");
+    assert_eq!(mask_url("https://u:p@/x"), "https://***@/x");
+}
+
+/// THE THREE LINES THAT NAME A USERINFO TARGET, PINNED WHOLE (coordinator ruling 2026-10-28: the
+/// target is masked by the SDK's `mask_url`, as written, the scheme's case kept): the BUSBAR-7070
+/// boot error (over a host that refuses the target), the auth-header refusal and the two
+/// delivery-deadline refusals.
+#[test]
+fn the_lines_naming_a_userinfo_target_read_exactly() {
+    use busbar_contract::abi::mechanism::call::Outcome;
+    use busbar_contract::abi::mechanism::ticket::Ticket;
+    use busbar_contract::abi::sdk::conn::Host;
+    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use std::task::Poll;
+    struct Refuses;
+    impl FakeService for Refuses {
+        type In = busbar_contract::abi::host::service::NeedAdmitIn;
+        fn serve(call: &mut ServiceCall<Self::In>) -> Outcome {
+            call.set_error("destination refused");
+            Outcome::Refused
+        }
+    }
+    let fake_host = FakeHost::new().serve(fake::host::NEED_ADMIT, Refuses);
+    let tables = fake_host.lent();
+    let host = Host::of(&tables);
+    for (url, line) in [
+        (
+            "HTTP://u:s3cret@siem.example/in",
+            "observability.request_log_webhook_url must be an https:// URL (got \
+             'HTTP://***@siem.example/in'); disabling this webhook exporter",
+        ),
+        (
+            "https://u:s3cret@169.254.169.254/in",
+            "observability.request_log_webhook_url must not target a loopback/link-local/private/\
+             CGNAT/cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/in'; \
+             disabling this webhook exporter",
+        ),
+    ] {
+        let settings = json!({ "url": url }).to_string();
+        let w = Webhook::open(settings.as_bytes(), &[], 1).expect("opens");
+        let got = logged(|| assert!(matches!(w.ready(&host, Ticket::NONE), Poll::Ready(Ok(())))));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(field(&got[0], "diag"), "BUSBAR-7070");
+        assert_eq!(field(&got[0], "message"), line);
+    }
+
+    let url = "https://u:s3cret@siem.example/in";
+    let lines =
+        |settings: serde_json::Value| check(CheckPhase::Instances, &[("w".to_string(), settings)]);
+    assert_eq!(
+        lines(json!({"url": url, "auth_header": {"name": "Bad Name", "value": "Bearer s3cret"}})),
+        vec![
+            "the `module: request-log-webhook` export instance targeting \
+             'https://***@siem.example/in' (#0) sets settings.auth_header with a name or value \
+             that is not a valid HTTP header (name \"Bad Name\": the name must be a non-empty RFC \
+             9110 token, and the value may hold no control byte other than tab); 1.5.5 left such a \
+             header out and sent the log without it — fix or remove the header"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        lines(json!({"url": url, "delivery_timeout_secs": 0})),
+        vec![
+            "the `module: request-log-webhook` export instance targeting \
+             'https://***@siem.example/in' (#0) sets settings.delivery_timeout_secs: 0, which \
+             would abort every delivery — it must be >= 1"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        lines(json!({"url": url, "delivery_timeout_secs": u64::MAX})),
+        vec![
+            "the `module: request-log-webhook` export instance targeting \
+             'https://***@siem.example/in' (#0) sets settings.delivery_timeout_secs: \
+             18446744073709551615, above the 946080000-second (30-year) ceiling every duration \
+             is bounded by — a delivery deadline that far out overflows the clock"
+                .to_string()
+        ]
+    );
 }
 
 /// DISCOVERY AT BOOT: `ready` asks the host's verdict once and never refuses the boot. Over host
@@ -811,7 +893,7 @@ fn the_auth_header_value_is_redacted_from_debug() {
 
 /// THE TARGET URL'S USERINFO NEVER RENDERS THROUGH `Debug` (§11.13): a `user:password@` in the url is
 /// sent as Basic credentials, so formatting the settings masks it as every line this sink writes
-/// does ([`mask_userinfo`]). RED before the fix: `Debug` was derived over `WebhookSettings::url`.
+/// does ([`mask_url`]). RED before the fix: `Debug` was derived over `WebhookSettings::url`.
 #[test]
 fn the_url_userinfo_is_masked_in_debug() {
     let settings = WebhookSettings {
@@ -1051,4 +1133,108 @@ fn a_reload_back_to_the_same_settings_does_not_cut_the_batch() {
     w.refresh(br#"{"url":"https://b.example/"}"#, &[], 4)
         .expect("B");
     assert!(w.reloaded_since(&mut at), "a different target cuts it");
+}
+
+// ── The 1.5.5 upgrade (`busbar --migrate-config`) ────────────────────────────────────────────────
+
+/// The section `Migration` answers for `settings`, from 1.5.5.
+fn migrated(settings: serde_json::Value) -> Migrated {
+    Migration::migrate(settings, "1.5.5")
+}
+
+/// Whether 1.6.0's validation refuses `settings` for their auth header.
+fn auth_header_refused(settings: &serde_json::Value) -> bool {
+    check(
+        CheckPhase::Instances,
+        &[("w".to_string(), settings.clone())],
+    )
+    .iter()
+    .any(|l| l.contains("settings.auth_header"))
+}
+
+/// AN AUTH HEADER 1.5.5 COULD NOT BUILD IS REMOVED BY THE MIGRATION (FLEET "Plugin-side migrate
+/// entries", owner ruling 2026-10-27; export-webhook #33 W1): 1.5.5 left such a header out and sent
+/// every line without it, and 1.6.0 refuses it at validation, so the migration removes exactly the
+/// `auth_header` that refusal names, says so in one line that names neither the header's name nor its
+/// value, and raises nothing against core's keys. The rest of the section is kept as written, and the
+/// migrated section validates. RED before: the door stated no migration, so the section was carried
+/// over unchanged and 1.6.0 refused it.
+#[test]
+fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
+    for (name, value) in [
+        (":authority", "k"),
+        ("Bad Name", "Bearer s3cret"),
+        ("", "Bearer s3cret"),
+        ("X-K\u{e9}y", "k"),
+        ("Authorization:", "k"),
+        ("Authorization", "Bearer s3cret\r\nX-Injected: 1"),
+        ("Authorization", "Bearer s3cret\n"),
+        ("Authorization", "Bearer \u{7f}"),
+        ("Authorization", "Bearer \u{0}"),
+    ] {
+        let before = json!({
+            "url": "https://u:p@siem.example/in",
+            "auth_header": {"name": name, "value": value},
+            "delivery_timeout_secs": 5
+        });
+        assert!(auth_header_refused(&before), "{name:?}: {value:?}");
+        let m = migrated(before);
+        assert_eq!(
+            m.settings,
+            json!({"url": "https://u:p@siem.example/in", "delivery_timeout_secs": 5}),
+            "{name:?}: {value:?}"
+        );
+        assert_eq!(m.report, vec![REMOVED_AUTH_HEADER.to_string()]);
+        assert!(m.needs.is_empty());
+        assert!(!auth_header_refused(&m.settings));
+        assert!(Webhook::validate(m.settings.to_string().as_bytes()).is_ok());
+    }
+    assert!(REMOVED_AUTH_HEADER.starts_with("removed settings.auth_header"));
+    assert!(REMOVED_AUTH_HEADER.ends_with("; 1.5.5 never sent it"));
+}
+
+/// The header's value may be a reference the kernel resolves (`auth_header.value` is a declared
+/// secret field): a name that is not a token is refused whatever the value resolves to, so it is
+/// removed; a valid name beside a reference is not the migration's to judge, and stays.
+#[test]
+fn a_referenced_value_is_judged_by_the_headers_name_alone() {
+    let m = migrated(json!({
+        "url": "https://siem.example/in",
+        "auth_header": {"name": "Bad Name", "value": {"env": "WEBHOOK_TOKEN"}}
+    }));
+    assert_eq!(m.settings, json!({"url": "https://siem.example/in"}));
+    assert_eq!(m.report, vec![REMOVED_AUTH_HEADER.to_string()]);
+    let kept = json!({
+        "url": "https://siem.example/in",
+        "auth_header": {"name": "Authorization", "value": {"env": "WEBHOOK_TOKEN"}}
+    });
+    assert_eq!(migrated(kept.clone()), Migrated::unchanged(kept));
+}
+
+/// Everything 1.6.0 does not refuse for its auth header passes through unchanged, with nothing to
+/// report: a header that builds (a tab, a non-ASCII byte and an empty value included, as 1.5.5 sent
+/// them), no header, no section, and a section the configuration grammar refuses for its shape
+/// (that refusal is the operator's to read; the migration does not guess what was meant).
+#[test]
+fn a_section_1_6_0_does_not_refuse_for_its_header_is_unchanged() {
+    for settings in [
+        json!({"url": "https://siem.example/in", "auth_header": {"name": "Authorization", "value": "Bearer x"}}),
+        json!({"url": "https://siem.example/in", "auth_header": {"name": "X-Api-Key", "value": "k\tv"}}),
+        json!({"url": "https://siem.example/in", "auth_header": {"name": "x!#$%&'*+-.^_`|~1", "value": "caf\u{e9}"}}),
+        json!({"url": "https://siem.example/in", "auth_header": {"name": "Authorization", "value": ""}}),
+        json!({"url": "https://siem.example/in"}),
+        json!({"url": "https://siem.example/in", "auth_header": null}),
+        serde_json::Value::Null,
+        json!("not a section"),
+        json!({"url": "https://siem.example/in", "auth_header": {"name": "Bad Name", "value": "k"}, "bogus": 1}),
+        json!({"auth_header": {"name": "Bad Name", "value": "k"}}),
+        json!({"url": "https://siem.example/in", "auth_header": "Bearer s3cret"}),
+    ] {
+        assert!(!auth_header_refused(&settings), "{settings}");
+        assert_eq!(
+            migrated(settings.clone()),
+            Migrated::unchanged(settings.clone()),
+            "{settings}"
+        );
+    }
 }
