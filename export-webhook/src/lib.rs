@@ -567,8 +567,6 @@ fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
     }
 }
 
-/// `url` with any userinfo (`scheme://user:pass@host/…`) replaced by `***`, safe for a log line;
-/// a URL with none, or a string that is not a URL, unchanged.
 /// The migration's report line when it removes an `auth_header` 1.5.5 could not build.
 pub const REMOVED_AUTH_HEADER: &str = "removed settings.auth_header: its name or value is not a \
      valid HTTP header, which 1.6.0 refuses at validation; 1.5.5 never sent it";

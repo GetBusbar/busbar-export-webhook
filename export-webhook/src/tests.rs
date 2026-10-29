@@ -522,6 +522,84 @@ fn validation_errors_mask_the_targets_userinfo() {
     assert_eq!(mask_url("https://u:p@/x"), "https://***@/x");
 }
 
+/// THE THREE LINES THAT NAME A USERINFO TARGET, PINNED WHOLE (coordinator ruling 2026-10-28: the
+/// target is masked by the SDK's `mask_url`, as written, the scheme's case kept): the BUSBAR-7070
+/// boot error (over a host that refuses the target), the auth-header refusal and the two
+/// delivery-deadline refusals.
+#[test]
+fn the_lines_naming_a_userinfo_target_read_exactly() {
+    use busbar_contract::abi::mechanism::call::Outcome;
+    use busbar_contract::abi::mechanism::ticket::Ticket;
+    use busbar_contract::abi::sdk::conn::Host;
+    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use std::task::Poll;
+    struct Refuses;
+    impl FakeService for Refuses {
+        type In = busbar_contract::abi::host::service::NeedAdmitIn;
+        fn serve(call: &mut ServiceCall<Self::In>) -> Outcome {
+            call.set_error("destination refused");
+            Outcome::Refused
+        }
+    }
+    let fake_host = FakeHost::new().serve(fake::host::NEED_ADMIT, Refuses);
+    let tables = fake_host.lent();
+    let host = Host::of(&tables);
+    for (url, line) in [
+        (
+            "HTTP://u:s3cret@siem.example/in",
+            "observability.request_log_webhook_url must be an https:// URL (got \
+             'HTTP://***@siem.example/in'); disabling this webhook exporter",
+        ),
+        (
+            "https://u:s3cret@169.254.169.254/in",
+            "observability.request_log_webhook_url must not target a loopback/link-local/private/\
+             CGNAT/cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/in'; \
+             disabling this webhook exporter",
+        ),
+    ] {
+        let settings = json!({ "url": url }).to_string();
+        let w = Webhook::open(settings.as_bytes(), &[], 1).expect("opens");
+        let got = logged(|| assert!(matches!(w.ready(&host, Ticket::NONE), Poll::Ready(Ok(())))));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(field(&got[0], "diag"), "BUSBAR-7070");
+        assert_eq!(field(&got[0], "message"), line);
+    }
+
+    let url = "https://u:s3cret@siem.example/in";
+    let lines =
+        |settings: serde_json::Value| check(CheckPhase::Instances, &[("w".to_string(), settings)]);
+    assert_eq!(
+        lines(json!({"url": url, "auth_header": {"name": "Bad Name", "value": "Bearer s3cret"}})),
+        vec![
+            "the `module: request-log-webhook` export instance targeting \
+             'https://***@siem.example/in' (#0) sets settings.auth_header with a name or value \
+             that is not a valid HTTP header (name \"Bad Name\": the name must be a non-empty RFC \
+             9110 token, and the value may hold no control byte other than tab); 1.5.5 left such a \
+             header out and sent the log without it — fix or remove the header"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        lines(json!({"url": url, "delivery_timeout_secs": 0})),
+        vec![
+            "the `module: request-log-webhook` export instance targeting \
+             'https://***@siem.example/in' (#0) sets settings.delivery_timeout_secs: 0, which \
+             would abort every delivery — it must be >= 1"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        lines(json!({"url": url, "delivery_timeout_secs": u64::MAX})),
+        vec![
+            "the `module: request-log-webhook` export instance targeting \
+             'https://***@siem.example/in' (#0) sets settings.delivery_timeout_secs: \
+             18446744073709551615, above the 946080000-second (30-year) ceiling every duration \
+             is bounded by — a delivery deadline that far out overflows the clock"
+                .to_string()
+        ]
+    );
+}
+
 /// DISCOVERY AT BOOT: `ready` asks the host's verdict once and never refuses the boot. Over host
 /// tables with no connector the target is unadmitted, so BUSBAR-7070 is raised there, at ERROR, and
 /// the instance stays disabled; the first delivery asks nothing again.
