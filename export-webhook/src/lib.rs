@@ -32,23 +32,26 @@
 
 #![forbid(unsafe_code)]
 
-use std::mem::size_of;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
 
 use busbar_contract::abi::export::{
-    self, CheckIn, CheckOut, CheckPhase, DeliverIn, ExportStream, ScrapeIn, ScrapeOut, ServeIn,
-    ServeOut, StatusOut, Tail, CHECK_PHASE_INSTANCES, CHECK_PHASE_LIMITS,
+    self, CheckIn, CheckOut, CheckPhase, DeliverIn, ExportStream, Tail, CHECK_PHASE_INSTANCES,
+    CHECK_PHASE_LIMITS,
 };
 use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome, BLOB_JSON};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement, REWRITE_ALIAS};
+use busbar_contract::abi::mechanism::call::{AbiStr, Blob, OutHead, Outcome, BLOB_JSON};
+use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
-use busbar_contract::abi::sdk::door::{abi_str, statement};
+use busbar_contract::abi::sdk::door::{abi_str, alias, statement};
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
-use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
+use busbar_contract::abi::sdk::export::tail;
+pub use busbar_contract::abi::sdk::export::{NO_EXPOSITION, NO_ROUTE};
+use busbar_contract::abi::sdk::life::{settings_value, Held, Life, Refreshed, Refusal};
+use busbar_contract::abi::sdk::mask::mask_url;
+use busbar_contract::abi::sdk::migrate::{Migrate, Migrated};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 
 /// The plugin's canonical name.
@@ -124,24 +127,10 @@ const NEEDS: &[Need] = &[Need {
 const STREAMS: &[u8] = &[ExportStream::Logs as u8];
 
 /// The export kind's Statement tail: `logs`, and no route (a push-only sink).
-const TAIL: Tail = Tail {
-    head: KindTailHead {
-        size: size_of::<Tail>() as u32,
-        _reserved: 0,
-    },
-    streams: STREAMS.as_ptr(),
-    streams_len: STREAMS.len(),
-    routes: std::ptr::null(),
-    routes_len: 0,
-};
+const TAIL: Tail = tail(STREAMS, &[]);
 
 /// The module name an operator writes, as the alias the registry holds beside [`NAME`].
-const REWRITES: &[Rewrite] = &[Rewrite {
-    class: REWRITE_ALIAS,
-    _reserved: 0,
-    from: abi_str(ALIAS),
-    to: NONE,
-}];
+const REWRITES: &[Rewrite] = &[alias(ALIAS)];
 
 /// The settings fields that may carry a credential, declared so the kernel resolves a
 /// `{env:}`/`{file:}`/`{module:}` reference written there.
@@ -164,9 +153,7 @@ pub const STATEMENT: Statement = Statement {
 /// The settings, parsed as the configuration grammar parses them (empty is `{}`); a `url` whose
 /// credential would be misread as its host is refused ([`ambiguous_url`]).
 fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
-    let bytes = if settings.is_empty() { b"{}" } else { settings };
-    let value = serde_json::from_slice::<serde_json::Value>(bytes)
-        .map_err(|e| Refusal::failed(format!("settings: {e}")))?;
+    let value = settings_value(settings)?;
     // serde's shape refusal quotes the offending value (`invalid type: string "Bearer …"`): the
     // settings' credential strings are cut from it, the words otherwise serde's (H2).
     let credentials = redact::settings_credentials(&value);
@@ -460,14 +447,14 @@ pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
     match (url, refused) {
         (Some(u), ConnFailure::Refused(_)) if !is_https(u) => format!(
             "observability.request_log_webhook_url must be an https:// URL (got '{}')",
-            mask_userinfo(u)
+            mask_url(u)
         ),
         (Some(u), ConnFailure::Refused(_)) => match url::Url::parse(u) {
             Err(e) => format!("observability.request_log_webhook_url is not a valid URL: {e}"),
             Ok(_) => format!(
                 "observability.request_log_webhook_url must not target a loopback/link-local/\
                  private/CGNAT/cloud-metadata host (SSRF guard); got '{}'",
-                mask_userinfo(u)
+                mask_url(u)
             ),
         },
         (Some(u), _) => scrub(&refused.to_string(), u),
@@ -555,7 +542,7 @@ fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
                  (name {:?}: the name must be a non-empty RFC 9110 token, and the value may hold \
                  no control byte other than tab); 1.5.5 left such a header out and sent the log \
                  without it — fix or remove the header",
-                mask_userinfo(&w.url),
+                mask_url(&w.url),
                 h.name
             ));
         }
@@ -565,7 +552,7 @@ fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
                  settings.delivery_timeout_secs: {}, above the {MAX_DURATION_SECS}-second (30-year) \
                  ceiling every duration is bounded by — a delivery deadline that far out overflows \
                  the clock",
-                mask_userinfo(&w.url),
+                mask_url(&w.url),
                 w.delivery_timeout_secs
             ));
         }
@@ -574,43 +561,56 @@ fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
                 "the `module: request-log-webhook` export instance targeting '{}' (#{i}) sets \
                  settings.delivery_timeout_secs: 0, which would abort every delivery — it must be \
                  >= 1",
-                mask_userinfo(&w.url)
+                mask_url(&w.url)
             ));
         }
     }
 }
 
-/// `url` with any userinfo (`scheme://user:pass@host/…`) replaced by `***`, safe for a log line;
-/// a URL with none, or a string that is not a URL, unchanged.
-pub fn mask_userinfo(url: &str) -> String {
-    let Ok(mut parsed) = url::Url::parse(url) else {
-        return mask_unparsed(url);
-    };
-    if parsed.username().is_empty() && parsed.password().is_none() {
-        return url.to_string();
+/// The migration's report line when it removes an `auth_header` 1.5.5 could not build.
+pub const REMOVED_AUTH_HEADER: &str = "removed settings.auth_header: its name or value is not a \
+     valid HTTP header, which 1.6.0 refuses at validation; 1.5.5 never sent it";
+
+/// THE 1.5.5 UPGRADE (`busbar --migrate-config`; owner ruling 2026-10-27): this sink's own
+/// migration of its settings section, stated on the door as `migrate`.
+///
+/// 1.5.5 left an `auth_header` it could not build out of every delivery and sent the line without
+/// it (export-webhook #33 W1); 1.6.0 refuses such a header at validation ([`check`]). The migration
+/// removes exactly the header that refusal names, reporting [`REMOVED_AUTH_HEADER`]: settings that
+/// parse as [`Settings`] and carry an `auth_header` that does not build ([`header_builds`]). A value
+/// written as a reference the kernel resolves (`auth_header.value` is a declared secret field) is
+/// unknown here, so only the header's name is judged. Anything else, a section the grammar refuses
+/// for its shape included, is unchanged: that refusal is the operator's to read.
+pub struct Migration;
+
+impl Migrate for Migration {
+    fn migrate(mut settings: serde_json::Value, _: &str) -> Migrated {
+        if !auth_header_unbuildable(&settings) {
+            return Migrated::unchanged(settings);
+        }
+        if let Some(section) = settings.as_object_mut() {
+            section.remove("auth_header");
+        }
+        Migrated {
+            settings,
+            report: vec![REMOVED_AUTH_HEADER.to_string()],
+            needs: Vec::new(),
+        }
     }
-    if parsed.set_password(None).is_err() || parsed.set_username("***").is_err() {
-        let host = parsed.host_str().unwrap_or("");
-        return match parsed.port() {
-            Some(p) => format!("{}://***@{host}:{p}", parsed.scheme()),
-            None => format!("{}://***@{host}", parsed.scheme()),
-        };
-    }
-    parsed.into()
 }
 
-/// The mask for a string `url::Url` refuses (an empty host, say) yet that still carries
-/// `scheme://userinfo@…`: everything between `://` and the last `@` of the authority becomes `***`.
-/// A string with no such authority is returned unchanged.
-fn mask_unparsed(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_string();
-    };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    match rest[..end].rfind('@') {
-        Some(at) => format!("{scheme}://***{}", &rest[at..]),
-        None => url.to_string(),
+/// Whether `settings` are refused at validation for their auth header ([`instance_checks`]), a
+/// referenced value read as one that builds.
+fn auth_header_unbuildable(settings: &serde_json::Value) -> bool {
+    let mut probe = settings.clone();
+    if let Some(value) = probe
+        .pointer_mut("/auth_header/value")
+        .filter(|v| v.is_object())
+    {
+        *value = serde_json::Value::String(String::new());
     }
+    serde_json::from_value::<Settings>(probe)
+        .is_ok_and(|s| s.auth_header.is_some_and(|h| !header_builds(&h)))
 }
 
 /// `check`'s instances, `(name, settings)` in configuration order (settings that are not JSON read
@@ -635,10 +635,6 @@ type State = Held<Webhook>;
 /// The error texts of the door's REFUSED answers: one per cause, so the host's line names why
 /// instead of a bare outcome.
 pub const NO_INSTANCE: &str = "no opened request-log-webhook instance";
-/// `scrape` on a push sink: it carries no `metrics` stream.
-pub const NO_EXPOSITION: &str = "this sink carries no metrics stream, so it renders no exposition";
-/// `serve` on a sink that declares no route.
-pub const NO_ROUTE: &str = "this sink declares no route, so it serves no request";
 /// `check` at a phase this sink does not know.
 pub const UNKNOWN_PHASE: &str = "not a check phase this sink knows (limits or instances)";
 
@@ -741,31 +737,6 @@ impl SafeSlot for Deliver {
     }
 }
 
-/// `scrape`: REFUSED, saying why — a push sink carries no `metrics` stream and renders no
-/// exposition (the host scrapes only the sink that carries `metrics`).
-pub struct Scrape;
-
-impl SafeSlot for Scrape {
-    type In = ScrapeIn;
-    type Out = ScrapeOut;
-    type State = State;
-    fn call(_: Instance<'_, State>, _: Lent<'_, ScrapeIn>, mut out: Out<'_, ScrapeOut>) -> Outcome {
-        out.fail(Refusal::refused(NO_EXPOSITION))
-    }
-}
-
-/// `status`: nothing to report.
-pub struct Status;
-
-impl SafeSlot for Status {
-    type In = InHead;
-    type Out = StatusOut;
-    type State = State;
-    fn call(_: Instance<'_, State>, _: Lent<'_, InHead>, _: Out<'_, StatusOut>) -> Outcome {
-        Outcome::Ready
-    }
-}
-
 /// `check`: [`check`] at the phase asked, its lines as a JSON array under a lease.
 pub struct Check;
 
@@ -796,29 +767,18 @@ impl SafeSlot for Check {
     }
 }
 
-/// `serve`: REFUSED, saying why — the sink declares no route (the host serves only declared
-/// routes).
-pub struct Serve;
-
-impl SafeSlot for Serve {
-    type In = ServeIn;
-    type Out = ServeOut;
-    type State = State;
-    fn call(_: Instance<'_, State>, _: Lent<'_, ServeIn>, mut out: Out<'_, ServeOut>) -> Outcome {
-        out.fail(Refusal::refused(NO_ROUTE))
-    }
-}
-
 mod table {
-    use super::{Check, Deliver, Safe, Scrape, Serve, Status, Webhook};
+    use super::{Check, Deliver, Safe, Webhook};
+    use busbar_contract::abi::sdk::export::{NoScrape, NoServe, Quiet};
 
     busbar_contract::plugin_door! {
         ops: busbar_contract::abi::export::Ops,
         statement: super::STATEMENT,
         lifecycle: life(Webhook, ready),
+        migrate: busbar_contract::abi::sdk::migrate::Migrator<super::Migration>,
         kind_ops: {
-            deliver: Safe<Deliver>, scrape: Safe<Scrape>, status: Safe<Status>,
-            check: Safe<Check>, serve: Safe<Serve>,
+            deliver: Safe<Deliver>, scrape: Safe<NoScrape<Webhook>>, status: Safe<Quiet<Webhook>>,
+            check: Safe<Check>, serve: Safe<NoServe<Webhook>>,
         },
     }
 }
