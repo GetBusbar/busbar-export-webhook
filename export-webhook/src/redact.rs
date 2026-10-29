@@ -10,7 +10,8 @@
 //! ([`scrub`]) and of the settings' credential strings ([`settings_credentials`]).
 //!
 //! The refusal lines that name the target (BUSBAR-7070, the delivery-deadline check) keep the path:
-//! only their userinfo is masked.
+//! only their userinfo and secret-looking query values are masked
+//! (`busbar_contract::abi::sdk::mask::mask_url`).
 
 /// What a redacted part becomes.
 const REDACTED: &str = "***";
@@ -20,7 +21,7 @@ const REDACTED: &str = "***";
 /// only what precedes its authority's end, the rest `/***`.
 pub fn log_target(url: &str) -> String {
     let Ok(u) = url::Url::parse(url) else {
-        let masked = crate::mask_unparsed(url);
+        let masked = crate::mask_url(url);
         let Some((scheme, rest)) = masked.split_once("://") else {
             return REDACTED.to_string();
         };
@@ -49,10 +50,10 @@ pub fn log_target(url: &str) -> String {
 }
 
 /// `text` (a host's failure words, say) with every part of `url` that can carry a credential
-/// replaced by `***`: the URL itself (as written and userinfo-masked), its path, query, userinfo,
+/// replaced by `***`: the URL itself (as written and masked, `mask_url`), its path, query, userinfo,
 /// each also percent-decoded.
 pub fn scrub(text: &str, url: &str) -> String {
-    let mut parts = vec![url.to_string(), crate::mask_userinfo(url)];
+    let mut parts = vec![url.to_string(), crate::mask_url(url)];
     if let Ok(u) = url::Url::parse(url) {
         if !matches!(u.path(), "" | "/") {
             parts.push(u.path().to_string());

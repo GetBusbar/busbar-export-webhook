@@ -367,8 +367,9 @@ fn the_success_boundary_is_200_to_299() {
 
 /// A target the host refused is named in 1.5.5's words, as 1.5.5's `validate_webhook_url` named it:
 /// the `https://` scheme rule (the scheme read without case), a URL that does not parse, or the
-/// destination guard, the userinfo masked as 1.5.5 masked it; a host that gave no verdict is named
-/// as such.
+/// destination guard; a host that gave no verdict is named as such. The target is masked by the
+/// SDK's `mask_url` (coordinator ruling 2026-10-28, FAMILY.md export): as written, the userinfo cut
+/// to `***`, where 1.5.5 wrote it re-serialised by its URL parser (a lower-cased scheme).
 #[test]
 fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     let refused = ConnFailure::Refused("destination refused".into());
@@ -378,7 +379,7 @@ fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     );
     assert_eq!(
         refusal_words(Some("HTTP://u:p@siem.example/in"), &refused),
-        "observability.request_log_webhook_url must be an https:// URL (got 'http://***@siem.example/in')"
+        "observability.request_log_webhook_url must be an https:// URL (got 'HTTP://***@siem.example/in')"
     );
     // RED (Q128 export-webhook LOW, src/lib.rs:391-403): 1.5.5 named the other two refusals on this
     // path in its own words too (v1.5.5 observability.rs validate_webhook_url): a URL that does not
@@ -390,7 +391,7 @@ fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     assert_eq!(
         refusal_words(Some("HTTPS://u:p@169.254.169.254/in"), &refused),
         "observability.request_log_webhook_url must not target a loopback/link-local/private/CGNAT/\
-         cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/in'"
+         cloud-metadata host (SSRF guard); got 'HTTPS://***@169.254.169.254/in'"
     );
     assert_eq!(
         refusal_words(Some("http://siem.example/in"), &ConnFailure::Unarmed),
@@ -428,7 +429,10 @@ fn an_unadmitted_target_disables_the_instance_once() {
 fn the_statement_states_the_sink() {
     assert_eq!(STATEMENT.name.len, NAME.len());
     assert_eq!(STATEMENT.max_inflight, u32::MAX);
-    assert_eq!(REWRITES[0].class, REWRITE_ALIAS);
+    assert_eq!(
+        REWRITES[0].class,
+        busbar_contract::abi::mechanism::door::REWRITE_ALIAS
+    );
     assert_eq!(REWRITES[0].from.len, ALIAS.len());
     assert_eq!(STREAMS, &[ExportStream::Logs as u8]);
     assert_eq!(TAIL.routes_len, 0);
@@ -515,7 +519,7 @@ fn validation_errors_mask_the_targets_userinfo() {
         );
         assert!(!lines[0].contains("s3cret"), "{lines:?}");
     }
-    assert_eq!(mask_userinfo("https://u:p@/x"), "https://***@/x");
+    assert_eq!(mask_url("https://u:p@/x"), "https://***@/x");
 }
 
 /// DISCOVERY AT BOOT: `ready` asks the host's verdict once and never refuses the boot. Over host
@@ -811,7 +815,7 @@ fn the_auth_header_value_is_redacted_from_debug() {
 
 /// THE TARGET URL'S USERINFO NEVER RENDERS THROUGH `Debug` (§11.13): a `user:password@` in the url is
 /// sent as Basic credentials, so formatting the settings masks it as every line this sink writes
-/// does ([`mask_userinfo`]). RED before the fix: `Debug` was derived over `WebhookSettings::url`.
+/// does ([`mask_url`]). RED before the fix: `Debug` was derived over `WebhookSettings::url`.
 #[test]
 fn the_url_userinfo_is_masked_in_debug() {
     let settings = WebhookSettings {
