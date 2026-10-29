@@ -36,7 +36,7 @@ pub struct WebhookSettings {
 impl std::fmt::Debug for WebhookSettings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WebhookSettings")
-            .field("url", &crate::mask_userinfo(&self.url))
+            .field("url", &crate::mask_url(&self.url))
             .field("auth_header", &self.auth_header)
             .field("max_inflight_deliveries", &self.max_inflight_deliveries)
             .field("delivery_timeout_secs", &self.delivery_timeout_secs)
