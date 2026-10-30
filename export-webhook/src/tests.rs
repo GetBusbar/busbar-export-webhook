@@ -1476,3 +1476,80 @@ fn the_settings_schema_bounds_are_the_ones_check_enforces() {
     assert_eq!(p["max_inflight_deliveries"]["minimum"], 1);
     assert_eq!(p["max_inflight_deliveries"]["maximum"], MAX_PERMITS as u64);
 }
+
+/// T1: the BUSBAR-7109 mid-batch cut. A batch is on its first line (the parked exchange); a reload
+/// changes the url; the resumed delivery finishes that line and the decision after it drops the
+/// rest, once, counting only the non-empty lines left. Tested at the smallest unit that holds the
+/// decision (`Webhook::cut_by_reload`, which `Deliver` calls after each line): the parked exchange
+/// itself is the SDK's, and a refresh cannot be injected between the door's PENDING and its resume.
+#[test]
+fn a_reload_of_the_target_mid_batch_drops_the_rest_once() {
+    let batch = b"{\"n\":1}\n{\"n\":2}\n\n{\"n\":3}\n";
+    let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
+    let (settings, generation) = w.current();
+    let mut at = Posting {
+        settings,
+        generation,
+        offset: 0,
+        issued: 0,
+        exchange: None,
+    };
+    // Line 1 parks; the reload lands while it is parked.
+    let (first, next) = next_line(batch, at.offset).expect("line 1");
+    assert_eq!(first, b"{\"n\":1}");
+    w.refresh(br#"{"url":"https://b.example/"}"#, &[], 2)
+        .expect("the reload");
+    // The parked line finishes on the settings it started under (the Posting keeps them) ...
+    assert_eq!(at.settings.url, "https://a.example/");
+    // ... and the rest of the batch is dropped, with ONE 7109 line.
+    let got = logged(|| assert!(w.cut_by_reload(&mut at, &batch[next..])));
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(field(&got[0], "diag"), "BUSBAR-7109");
+    assert_eq!(field(&got[0], "level"), "WARN");
+    assert_eq!(field(&got[0], "dropped"), "2");
+    assert_eq!(field(&got[0], "webhook_url"), "\"https://a.example\"");
+    // The last line never raises it, reload or not.
+    let (_, end) = next_line(batch, 17).expect("line 3");
+    assert!(!w.cut_by_reload(&mut at, &batch[end..]));
+}
+
+/// `next_line` skips blank lines and answers the offset past the line it returns.
+#[test]
+fn next_line_skips_blank_lines_and_keeps_the_offset() {
+    let batch = b"\n\na\n\nbc\n";
+    assert_eq!(next_line(batch, 0), Some((&b"a"[..], 4)));
+    assert_eq!(next_line(batch, 4), Some((&b"bc"[..], 8)));
+    assert_eq!(next_line(batch, 8), None);
+    assert_eq!(next_line(b"tail", 0), Some((&b"tail"[..], 5)));
+    assert_eq!(next_line(b"", 0), None);
+}
+
+/// T3: a credential-looking extra key inside `auth_header` (serde quotes an unknown field's name)
+/// reaches neither the refusal nor the log.
+#[test]
+fn a_credential_looking_key_in_auth_header_never_reaches_the_refusal_or_the_log() {
+    let settings = json!({
+        "url": "https://a.example/",
+        "auth_header": {"name": "A", "value": "v", "Bearer tok": 1}
+    });
+    let bytes = settings.to_string();
+    let got = logged(|| {
+        let r = refused(settings.clone());
+        assert!(
+            !r.contains("Bearer tok"),
+            "the key reached the refusal: {r}"
+        );
+        assert!(r.starts_with("settings: unknown field "), "{r}");
+        for r in [
+            Webhook::open(bytes.as_bytes(), &[], 1).expect_err("open refuses"),
+            Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1)
+                .expect("opens")
+                .refresh(bytes.as_bytes(), &[], 2)
+                .expect_err("refresh refuses"),
+        ] {
+            let text = r.text().expect("says why");
+            assert!(!text.contains("Bearer tok"), "{text}");
+        }
+    });
+    assert!(!all_text(&got).contains("Bearer tok"), "{got:?}");
+}
