@@ -12,8 +12,8 @@ use zeroize::Zeroizing;
 /// over this one was `auth_header:`, which is now just a setting here, and its other reason to exist
 /// (a SECOND webhook target) is what the named-instance map itself provides. The FIELD ORDER is the
 /// order serde names them in an unknown-field refusal: do not reorder. `Debug` carries no
-/// credential: the url's userinfo is masked as every line the sink writes masks it, and the auth
-/// header's value is redacted.
+/// credential: the url is named as the sink's log lines name it (scheme, masked userinfo, host and
+/// port; a path or query is `***`), and the auth header's value is redacted.
 #[derive(Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WebhookSettings {
@@ -37,7 +37,7 @@ pub struct WebhookSettings {
 impl std::fmt::Debug for WebhookSettings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WebhookSettings")
-            .field("url", &crate::mask_url(&self.url))
+            .field("url", &crate::log_target(&self.url))
             .field("auth_header", &self.auth_header)
             .field("max_inflight_deliveries", &self.max_inflight_deliveries)
             .field("delivery_timeout_secs", &self.delivery_timeout_secs)

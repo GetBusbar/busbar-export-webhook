@@ -45,8 +45,11 @@ use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRE
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
+use busbar_contract::abi::sdk::cred::Cred;
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement};
-use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
+use busbar_contract::abi::sdk::exchange::{
+    exchange, Exchange, ExchangeResponse, Request, SealedField,
+};
 use busbar_contract::abi::sdk::export::tail;
 pub use busbar_contract::abi::sdk::export::{NO_EXPOSITION, NO_ROUTE};
 use busbar_contract::abi::sdk::life::{settings_value, Held, Life, Refreshed, Refusal};
@@ -54,7 +57,6 @@ use busbar_contract::abi::sdk::mask::mask_url;
 use busbar_contract::abi::sdk::migrate::{Migrate, Migrated};
 use busbar_contract::abi::sdk::url::{self as sdk_url, Userinfo};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
-use zeroize::Zeroizing;
 
 /// The plugin's canonical name.
 pub const NAME: &str = "busbar-export-webhook";
@@ -279,7 +281,8 @@ impl Life for Webhook {
             .unwrap_or_else(PoisonError::into_inner);
         // Only what decides where lines go and with which credentials is a reload for a delivery
         // in flight (the generation); any other change (the deadline, the bound) is published for
-        // the deliveries that start or POST a line after it.
+        // the deliveries that start after it (an in-flight batch keeps the settings it began under,
+        // its deadline included, to its end).
         if current.settings != parsed {
             let moves = !current.routes_as(&parsed);
             *current = Arc::new(Prepared::new(parsed));
@@ -402,8 +405,12 @@ fn next_line(batch: &[u8], from: usize) -> Option<(&[u8], usize)> {
 pub struct Prepared {
     settings: Settings,
     target: Vec<u8>,
-    /// Name and value of each field; the values can hold a credential and are wiped when dropped.
-    fields: Vec<(Vec<u8>, Zeroizing<Vec<u8>>)>,
+    /// The fields that carry no credential, in order (`content-type`).
+    plain: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The fields that do (the `authorization` the userinfo became, the auth header): each goes in
+    /// before the plain field `at` (their count: last), sealed, so the SDK frames and wipes the
+    /// value and a formatted request shows `<sealed>`.
+    sealed: Vec<(usize, Vec<u8>, Cred)>,
 }
 
 /// `Debug` prints the settings through the sink's own redaction: the url as the logs name it
@@ -412,9 +419,11 @@ pub struct Prepared {
 impl std::fmt::Debug for Prepared {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let names: Vec<std::borrow::Cow<'_, str>> = self
-            .fields
+            .plain
             .iter()
-            .map(|(n, _)| String::from_utf8_lossy(n))
+            .map(|(n, _)| n)
+            .chain(self.sealed.iter().map(|(_, n, _)| n))
+            .map(|n| String::from_utf8_lossy(n))
             .collect();
         let header = self.settings.auth_header.as_ref().map(|h| (&h.name, "***"));
         f.debug_struct("Prepared")
@@ -443,21 +452,30 @@ impl Deref for Prepared {
 
 impl Prepared {
     fn new(settings: Settings) -> Self {
-        let mut fields = Vec::new();
+        // The fields in the order the request carries them, appended as a `HeaderMap` appends;
+        // a field that carries a credential is held as a `Cred`.
+        let mut fields: Vec<(Vec<u8>, Field)> = Vec::new();
         if let Some(basic) = basic_authorization(&settings.url) {
-            append(&mut fields, b"authorization", Zeroizing::new(basic));
+            append(&mut fields, b"authorization", Field::Secret(cred(basic)));
         }
         append(
             &mut fields,
             b"content-type",
-            Zeroizing::new(b"application/json".to_vec()),
+            Field::Plain(b"application/json".to_vec()),
         );
         if let Some(h) = settings.auth_header.as_ref().filter(|h| header_builds(h)) {
             append(
                 &mut fields,
                 h.name.to_ascii_lowercase().as_bytes(),
-                Zeroizing::new(h.value.as_bytes().to_vec()),
+                Field::Secret(cred(h.value.as_bytes().to_vec())),
             );
+        }
+        let (mut plain, mut sealed) = (Vec::new(), Vec::new());
+        for (name, field) in fields {
+            match field {
+                Field::Plain(v) => plain.push((name, v)),
+                Field::Secret(c) => sealed.push((plain.len(), name, c)),
+            }
         }
         let target = match url::Url::parse(&settings.url) {
             Ok(u) => match u.query() {
@@ -470,8 +488,27 @@ impl Prepared {
         Self {
             settings,
             target,
-            fields,
+            plain,
+            sealed,
         }
+    }
+
+    /// The request that POSTs `line` and the sealed fields it carries beside it
+    /// ([`Exchange::request_sealed`]).
+    fn parts(&self, line: &[u8]) -> (Request, Vec<SealedField>) {
+        let request = Request {
+            method: b"POST".to_vec(),
+            target: self.target.clone(),
+            fields: self.plain.clone(),
+            body: line.to_vec(),
+            timeout_ms: self.settings.delivery_timeout_secs.saturating_mul(1000),
+        };
+        let sealed = self
+            .sealed
+            .iter()
+            .map(|(at, name, c)| (*at, name.clone(), c.field()))
+            .collect();
+        (request, sealed)
     }
 
     /// Whether `other` sends lines where these do and with the same credentials: the url and the
@@ -479,21 +516,24 @@ impl Prepared {
     fn routes_as(&self, other: &Settings) -> bool {
         self.settings.url == other.url && self.settings.auth_header == other.auth_header
     }
+}
 
-    /// The request that POSTs `line`.
-    pub fn request(&self, line: &[u8]) -> Request {
-        Request {
-            method: b"POST".to_vec(),
-            target: self.target.clone(),
-            fields: self
-                .fields
-                .iter()
-                .map(|(n, v)| (n.clone(), v.to_vec()))
-                .collect(),
-            body: line.to_vec(),
-            timeout_ms: self.settings.delivery_timeout_secs.saturating_mul(1000),
-        }
-    }
+/// One request field before it is split into plain and sealed.
+enum Field {
+    Plain(Vec<u8>),
+    Secret(Cred),
+}
+
+/// A credential-bearing field value held as a `Cred` (it has no getter, no `Debug`; the string it
+/// was made from is wiped).
+fn cred(value: Vec<u8>) -> Cred {
+    // A value that is not UTF-8 cannot come from a settings string or a Basic value; lossy keeps
+    // this total.
+    let mut v = serde_json::Value::String(
+        String::from_utf8(value)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
+    );
+    Cred::take(&mut v).unwrap_or_else(Cred::empty)
 }
 
 /// Whether the auth header can be sent: it is an HTTP header ([`header_is_http`]) and not one of
@@ -530,7 +570,7 @@ fn header_is_http(h: &ExportAuthHeader) -> bool {
 
 /// One field appended as an `http::HeaderMap` appends it: after the last field of the same name
 /// (names compared without case), or last when there is none.
-fn append(fields: &mut Vec<(Vec<u8>, Zeroizing<Vec<u8>>)>, name: &[u8], value: Zeroizing<Vec<u8>>) {
+fn append(fields: &mut Vec<(Vec<u8>, Field)>, name: &[u8], value: Field) {
     let field = (name.to_vec(), value);
     match fields
         .iter()
@@ -566,17 +606,17 @@ fn base64(bytes: &[u8]) -> String {
 
 /// BUSBAR-7070's words for a refused target: a target that is not an `https://`
 /// URL is the scheme rule (the scheme read without case); one that does not parse is an invalid
-/// URL; a parseable `https://` target the connector refused with the destination guard's text
-/// ([`guard_refusal`]) is the destination guard. Userinfo is masked. A host that gave no verdict, a
-/// refusal for any other reason, or any failure that is not a refusal, is said in the host's words,
-/// scrubbed of the target's parts.
+/// URL; any other refusal of a parseable `https://` target is worded as the destination guard (the
+/// connector gives one text for every target refusal, so nothing tells them apart). Userinfo is
+/// masked. A host that gave no verdict, a need the plugin never declared ([`undeclared`]), or any
+/// failure that is not a refusal, is said in the host's words, scrubbed of the target's parts.
 pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
     match (url, refused) {
-        (Some(u), ConnFailure::Refused(_)) if !is_https(u) => format!(
+        (Some(u), ConnFailure::Refused(_)) if !undeclared(refused) && !is_https(u) => format!(
             "observability.request_log_webhook_url must be an https:// URL (got '{}')",
             mask_url(u)
         ),
-        (Some(u), ConnFailure::Refused(t)) if guard_refusal(t) => match url::Url::parse(u) {
+        (Some(u), ConnFailure::Refused(_)) if !undeclared(refused) => match url::Url::parse(u) {
             Err(e) => format!("observability.request_log_webhook_url is not a valid URL: {e}"),
             Ok(_) => format!(
                 "observability.request_log_webhook_url must not target a loopback/link-local/\
@@ -589,14 +629,13 @@ pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
     }
 }
 
-/// Whether a host refusal's text is the destination guard's: the connector refuses a target it will
-/// not carry with `ConnError::Refused`, whose text is "the connection was refused" (an empty text,
-/// and the legacy "destination refused", say the same). Any other reason (an undeclared need, a
-/// fault) is not the guard's and is not worded as it.
-fn guard_refusal(text: &str) -> bool {
-    ["", "the connection was refused", "destination refused"]
-        .iter()
-        .any(|g| text.trim().eq_ignore_ascii_case(g))
+/// Whether `refused` is the host's refusal of a need the plugin never declared
+/// (`ConnError::UndeclaredNeed`, worded by core's own constant). The connector words every other
+/// refusal of a target (the record, the scheme, the destination guard, the egress class) as the one
+/// `ConnError::Refused`, so the guard cannot be told from them here: a distinct guard reason needs
+/// core.
+fn undeclared(refused: &ConnFailure) -> bool {
+    matches!(refused, ConnFailure::Refused(t) if t.starts_with(busbar_contract::conn::ConnError::UndeclaredNeed.text()))
 }
 
 /// `url` names the `https` scheme, read without case (RFC 3986).
@@ -710,17 +749,19 @@ fn instance_checks(parsed: &[(usize, Settings)], errors: &mut Vec<String>) {
     }
 }
 
-/// The migration's report line when it removes an `auth_header` 1.5.5 could not build.
-pub const REMOVED_AUTH_HEADER: &str = "removed settings.auth_header: its name or value is not a \
-     valid HTTP header, which 1.6.0 refuses at validation; 1.5.5 never sent it";
+/// The migration's report line when it removes an `auth_header` 1.6.0 refuses.
+pub const REMOVED_AUTH_HEADER: &str = "removed settings.auth_header: it cannot be sent as an HTTP \
+     header (its name or value is not a valid HTTP header, or its name is a framing or connection \
+     field such as Host or Content-Length), which 1.6.0 refuses at validation and open";
 
 /// THE 1.5.5 UPGRADE (`busbar --migrate-config`; owner ruling 2026-10-27): this sink's own
 /// migration of its settings section, stated on the door as `migrate`.
 ///
 /// 1.5.5 left an `auth_header` it could not build out of every delivery and sent the line without
-/// it (export-webhook #33 W1); 1.6.0 refuses such a header at validation ([`check`]). The migration
-/// removes exactly the header that refusal names, reporting [`REMOVED_AUTH_HEADER`]: settings that
-/// parse as [`Settings`] and carry an `auth_header` 1.5.5 could not build ([`header_is_http`]). A value
+/// it (export-webhook #33 W1), and sent one named for a framing or connection field as written;
+/// 1.6.0 refuses both at validation ([`check`]) and at `open`. The migration removes exactly the
+/// header those refusals name ([`header_builds`], the one rule), reporting [`REMOVED_AUTH_HEADER`]:
+/// settings that parse as [`Settings`] and carry an `auth_header` that cannot be sent. A value
 /// written as a reference the kernel resolves (`auth_header.value` is a declared secret field) is
 /// unknown here, so only the header's name is judged. Anything else, a section the grammar refuses
 /// for its shape included, is unchanged: that refusal is the operator's to read.
@@ -753,7 +794,7 @@ fn auth_header_unbuildable(settings: &serde_json::Value) -> bool {
         *value = serde_json::Value::String(String::new());
     }
     serde_json::from_value::<Settings>(probe)
-        .is_ok_and(|s| s.auth_header.is_some_and(|h| !header_is_http(&h)))
+        .is_ok_and(|s| s.auth_header.is_some_and(|h| !header_builds(&h)))
 }
 
 /// `check`'s instances, `(name, settings)` in configuration order (settings that are not JSON read
@@ -839,7 +880,8 @@ impl SafeSlot for Deliver {
                     let started = match at.exchange.take() {
                         Some(ex) => Ok(ex),
                         None => {
-                            Exchange::request(at.settings.request(line)).map(Exchange::head_only)
+                            let (request, sealed) = at.settings.parts(line);
+                            Exchange::request_sealed(request, sealed).map(Exchange::head_only)
                         }
                     };
                     match started {
