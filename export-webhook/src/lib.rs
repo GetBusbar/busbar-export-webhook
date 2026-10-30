@@ -323,25 +323,73 @@ impl Webhook {
     /// Whether the host admitted the target, asked once: a refusal (or no host to ask) raises
     /// BUSBAR-7070 in the host's words and disables the instance.
     pub fn admitted(&self, host: Option<&Host>) -> bool {
+        self.admitted_settings(host).is_some()
+    }
+
+    /// The settings (and their generation) a fresh delivery runs on, when the host admitted the
+    /// target; `None` when it did not. The settings are read while the verdict's lock is held (lock
+    /// order live -> settings, as `refresh` takes them), so a delivery never pairs an old verdict
+    /// with the settings of a reload that landed between the two reads.
+    fn admitted_settings(&self, host: Option<&Host>) -> Option<(Arc<Prepared>, u64)> {
         let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(v) = *live {
-            return v;
-        }
-        let verdict = host.map_or(Err(ConnFailure::Unarmed), |h| {
-            h.connector(busbar_contract::abi::mechanism::ticket::Ticket::NONE)
-                .admit(NEED)
-        });
-        let ok = match verdict {
-            Ok(()) => true,
-            Err(e) => {
-                let words = refusal_words(Some(&self.settings().url), &e);
-                tracing::error!(diag = %DISABLED, "{words}; disabling this webhook exporter");
-                false
+        let ok = match *live {
+            Some(v) => v,
+            None => {
+                let verdict = host.map_or(Err(ConnFailure::Unarmed), |h| {
+                    h.connector(busbar_contract::abi::mechanism::ticket::Ticket::NONE)
+                        .admit(NEED)
+                });
+                let ok = match verdict {
+                    Ok(()) => true,
+                    Err(e) => {
+                        let words = refusal_words(Some(&self.settings().url), &e);
+                        tracing::error!(diag = %DISABLED, "{words}; disabling this webhook exporter");
+                        false
+                    }
+                };
+                *live = Some(ok);
+                ok
             }
         };
-        *live = Some(ok);
-        ok
+        ok.then(|| self.current())
     }
+
+    /// Whether a reload cut the batch whose rest is `rest` (the bytes after the line just done): when
+    /// lines remain and the target or credentials changed, BUSBAR-7109 is raised once and the rest
+    /// is dropped.
+    fn cut_by_reload(&self, at: &mut Posting, rest: &[u8]) -> bool {
+        if next_line(rest, 0).is_none() || !self.reloaded_since(at) {
+            return false;
+        }
+        let dropped = rest
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .count();
+        tracing::warn!(
+            diag = %RELOAD_CUT,
+            webhook_url = ?log_target(&at.settings.url),
+            dropped,
+            "request-log webhook settings were reloaded during a delivery; the batch's \
+             remaining log lines were dropped"
+        );
+        true
+    }
+}
+
+/// The next non-empty line of `batch` at or after byte `from`, and the byte offset just past it.
+fn next_line(batch: &[u8], from: usize) -> Option<(&[u8], usize)> {
+    let mut start = from;
+    while start < batch.len() {
+        let end = batch[start..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(batch.len(), |i| start + i);
+        if end > start {
+            return Some((&batch[start..end], end + 1));
+        }
+        start = end + 1;
+    }
+    None
 }
 
 /// The settings of one opened instance with the request every line of theirs is POSTed as, built
@@ -735,11 +783,11 @@ pub const UNKNOWN_PHASE: &str = "not a check phase this sink knows (limits or in
 
 /// What a delivery parks across PENDING: the settings it started under and their generation (a
 /// reload mid-batch changes nothing for it: its lines go, and are reported, to the target it began
-/// with), the line it is on, the handles issued before that line's exchange, and the exchange.
+/// with), the byte offset of the line it is on (so a resume does not re-split the batch), the handles issued before that line's exchange, and the exchange.
 struct Posting {
     settings: Arc<Prepared>,
     generation: u64,
-    line: usize,
+    offset: usize,
     issued: u32,
     exchange: Option<Exchange>,
 }
@@ -770,26 +818,20 @@ impl SafeSlot for Deliver {
         let mut at = match parked {
             Some(p) => p,
             None => {
-                if !hook.admitted(h.host()) {
+                let Some((settings, generation)) = hook.admitted_settings(h.host()) else {
                     return Outcome::Ready;
-                }
-                let (settings, generation) = hook.current();
+                };
                 Posting {
                     settings,
                     generation,
-                    line: 0,
+                    offset: 0,
                     issued: 0,
                     exchange: None,
                 }
             }
         };
-        let lines: Vec<&[u8]> = input
-            .field(|i| &i.batch)
-            .bytes()
-            .split(|b| *b == b'\n')
-            .filter(|l| !l.is_empty())
-            .collect();
-        while let Some(line) = lines.get(at.line) {
+        let batch = input.field(|i| &i.batch).bytes();
+        while let Some((line, next)) = next_line(batch, at.offset) {
             let answered = match h.host() {
                 None => Err(ConnFailure::Unarmed),
                 Some(host) => {
@@ -817,16 +859,8 @@ impl SafeSlot for Deliver {
                 }
             };
             report(&at.settings.url, answered);
-            at.line += 1;
-            let left = lines.len().saturating_sub(at.line);
-            if left > 0 && hook.reloaded_since(&mut at) {
-                tracing::warn!(
-                    diag = %RELOAD_CUT,
-                    webhook_url = ?log_target(&at.settings.url),
-                    dropped = left,
-                    "request-log webhook settings were reloaded during a delivery; the batch's \
-                     remaining log lines were dropped"
-                );
+            at.offset = next;
+            if hook.cut_by_reload(&mut at, &batch[next.min(batch.len())..]) {
                 break;
             }
         }
