@@ -28,12 +28,14 @@
     "max_inflight_deliveries": {
       "type": "integer",
       "minimum": 0,
+      "maximum": 2305843009213693951,
       "default": 64,
       "description": "Max concurrent deliveries."
     },
     "delivery_timeout_secs": {
       "type": "integer",
-      "minimum": 0,
+      "minimum": 1,
+      "maximum": 946080000,
       "default": 2,
       "description": "Per-delivery timeout, seconds."
     }

@@ -45,8 +45,11 @@ use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRE
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
+use busbar_contract::abi::sdk::cred::Cred;
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement};
-use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
+use busbar_contract::abi::sdk::exchange::{
+    exchange, Exchange, ExchangeResponse, Request, SealedField,
+};
 use busbar_contract::abi::sdk::export::tail;
 pub use busbar_contract::abi::sdk::export::{NO_EXPOSITION, NO_ROUTE};
 use busbar_contract::abi::sdk::life::{settings_value, Held, Life, Refreshed, Refusal};
@@ -176,6 +179,23 @@ fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
     Ok(settings)
 }
 
+/// The settings an instance runs on: [`parse`]d, and an `auth_header` that cannot be sent is
+/// refused (lead-signed): the instance would otherwise POST every line unauthenticated. The value is
+/// never echoed.
+fn parse_to_run(settings: &[u8]) -> Result<Settings, Refusal> {
+    let parsed = parse(settings)?;
+    if parsed
+        .auth_header
+        .as_ref()
+        .is_some_and(|h| !header_builds(h))
+    {
+        return Err(Refusal::failed(
+            "settings: `auth_header` cannot be sent as an HTTP header",
+        ));
+    }
+    Ok(parsed)
+}
+
 /// The ambiguous-URL refusal: `Some(the refusal)` when `url` parses but
 /// carries an `@` after its host — `https://tok/en@siem.example/…` or `https://u:123/x@siem.example/…`,
 /// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
@@ -190,7 +210,6 @@ pub fn ambiguous_url(url: &str) -> Option<String> {
 }
 
 /// One opened instance.
-#[derive(Debug)]
 pub struct Webhook {
     /// Its settings and the request every line shares. `open` and `refresh` refuse settings that do
     /// not parse, so an instance never holds unparsed ones and never sits silently dead.
@@ -201,6 +220,21 @@ pub struct Webhook {
     /// The host's verdict on the target, asked once: at boot by `ready` (and again after a
     /// `refresh` clears it, by the next delivery or readiness ask); `None` until then.
     live: Mutex<Option<bool>>,
+}
+
+/// `Debug` names the settings through [`Prepared`]'s redacting `Debug`, and the counters; the
+/// verdict is a plain flag.
+impl std::fmt::Debug for Webhook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Webhook")
+            .field("settings", &self.settings())
+            .field("generation", &self.generation.load(Ordering::Acquire))
+            .field(
+                "live",
+                &*self.live.lock().unwrap_or_else(PoisonError::into_inner),
+            )
+            .finish()
+    }
 }
 
 impl Life for Webhook {
@@ -215,7 +249,7 @@ impl Life for Webhook {
     /// that opened on them would drop every delivery without a word.
     fn open(settings: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
         Ok(Self {
-            settings: RwLock::new(Arc::new(Prepared::new(parse(settings)?))),
+            settings: RwLock::new(Arc::new(Prepared::new(parse_to_run(settings)?))),
             generation: AtomicU64::new(0),
             live: Mutex::new(None),
         })
@@ -237,7 +271,7 @@ impl Life for Webhook {
     /// A reload's settings replace the instance's, and its target is asked about afresh; settings
     /// that do not parse are refused and the old ones (and their verdict) stay.
     fn refresh(&self, settings: &[u8], _: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
-        let parsed = parse(settings)?;
+        let parsed = parse_to_run(settings)?;
         // Hold the verdict across the settings write (lock order live -> settings, as `admitted`),
         // so no delivery reads the new settings beside the old target's cached verdict.
         let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
@@ -245,10 +279,16 @@ impl Life for Webhook {
             .settings
             .write()
             .unwrap_or_else(PoisonError::into_inner);
-        // Settings equal to the held ones are no reload for a delivery in flight.
+        // Only what decides where lines go and with which credentials is a reload for a delivery
+        // in flight (the generation); any other change (the deadline, the bound) is published for
+        // the deliveries that start after it (an in-flight batch keeps the settings it began under,
+        // its deadline included, to its end).
         if current.settings != parsed {
+            let moves = !current.routes_as(&parsed);
             *current = Arc::new(Prepared::new(parsed));
-            self.generation.fetch_add(1, Ordering::Release);
+            if moves {
+                self.generation.fetch_add(1, Ordering::Release);
+            }
         }
         drop(current);
         *live = None;
@@ -262,7 +302,7 @@ impl Webhook {
         self.current().0
     }
 
-    /// Whether the settings now differ in content from those `at` started under. The generation
+    /// Whether the target or the credentials now differ from those `at` started under. The generation
     /// is the fast path; when it moved, the content is compared (a reload back to the same
     /// settings is no reload for the batch) and `at` takes the new generation.
     fn reloaded_since(&self, at: &mut Posting) -> bool {
@@ -271,7 +311,7 @@ impl Webhook {
         }
         let (now, generation) = self.current();
         at.generation = generation;
-        now.settings != at.settings.settings
+        !now.routes_as(&at.settings.settings)
     }
 
     /// The settings and the generation they are, read together.
@@ -286,25 +326,73 @@ impl Webhook {
     /// Whether the host admitted the target, asked once: a refusal (or no host to ask) raises
     /// BUSBAR-7070 in the host's words and disables the instance.
     pub fn admitted(&self, host: Option<&Host>) -> bool {
+        self.admitted_settings(host).is_some()
+    }
+
+    /// The settings (and their generation) a fresh delivery runs on, when the host admitted the
+    /// target; `None` when it did not. The settings are read while the verdict's lock is held (lock
+    /// order live -> settings, as `refresh` takes them), so a delivery never pairs an old verdict
+    /// with the settings of a reload that landed between the two reads.
+    fn admitted_settings(&self, host: Option<&Host>) -> Option<(Arc<Prepared>, u64)> {
         let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(v) = *live {
-            return v;
-        }
-        let verdict = host.map_or(Err(ConnFailure::Unarmed), |h| {
-            h.connector(busbar_contract::abi::mechanism::ticket::Ticket::NONE)
-                .admit(NEED)
-        });
-        let ok = match verdict {
-            Ok(()) => true,
-            Err(e) => {
-                let words = refusal_words(Some(&self.settings().url), &e);
-                tracing::error!(diag = %DISABLED, "{words}; disabling this webhook exporter");
-                false
+        let ok = match *live {
+            Some(v) => v,
+            None => {
+                let verdict = host.map_or(Err(ConnFailure::Unarmed), |h| {
+                    h.connector(busbar_contract::abi::mechanism::ticket::Ticket::NONE)
+                        .admit(NEED)
+                });
+                let ok = match verdict {
+                    Ok(()) => true,
+                    Err(e) => {
+                        let words = refusal_words(Some(&self.settings().url), &e);
+                        tracing::error!(diag = %DISABLED, "{words}; disabling this webhook exporter");
+                        false
+                    }
+                };
+                *live = Some(ok);
+                ok
             }
         };
-        *live = Some(ok);
-        ok
+        ok.then(|| self.current())
     }
+
+    /// Whether a reload cut the batch whose rest is `rest` (the bytes after the line just done): when
+    /// lines remain and the target or credentials changed, BUSBAR-7109 is raised once and the rest
+    /// is dropped.
+    fn cut_by_reload(&self, at: &mut Posting, rest: &[u8]) -> bool {
+        if next_line(rest, 0).is_none() || !self.reloaded_since(at) {
+            return false;
+        }
+        let dropped = rest
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .count();
+        tracing::warn!(
+            diag = %RELOAD_CUT,
+            webhook_url = ?log_target(&at.settings.url),
+            dropped,
+            "request-log webhook settings were reloaded during a delivery; the batch's \
+             remaining log lines were dropped"
+        );
+        true
+    }
+}
+
+/// The next non-empty line of `batch` at or after byte `from`, and the byte offset just past it.
+fn next_line(batch: &[u8], from: usize) -> Option<(&[u8], usize)> {
+    let mut start = from;
+    while start < batch.len() {
+        let end = batch[start..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(batch.len(), |i| start + i);
+        if end > start {
+            return Some((&batch[start..end], end + 1));
+        }
+        start = end + 1;
+    }
+    None
 }
 
 /// The settings of one opened instance with the request every line of theirs is POSTed as, built
@@ -314,11 +402,45 @@ impl Webhook {
 /// appended as an `http::HeaderMap` appends, so a configured auth header named `Authorization` is
 /// sent too, after the userinfo's. The configured name goes lower-cased (the contract's field block
 /// is lower-case).
-#[derive(Debug)]
 pub struct Prepared {
     settings: Settings,
     target: Vec<u8>,
-    fields: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The fields that carry no credential, in order (`content-type`).
+    plain: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The fields that do (the `authorization` the userinfo became, the auth header): each goes in
+    /// before the plain field `at` (their count: last), sealed, so the SDK frames and wipes the
+    /// value and a formatted request shows `<sealed>`.
+    sealed: Vec<(usize, Vec<u8>, Cred)>,
+}
+
+/// `Debug` prints the settings through the sink's own redaction: the url as the logs name it
+/// ([`log_target`]), the auth header by name only, the fields by name only, and the target path
+/// and query as `***` unless it is the root.
+impl std::fmt::Debug for Prepared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<std::borrow::Cow<'_, str>> = self
+            .plain
+            .iter()
+            .map(|(n, _)| n)
+            .chain(self.sealed.iter().map(|(_, n, _)| n))
+            .map(|n| String::from_utf8_lossy(n))
+            .collect();
+        let header = self.settings.auth_header.as_ref().map(|h| (&h.name, "***"));
+        f.debug_struct("Prepared")
+            .field("url", &log_target(&self.settings.url))
+            .field("auth_header", &header)
+            .field(
+                "max_inflight_deliveries",
+                &self.settings.max_inflight_deliveries,
+            )
+            .field(
+                "delivery_timeout_secs",
+                &self.settings.delivery_timeout_secs,
+            )
+            .field("target", &if self.target == b"/" { "/" } else { "***" })
+            .field("fields", &names)
+            .finish()
+    }
 }
 
 impl Deref for Prepared {
@@ -330,17 +452,34 @@ impl Deref for Prepared {
 
 impl Prepared {
     fn new(settings: Settings) -> Self {
-        let mut fields = Vec::new();
+        // The fields in the order the request carries them, appended as a `HeaderMap` appends;
+        // a field that carries a credential is held as a `Cred`.
+        let mut fields: Vec<(Vec<u8>, Field)> = Vec::new();
         if let Some(basic) = basic_authorization(&settings.url) {
-            append(&mut fields, b"authorization", &basic);
+            append(
+                &mut fields,
+                b"authorization",
+                Field::Secret(cred(basic, &settings.url)),
+            );
         }
-        append(&mut fields, b"content-type", b"application/json");
+        append(
+            &mut fields,
+            b"content-type",
+            Field::Plain(b"application/json".to_vec()),
+        );
         if let Some(h) = settings.auth_header.as_ref().filter(|h| header_builds(h)) {
             append(
                 &mut fields,
                 h.name.to_ascii_lowercase().as_bytes(),
-                h.value.as_bytes(),
+                Field::Secret(cred(h.value.as_bytes().to_vec(), &settings.url)),
             );
+        }
+        let (mut plain, mut sealed) = (Vec::new(), Vec::new());
+        for (name, field) in fields {
+            match field {
+                Field::Plain(v) => plain.push((name, v)),
+                Field::Secret(c) => sealed.push((plain.len(), name, c)),
+            }
         }
         let target = match url::Url::parse(&settings.url) {
             Ok(u) => match u.query() {
@@ -353,27 +492,81 @@ impl Prepared {
         Self {
             settings,
             target,
-            fields,
+            plain,
+            sealed,
         }
     }
 
-    /// The request that POSTs `line`.
-    pub fn request(&self, line: &[u8]) -> Request {
-        Request {
+    /// The request that POSTs `line` and the sealed fields it carries beside it
+    /// ([`Exchange::request_sealed`]).
+    fn parts(&self, line: &[u8]) -> (Request, Vec<SealedField>) {
+        let request = Request {
             method: b"POST".to_vec(),
             target: self.target.clone(),
-            fields: self.fields.clone(),
+            fields: self.plain.clone(),
             body: line.to_vec(),
             timeout_ms: self.settings.delivery_timeout_secs.saturating_mul(1000),
-        }
+        };
+        let sealed = self
+            .sealed
+            .iter()
+            .map(|(at, name, c)| (*at, name.clone(), c.field()))
+            .collect();
+        (request, sealed)
+    }
+
+    /// Whether `other` sends lines where these do and with the same credentials: the url and the
+    /// auth header, not the deadline or the in-flight bound.
+    fn routes_as(&self, other: &Settings) -> bool {
+        self.settings.url == other.url && self.settings.auth_header == other.auth_header
     }
 }
 
-/// Whether the auth header can be built, and so is sent: `HeaderName::from_bytes` takes a name of 1
-/// to 65535 RFC 9110 token bytes, and `HeaderValue::from_str` a value of visible ASCII, space, tab
-/// and non-ASCII bytes (no other control byte, no DEL). A header that fails either is left out and
-/// the line POSTed without it; this sink also refuses such a header at validation.
+/// One request field before it is split into plain and sealed.
+enum Field {
+    Plain(Vec<u8>),
+    Secret(Cred),
+}
+
+/// A credential-bearing field value held as a `Cred` for the target `url` (it has no getter, no
+/// `Debug`; the string it was made from is wiped).
+fn cred(value: Vec<u8>, url: &str) -> Cred {
+    // A value that is not UTF-8 cannot come from a settings string or a Basic value; lossy keeps
+    // this total.
+    let mut v = serde_json::Value::String(
+        String::from_utf8(value)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
+    );
+    // Required to go out secured when the operator's url names a secure scheme: the SDK's
+    // secured-connection check applies to it.
+    Cred::take(&mut v)
+        .unwrap_or_else(Cred::empty)
+        .secure_for(url)
+}
+
+/// Whether the auth header can be sent: it is an HTTP header ([`header_is_http`]) and not one of
+/// the framing or connection fields, which the sink's own request owns and a configured one could
+/// use to desync the exchange (names compared without case).
 fn header_builds(h: &ExportAuthHeader) -> bool {
+    const OWNED: [&str; 9] = [
+        "content-length",
+        "transfer-encoding",
+        "host",
+        "connection",
+        "te",
+        "upgrade",
+        "trailer",
+        "keep-alive",
+        "proxy-connection",
+    ];
+    header_is_http(h) && !OWNED.iter().any(|n| h.name.eq_ignore_ascii_case(n))
+}
+
+/// Whether the auth header is a header 1.5.5 could build: `HeaderName::from_bytes` takes a name of 1
+/// to 65535 RFC 9110 token bytes, and `HeaderValue::from_str` a value of visible ASCII, space, tab
+/// and non-ASCII bytes (no other control byte, no DEL). 1.5.5 left a header that fails either out
+/// and POSTed the line without it; 1.6.0 refuses one at `open`/`refresh` and `check`s it.
+fn header_is_http(h: &ExportAuthHeader) -> bool {
     let token = |b: &u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b);
     let name = h.name.as_bytes();
     (1..=usize::from(u16::MAX)).contains(&name.len())
@@ -385,8 +578,8 @@ fn header_builds(h: &ExportAuthHeader) -> bool {
 
 /// One field appended as an `http::HeaderMap` appends it: after the last field of the same name
 /// (names compared without case), or last when there is none.
-fn append(fields: &mut Vec<(Vec<u8>, Vec<u8>)>, name: &[u8], value: &[u8]) {
-    let field = (name.to_vec(), value.to_vec());
+fn append(fields: &mut Vec<(Vec<u8>, Field)>, name: &[u8], value: Field) {
+    let field = (name.to_vec(), value);
     match fields
         .iter()
         .rposition(|(n, _)| n.eq_ignore_ascii_case(name))
@@ -421,16 +614,17 @@ fn base64(bytes: &[u8]) -> String {
 
 /// BUSBAR-7070's words for a refused target: a target that is not an `https://`
 /// URL is the scheme rule (the scheme read without case); one that does not parse is an invalid
-/// URL; a parseable `https://` target the host refused is the destination guard, the only rule
-/// left on that path. Userinfo is masked. A host that gave no verdict, or any
-/// failure that is not a refusal, is said in the host's words.
+/// URL; any other refusal of a parseable `https://` target is worded as the destination guard (the
+/// connector gives one text for every target refusal, so nothing tells them apart). Userinfo is
+/// masked. A host that gave no verdict, a need the plugin never declared ([`undeclared`]), or any
+/// failure that is not a refusal, is said in the host's words, scrubbed of the target's parts.
 pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
     match (url, refused) {
-        (Some(u), ConnFailure::Refused(_)) if !is_https(u) => format!(
+        (Some(u), ConnFailure::Refused(_)) if !undeclared(refused) && !is_https(u) => format!(
             "observability.request_log_webhook_url must be an https:// URL (got '{}')",
             mask_url(u)
         ),
-        (Some(u), ConnFailure::Refused(_)) => match url::Url::parse(u) {
+        (Some(u), ConnFailure::Refused(_)) if !undeclared(refused) => match url::Url::parse(u) {
             Err(e) => format!("observability.request_log_webhook_url is not a valid URL: {e}"),
             Ok(_) => format!(
                 "observability.request_log_webhook_url must not target a loopback/link-local/\
@@ -443,9 +637,22 @@ pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
     }
 }
 
+/// Whether `refused` is the host's refusal of a need the plugin never declared
+/// (`ConnError::UndeclaredNeed`, worded by core's own constant). The connector words every other
+/// refusal of a target (the record, the scheme, the destination guard, the egress class) as the one
+/// `ConnError::Refused`, so the guard cannot be told from them here: a distinct guard reason needs
+/// core.
+fn undeclared(refused: &ConnFailure) -> bool {
+    matches!(refused, ConnFailure::Refused(t) if t.starts_with(busbar_contract::conn::ConnError::UndeclaredNeed.text()))
+}
+
 /// `url` names the `https` scheme, read without case (RFC 3986).
+///
+/// Leading C0 controls and spaces are skipped first, as the WHATWG URL parser skips them, so the
+/// scheme is the one the parser would read.
 fn is_https(url: &str) -> bool {
-    url.split_once("://")
+    url.trim_start_matches(|c: char| c <= ' ')
+        .split_once("://")
         .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
 }
 
@@ -482,9 +689,11 @@ pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
 /// instance stating `0` beside a larger sibling therefore validates and runs at one permit; refusing
 /// it per instance would tighten customer-visible behaviour.
 pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
-    let parsed: Vec<Settings> = instances
+    // Each parsed instance keeps its configured position: an unparsable one before it still counts.
+    let parsed: Vec<(usize, Settings)> = instances
         .iter()
-        .filter_map(|(_, s)| serde_json::from_value(s.clone()).ok())
+        .enumerate()
+        .filter_map(|(i, (_, s))| Some((i, serde_json::from_value(s.clone()).ok()?)))
         .collect();
     let mut errors = Vec::new();
     if phase == CheckPhase::Instances {
@@ -493,7 +702,7 @@ pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Ve
     }
     let bound = parsed
         .iter()
-        .map(|w| w.max_inflight_deliveries)
+        .map(|(_, w)| w.max_inflight_deliveries)
         .max()
         .unwrap_or(DEFAULT_MAX_INFLIGHT);
     if bound < 1 {
@@ -513,9 +722,9 @@ pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Ve
     errors
 }
 
-/// Each instance's delivery deadline, numbered by its position among the instances.
-fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
-    for (i, w) in parsed.iter().enumerate() {
+/// Each instance's delivery deadline, numbered by its configured position.
+fn instance_checks(parsed: &[(usize, Settings)], errors: &mut Vec<String>) {
+    for (i, w) in parsed {
         if let Some(h) = w.auth_header.as_ref().filter(|h| !header_builds(h)) {
             errors.push(format!(
                 "the `module: request-log-webhook` export instance targeting '{}' (#{i}) sets \
@@ -548,17 +757,19 @@ fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
     }
 }
 
-/// The migration's report line when it removes an `auth_header` 1.5.5 could not build.
-pub const REMOVED_AUTH_HEADER: &str = "removed settings.auth_header: its name or value is not a \
-     valid HTTP header, which 1.6.0 refuses at validation; 1.5.5 never sent it";
+/// The migration's report line when it removes an `auth_header` 1.6.0 refuses.
+pub const REMOVED_AUTH_HEADER: &str = "removed settings.auth_header: 1.6.0 does not send it, as it \
+     cannot be sent as an HTTP header (its name or value is not a valid HTTP header, or its name is a framing or connection \
+     field such as Host or Content-Length), which 1.6.0 refuses at validation and open";
 
 /// THE 1.5.5 UPGRADE (`busbar --migrate-config`; owner ruling 2026-10-27): this sink's own
 /// migration of its settings section, stated on the door as `migrate`.
 ///
 /// 1.5.5 left an `auth_header` it could not build out of every delivery and sent the line without
-/// it (export-webhook #33 W1); 1.6.0 refuses such a header at validation ([`check`]). The migration
-/// removes exactly the header that refusal names, reporting [`REMOVED_AUTH_HEADER`]: settings that
-/// parse as [`Settings`] and carry an `auth_header` that does not build ([`header_builds`]). A value
+/// it (export-webhook #33 W1), and sent one named for a framing or connection field as written;
+/// 1.6.0 refuses both at validation ([`check`]) and at `open`. The migration removes exactly the
+/// header those refusals name ([`header_builds`], the one rule), reporting [`REMOVED_AUTH_HEADER`]:
+/// settings that parse as [`Settings`] and carry an `auth_header` that cannot be sent. A value
 /// written as a reference the kernel resolves (`auth_header.value` is a declared secret field) is
 /// unknown here, so only the header's name is judged. Anything else, a section the grammar refuses
 /// for its shape included, is unchanged: that refusal is the operator's to read.
@@ -621,11 +832,11 @@ pub const UNKNOWN_PHASE: &str = "not a check phase this sink knows (limits or in
 
 /// What a delivery parks across PENDING: the settings it started under and their generation (a
 /// reload mid-batch changes nothing for it: its lines go, and are reported, to the target it began
-/// with), the line it is on, the handles issued before that line's exchange, and the exchange.
+/// with), the byte offset of the line it is on (so a resume does not re-split the batch), the handles issued before that line's exchange, and the exchange.
 struct Posting {
     settings: Arc<Prepared>,
     generation: u64,
-    line: usize,
+    offset: usize,
     issued: u32,
     exchange: Option<Exchange>,
 }
@@ -656,33 +867,30 @@ impl SafeSlot for Deliver {
         let mut at = match parked {
             Some(p) => p,
             None => {
-                if !hook.admitted(h.host()) {
+                let Some((settings, generation)) = hook.admitted_settings(h.host()) else {
                     return Outcome::Ready;
-                }
-                let (settings, generation) = hook.current();
+                };
                 Posting {
                     settings,
                     generation,
-                    line: 0,
+                    offset: 0,
                     issued: 0,
                     exchange: None,
                 }
             }
         };
-        let lines: Vec<&[u8]> = input
-            .field(|i| &i.batch)
-            .bytes()
-            .split(|b| *b == b'\n')
-            .filter(|l| !l.is_empty())
-            .collect();
-        while let Some(line) = lines.get(at.line) {
+        let batch = input.field(|i| &i.batch).bytes();
+        while let Some((line, next)) = next_line(batch, at.offset) {
             let answered = match h.host() {
                 None => Err(ConnFailure::Unarmed),
                 Some(host) => {
                     let mut c = host.connector_from(instance.ticket(), at.issued);
                     let started = match at.exchange.take() {
                         Some(ex) => Ok(ex),
-                        None => Exchange::request(at.settings.request(line)),
+                        None => {
+                            let (request, sealed) = at.settings.parts(line);
+                            Exchange::request_sealed(request, sealed).map(Exchange::head_only)
+                        }
                     };
                     match started {
                         Err(e) => Err(e),
@@ -701,16 +909,8 @@ impl SafeSlot for Deliver {
                 }
             };
             report(&at.settings.url, answered);
-            at.line += 1;
-            let left = lines.len().saturating_sub(at.line);
-            if left > 0 && hook.reloaded_since(&mut at) {
-                tracing::warn!(
-                    diag = %RELOAD_CUT,
-                    webhook_url = ?log_target(&at.settings.url),
-                    dropped = left,
-                    "request-log webhook settings were reloaded during a delivery; the batch's \
-                     remaining log lines were dropped"
-                );
+            at.offset = next;
+            if hook.cut_by_reload(&mut at, &batch[next.min(batch.len())..]) {
                 break;
             }
         }

@@ -4,15 +4,16 @@
 //! The `settings:` grammar of an `export.<name>.module: request-log-webhook` instance — config
 //! grammar, tracked by the config-schema gate here, where the sink that reads it lives.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+use zeroize::Zeroizing;
 
 /// `settings:` of an `export.<name>.module: request-log-webhook` instance — relocated from the retired
 /// `observability` webhook keys. Also absorbs the retired `generic-webhook` exporter: its ONLY extra
 /// over this one was `auth_header:`, which is now just a setting here, and its other reason to exist
 /// (a SECOND webhook target) is what the named-instance map itself provides. The FIELD ORDER is the
 /// order serde names them in an unknown-field refusal: do not reorder. `Debug` carries no
-/// credential: the url's userinfo is masked as every line the sink writes masks it, and the auth
-/// header's value is redacted.
+/// credential: the url is named as the sink's log lines name it (scheme, masked userinfo, host and
+/// port; a path or query is `***`), and the auth header's value is redacted.
 #[derive(Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WebhookSettings {
@@ -36,7 +37,7 @@ pub struct WebhookSettings {
 impl std::fmt::Debug for WebhookSettings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WebhookSettings")
-            .field("url", &crate::mask_url(&self.url))
+            .field("url", &crate::log_target(&self.url))
             .field("auth_header", &self.auth_header)
             .field("max_inflight_deliveries", &self.max_inflight_deliveries)
             .field("delivery_timeout_secs", &self.delivery_timeout_secs)
@@ -51,7 +52,14 @@ impl std::fmt::Debug for WebhookSettings {
 #[serde(deny_unknown_fields)]
 pub struct ExportAuthHeader {
     pub name: String,
-    pub value: String,
+    /// The credential, wiped from memory when the header is dropped.
+    #[serde(deserialize_with = "wiped")]
+    pub value: Zeroizing<String>,
+}
+
+/// The value read as a plain string and held wiped-on-drop.
+fn wiped<'de, D: Deserializer<'de>>(d: D) -> Result<Zeroizing<String>, D::Error> {
+    String::deserialize(d).map(Zeroizing::new)
 }
 
 impl std::fmt::Debug for ExportAuthHeader {

@@ -25,6 +25,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # The userinfo mask on the target URL the sink's diagnostics name (its own lines, never the host's).
 url = { workspace = true }
+# The credential bytes the instance holds (the auth header's value, the request's `authorization`)
+# are wiped when dropped (`Zeroizing`); busbar's own workspace row, no new crate in the lock.
+zeroize = { workspace = true }
 # The sink's operator log lines, with the catalogue's `diag` banner field; the door's call capture
 # carries them to the instance's plugin log (THE DESIGN §11.2).
 tracing = { workspace = true }
