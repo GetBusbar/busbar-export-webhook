@@ -1431,3 +1431,22 @@ fn leading_controls_and_spaces_do_not_hide_the_scheme() {
     let words = refusal_words(Some(" http://10.0.0.5/hook"), &refused);
     assert!(words.contains("must be an https:// URL"), "{words}");
 }
+
+/// W9: the SSRF-guard words are for the destination guard's refusal; any other host reason is said
+/// in the host's own words, scrubbed of the target's parts.
+#[test]
+fn another_host_refusal_keeps_its_own_words() {
+    let url = "https://u:pw@siem.example/services/PATHSECRET?k=QUERYSECRET";
+    let other = ConnFailure::Refused(format!(
+        "the plugin did not declare this need ({url} PATHSECRET)"
+    ));
+    let words = refusal_words(Some(url), &other);
+    assert!(words.starts_with("the plugin did not declare this need"), "{words}");
+    assert!(!words.contains("SSRF"), "{words}");
+    for secret in ["pw", "PATHSECRET", "QUERYSECRET"] {
+        assert!(!words.contains(secret), "`{secret}` leaked: {words}");
+    }
+    // The connector's own refusal of a target is the guard's.
+    let guard = ConnFailure::Refused("the connection was refused".into());
+    assert!(refusal_words(Some("https://10.0.0.5/in"), &guard).contains("(SSRF guard)"));
+}
