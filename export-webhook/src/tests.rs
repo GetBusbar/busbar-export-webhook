@@ -8,9 +8,32 @@ use super::*;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
-/// The request one line is POSTed as, under `s`.
+/// The request one line is POSTed as, under `s`: its plain part (the credential-bearing fields ride
+/// sealed beside it, see [`sent`]).
 fn request(s: &Settings, line: &[u8]) -> Request {
-    Prepared::new(s.clone()).request(line)
+    Prepared::new(s.clone()).parts(line).0
+}
+
+/// Asserts the fields one POST under `s` sends, in order: `want` is `(name, value)` as the far end
+/// reads them. The framed head shows a sealed field as `<sealed>`; its value is checked against the
+/// credential the instance holds (`Cred::verify_eq`), the only reading a `Cred` allows.
+fn sent(s: &Settings, want: &[(&str, &str)]) {
+    let p = Prepared::new(s.clone());
+    let (request, sealed) = p.parts(b"{}");
+    let ex = Exchange::request_sealed(request, sealed).expect("a request that frames");
+    let framed = ex.framed_fields();
+    assert_eq!(framed.len(), want.len(), "{framed:?} vs {want:?}");
+    let mut held = p.sealed.iter();
+    for ((name, value), (want_name, want_value)) in framed.iter().zip(want) {
+        assert_eq!(*name, want_name.as_bytes(), "{framed:?}");
+        if *value == b"<sealed>" {
+            let (_, _, cred) = held.next().expect("a sealed field the instance holds");
+            assert!(cred.verify_eq(want_value.as_bytes()), "{want_name}");
+        } else {
+            assert_eq!(*value, want_value.as_bytes(), "{want_name}");
+        }
+    }
+    assert!(held.next().is_none(), "every sealed field was framed");
 }
 
 fn refused(settings: serde_json::Value) -> String {
@@ -185,17 +208,21 @@ fn a_delivery_posts_the_line() {
         Request {
             method: b"POST".to_vec(),
             target: b"/in?k=v".to_vec(),
-            fields: vec![
-                (b"content-type".to_vec(), b"application/json".to_vec()),
-                (b"authorization".to_vec(), b"Bearer x".to_vec()),
-            ],
+            fields: vec![(b"content-type".to_vec(), b"application/json".to_vec())],
             body: line.to_vec(),
             timeout_ms: 9000,
         }
     );
+    sent(
+        &s,
+        &[
+            ("content-type", "application/json"),
+            ("authorization", "Bearer x"),
+        ],
+    );
     let bare = settings(json!({"url": "https://siem.example"}));
     assert_eq!(request(&bare, b"{}").target, b"/".to_vec());
-    assert_eq!(request(&bare, b"{}").fields.len(), 1);
+    sent(&bare, &[("content-type", "application/json")]);
     assert_eq!(request(&bare, b"{}").timeout_ms, 2000);
 }
 
@@ -265,36 +292,21 @@ fn a_userinfo_in_the_url_is_sent_as_basic_as_1_5_5_sent_it() {
 /// is the path and query, never the userinfo.
 #[test]
 fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
-    let basic = (b"authorization".to_vec(), b"Basic dXNlcjpwYXNz".to_vec());
-    let json = (b"content-type".to_vec(), b"application/json".to_vec());
+    let basic = ("authorization", "Basic dXNlcjpwYXNz");
+    let json = ("content-type", "application/json");
     let both = settings(json!({
         "url": "https://user:pass@siem.example/in?k=v",
         "auth_header": {"name": "Authorization", "value": "Bearer x"}
     }));
-    let r = request(&both, b"{}");
-    assert_eq!(
-        r.fields,
-        vec![
-            basic.clone(),
-            (b"authorization".to_vec(), b"Bearer x".to_vec()),
-            json.clone(),
-        ]
-    );
-    assert_eq!(r.target, b"/in?k=v".to_vec());
+    sent(&both, &[basic, ("authorization", "Bearer x"), json]);
+    assert_eq!(request(&both, b"{}").target, b"/in?k=v".to_vec());
     let other = settings(json!({
         "url": "https://user:pass@siem.example/in",
         "auth_header": {"name": "X-Api-Key", "value": "k"}
     }));
-    assert_eq!(
-        request(&other, b"{}").fields,
-        vec![
-            basic.clone(),
-            json.clone(),
-            (b"x-api-key".to_vec(), b"k".to_vec()),
-        ]
-    );
+    sent(&other, &[basic, json, ("x-api-key", "k")]);
     let alone = settings(json!({"url": "https://user:pass@siem.example/in"}));
-    assert_eq!(request(&alone, b"{}").fields, vec![basic, json]);
+    sent(&alone, &[basic, json]);
 }
 
 /// RED (audit export-webhook round 1): the contract's field block carries lower-case names, and
@@ -302,7 +314,7 @@ fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
 /// `authorization` / `x-api-key` whatever the operator's spelling.
 #[test]
 fn a_configured_auth_header_name_goes_lower_case_as_1_5_5_sent_it() {
-    for (name, sent) in [
+    for (name, lowered) in [
         ("Authorization", "authorization"),
         ("X-Api-Key", "x-api-key"),
     ] {
@@ -310,12 +322,7 @@ fn a_configured_auth_header_name_goes_lower_case_as_1_5_5_sent_it() {
             "url": "https://siem.example/in",
             "auth_header": {"name": name, "value": "k"}
         }));
-        assert!(
-            request(&s, b"{}")
-                .fields
-                .contains(&(sent.as_bytes().to_vec(), b"k".to_vec())),
-            "{name}"
-        );
+        sent(&s, &[("content-type", "application/json"), (lowered, "k")]);
     }
 }
 
@@ -766,7 +773,7 @@ fn the_check_slot_maps_its_phase_and_leases_the_findings() {
 /// sent; a value with a tab or a non-ASCII byte is kept, as `HeaderValue::from_str` kept it.
 #[test]
 fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
-    let json = (b"content-type".to_vec(), b"application/json".to_vec());
+    let json = ("content-type", "application/json");
     for (name, value) in [
         ("Bad Name", "Bearer x"),
         ("", "Bearer x"),
@@ -780,11 +787,7 @@ fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
             "url": "https://siem.example/in",
             "auth_header": {"name": name, "value": value}
         }));
-        assert_eq!(
-            request(&s, b"{}").fields,
-            vec![json.clone()],
-            "{name:?}: {value:?}"
-        );
+        sent(&s, &[json]);
     }
     for (name, value) in [
         ("X-Api-Key", "k\tv"),
@@ -795,17 +798,7 @@ fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
             "url": "https://siem.example/in",
             "auth_header": {"name": name, "value": value}
         }));
-        assert_eq!(
-            request(&s, b"{}").fields,
-            vec![
-                json.clone(),
-                (
-                    name.to_ascii_lowercase().into_bytes(),
-                    value.as_bytes().to_vec()
-                )
-            ],
-            "{name:?}: {value:?}"
-        );
+        sent(&s, &[json, (&name.to_ascii_lowercase(), value)]);
     }
 }
 
@@ -868,7 +861,7 @@ fn the_settings_schema_marks_no_nested_secret() {
 fn the_auth_header_value_is_redacted_from_debug() {
     let header = ExportAuthHeader {
         name: "Authorization".into(),
-        value: "Bearer s3cret-token".into(),
+        value: String::from("Bearer s3cret-token").into(),
     };
     let settings = WebhookSettings {
         url: "https://siem.example/in".into(),
@@ -1117,7 +1110,7 @@ fn a_reload_back_to_the_same_settings_does_not_cut_the_batch() {
     let mut at = Posting {
         settings,
         generation,
-        line: 0,
+        offset: 0,
         issued: 0,
         exchange: None,
     };
@@ -1171,6 +1164,11 @@ fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
         ("Authorization", "Bearer s3cret\n"),
         ("Authorization", "Bearer \u{7f}"),
         ("Authorization", "Bearer \u{0}"),
+        // Framing and connection fields: check and open refuse them, so the migration is one rule
+        // with them (a Host override is no longer supported).
+        ("Host", "other.example"),
+        ("content-length", "0"),
+        ("Connection", "close"),
     ] {
         let before = json!({
             "url": "https://u:p@siem.example/in",
@@ -1188,9 +1186,10 @@ fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
         assert!(m.needs.is_empty());
         assert!(!auth_header_refused(&m.settings));
         assert!(Webhook::validate(m.settings.to_string().as_bytes()).is_ok());
+        assert!(Webhook::open(m.settings.to_string().as_bytes(), &[], 1).is_ok());
     }
     assert!(REMOVED_AUTH_HEADER.starts_with("removed settings.auth_header"));
-    assert!(REMOVED_AUTH_HEADER.ends_with("; 1.5.5 never sent it"));
+    assert!(REMOVED_AUTH_HEADER.ends_with("which 1.6.0 refuses at validation and open"));
 }
 
 /// The header's value may be a reference the kernel resolves (`auth_header.value` is a declared
@@ -1274,4 +1273,306 @@ fn no_declared_code_is_one_the_core_catalogue_holds() {
             path.display()
         );
     }
+}
+
+// ── Audit round 1 (codeaudit-r1) ─────────────────────────────────────────────────────────────────
+
+/// W1: a formatted `Prepared` or `Webhook` carries none of the secrets its settings hold: the url's
+/// userinfo (and the Basic value it became), its secret path and query, the auth header's value.
+#[test]
+fn a_formatted_prepared_or_webhook_carries_no_secret() {
+    let w = Webhook::open(
+        json!({
+            "url": "https://ops:hunter2@siem.example/services/PATHSECRET?api_key=QUERYSECRET",
+            "auth_header": {"name": "X-Api-Key", "value": "HEADERSECRET"}
+        })
+        .to_string()
+        .as_bytes(),
+        &[],
+        1,
+    )
+    .expect("opens");
+    let p = w.settings();
+    // `ops:hunter2`, padded standard base64.
+    let basic = base64(b"ops:hunter2");
+    for text in [
+        format!("{p:?}"),
+        format!("{p:#?}"),
+        format!("{w:?}"),
+        format!("{w:#?}"),
+    ] {
+        for secret in [
+            "hunter2",
+            "PATHSECRET",
+            "QUERYSECRET",
+            "HEADERSECRET",
+            basic.as_str(),
+        ] {
+            assert!(!text.contains(secret), "`{secret}` leaked: {text}");
+        }
+        assert!(text.contains("siem.example"), "the host is kept: {text}");
+        assert!(
+            text.contains("X-Api-Key"),
+            "the header name is kept: {text}"
+        );
+    }
+    // The settings alone carry none of them. The request one line is built as holds the
+    // credential-bearing fields sealed beside it, so it carries neither the userinfo (nor the Basic
+    // value) nor the header value.
+    let settings: &Settings = &p;
+    for text in [format!("{settings:?}"), format!("{settings:#?}")] {
+        for secret in ["hunter2", "PATHSECRET", "QUERYSECRET", "HEADERSECRET"] {
+            assert!(!text.contains(secret), "`{secret}` leaked: {text}");
+        }
+    }
+    let (request, _) = p.parts(b"{}");
+    let text = format!("{request:?}");
+    for secret in ["hunter2", "HEADERSECRET", basic.as_str()] {
+        assert!(!text.contains(secret), "`{secret}` leaked: {text}");
+    }
+}
+
+/// W4 (lead-signed): `open` and `refresh` refuse an auth header that cannot be sent as an HTTP
+/// header, in fixed words that never echo the value; `validate`, which sees unresolved references,
+/// keeps its behaviour.
+#[test]
+fn open_and_refresh_refuse_an_auth_header_that_cannot_be_sent() {
+    let words = "settings: `auth_header` cannot be sent as an HTTP header";
+    let bad = json!({"url": "https://a.example/", "auth_header": {"name": "A", "value": "tok\n"}});
+    let bytes = bad.to_string();
+    let r = Webhook::open(bytes.as_bytes(), &[], 1).expect_err("open refuses");
+    assert_eq!(r.outcome(), Outcome::Failed);
+    assert_eq!(r.text(), Some(words));
+    let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
+    let r = w
+        .refresh(bytes.as_bytes(), &[], 2)
+        .expect_err("refresh refuses");
+    assert_eq!(r.text(), Some(words));
+    assert_eq!(w.settings().auth_header, None, "the old settings stay");
+    // `validate` keeps its current behaviour.
+    assert!(Webhook::validate(bytes.as_bytes()).is_ok());
+}
+
+/// W5 (lead-signed): framing and connection fields are not auth headers: refused at `check` and at
+/// `open`, whatever their case.
+#[test]
+fn a_framing_or_connection_header_is_refused() {
+    let words = "settings: `auth_header` cannot be sent as an HTTP header";
+    for name in [
+        "content-length",
+        "Transfer-Encoding",
+        "HOST",
+        "connection",
+        "te",
+        "upgrade",
+        "trailer",
+        "keep-alive",
+        "proxy-connection",
+    ] {
+        let s = json!({"url": "https://a.example/", "auth_header": {"name": name, "value": "1"}});
+        let lines = check(CheckPhase::Instances, &[("w".to_string(), s.clone())]);
+        assert_eq!(lines.len(), 1, "{name}: {lines:?}");
+        assert!(lines[0].contains("settings.auth_header"), "{}", lines[0]);
+        let r = Webhook::open(s.to_string().as_bytes(), &[], 1).expect_err(name);
+        assert_eq!(r.text(), Some(words), "{name}");
+    }
+}
+
+/// W6: a reload that changes only the delivery deadline or the in-flight bound does not cut a
+/// batch (new deliveries use the new deadline); one that changes the target or the credential does.
+#[test]
+fn a_reload_of_only_the_deadline_or_bound_does_not_cut_the_batch() {
+    let w = Webhook::open(
+        br#"{"url":"https://a.example/","auth_header":{"name":"K","value":"one"}}"#,
+        &[],
+        1,
+    )
+    .expect("opens");
+    let (settings, generation) = w.current();
+    let mut at = Posting {
+        settings,
+        generation,
+        offset: 0,
+        issued: 0,
+        exchange: None,
+    };
+    w.refresh(
+        br#"{"url":"https://a.example/","auth_header":{"name":"K","value":"one"},
+             "delivery_timeout_secs":9,"max_inflight_deliveries":3}"#,
+        &[],
+        2,
+    )
+    .expect("timeout and bound only");
+    assert!(
+        !w.reloaded_since(&mut at),
+        "a deadline/bound change cut the batch"
+    );
+    assert_eq!(
+        w.settings().delivery_timeout_secs,
+        9,
+        "new deliveries use it"
+    );
+    assert_eq!(w.settings().parts(b"{}").0.timeout_ms, 9000);
+    w.refresh(
+        br#"{"url":"https://a.example/","auth_header":{"name":"K","value":"two"}}"#,
+        &[],
+        3,
+    )
+    .expect("credential");
+    assert!(w.reloaded_since(&mut at), "a credential change cuts it");
+}
+
+/// W7: `#i` is the instance's configured position, even when an earlier instance does not parse.
+#[test]
+fn a_finding_is_numbered_by_the_configured_position() {
+    let instances = [
+        ("a".to_string(), json!({"bogus": 1})),
+        (
+            "b".to_string(),
+            json!({"url": "https://b.example/", "delivery_timeout_secs": 0}),
+        ),
+    ];
+    let lines = check(CheckPhase::Instances, &instances);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("(#1)"), "{lines:?}");
+}
+
+/// W8: the scheme is read as the URL parser reads it: leading C0 controls and spaces are stripped
+/// first, so a padded `https://` private target is the destination guard's, not the scheme rule's.
+#[test]
+fn leading_controls_and_spaces_do_not_hide_the_scheme() {
+    let refused = ConnFailure::Refused("destination refused".into());
+    for url in [
+        " https://10.0.0.5/hook",
+        "\u{1}\u{1f}  HTTPS://10.0.0.5/hook",
+    ] {
+        let words = refusal_words(Some(url), &refused);
+        assert!(words.contains("(SSRF guard)"), "{url:?}: {words}");
+        assert!(
+            !words.contains("must be an https:// URL"),
+            "{url:?}: {words}"
+        );
+    }
+    let words = refusal_words(Some(" http://10.0.0.5/hook"), &refused);
+    assert!(words.contains("must be an https:// URL"), "{words}");
+}
+
+/// W9: the connector words EVERY refusal of a target as `ConnError::Refused`, so a refusal of a
+/// parseable `https://` target is the 1.5.5 destination-guard words (a distinct guard reason needs
+/// core); the one other reason it can give, a need the plugin never declared, is said in the host's
+/// own words, scrubbed of the target's parts. Both texts are core's own constants.
+#[test]
+fn only_an_undeclared_need_keeps_the_hosts_own_words() {
+    use busbar_contract::conn::ConnError;
+    let url = "https://ops:hunter2@siem.example/services/PATHSECRET?k=QUERYSECRET";
+    let undeclared =
+        ConnFailure::Refused(format!("{} (for {url})", ConnError::UndeclaredNeed.text()));
+    let exact = ConnFailure::Refused(ConnError::UndeclaredNeed.text().to_string());
+    for refused in [&undeclared, &exact] {
+        let words = refusal_words(Some(url), refused);
+        assert!(
+            words.starts_with(ConnError::UndeclaredNeed.text()),
+            "{words}"
+        );
+        assert!(!words.contains("SSRF"), "{words}");
+        for secret in ["hunter2", "PATHSECRET", "QUERYSECRET"] {
+            assert!(!words.contains(secret), "`{secret}` leaked: {words}");
+        }
+    }
+    // The connector's one refusal text is the guard's words for an `https://` target ...
+    let connection = ConnFailure::Refused(ConnError::Refused.text().to_string());
+    assert!(refusal_words(Some("https://10.0.0.5/in"), &connection).contains("(SSRF guard)"));
+    // ... and the scheme rule's for any other.
+    assert!(refusal_words(Some("http://10.0.0.5/in"), &connection).contains("must be an https://"));
+}
+
+/// T1: the BUSBAR-7109 mid-batch cut. A batch is on its first line (the parked exchange); a reload
+/// changes the url; the resumed delivery finishes that line and the decision after it drops the
+/// rest, once, counting only the non-empty lines left. Tested at the smallest unit that holds the
+/// decision (`Webhook::cut_by_reload`, which `Deliver` calls after each line): the parked exchange
+/// itself is the SDK's, and a refresh cannot be injected between the door's PENDING and its resume.
+#[test]
+fn a_reload_of_the_target_mid_batch_drops_the_rest_once() {
+    let batch = b"{\"n\":1}\n{\"n\":2}\n\n{\"n\":3}\n";
+    let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
+    let (settings, generation) = w.current();
+    let mut at = Posting {
+        settings,
+        generation,
+        offset: 0,
+        issued: 0,
+        exchange: None,
+    };
+    // Line 1 parks; the reload lands while it is parked.
+    let (first, next) = next_line(batch, at.offset).expect("line 1");
+    assert_eq!(first, b"{\"n\":1}");
+    w.refresh(br#"{"url":"https://b.example/"}"#, &[], 2)
+        .expect("the reload");
+    // The parked line finishes on the settings it started under (the Posting keeps them) ...
+    assert_eq!(at.settings.url, "https://a.example/");
+    // ... and the rest of the batch is dropped, with ONE 7109 line.
+    let got = logged(|| assert!(w.cut_by_reload(&mut at, &batch[next..])));
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(field(&got[0], "diag"), "BUSBAR-7109");
+    assert_eq!(field(&got[0], "level"), "WARN");
+    assert_eq!(field(&got[0], "dropped"), "2");
+    assert_eq!(field(&got[0], "webhook_url"), "\"https://a.example\"");
+    // The last line never raises it, reload or not.
+    let (_, end) = next_line(batch, 17).expect("line 3");
+    assert!(!w.cut_by_reload(&mut at, &batch[end..]));
+}
+
+/// `next_line` skips blank lines and answers the offset past the line it returns.
+#[test]
+fn next_line_skips_blank_lines_and_keeps_the_offset() {
+    let batch = b"\n\na\n\nbc\n";
+    assert_eq!(next_line(batch, 0), Some((&b"a"[..], 4)));
+    assert_eq!(next_line(batch, 4), Some((&b"bc"[..], 8)));
+    assert_eq!(next_line(batch, 8), None);
+    assert_eq!(next_line(b"tail", 0), Some((&b"tail"[..], 5)));
+    assert_eq!(next_line(b"", 0), None);
+}
+
+/// T3: a credential-looking extra key inside `auth_header` (serde quotes an unknown field's name)
+/// reaches neither the refusal nor the log.
+#[test]
+fn a_credential_looking_key_in_auth_header_never_reaches_the_refusal_or_the_log() {
+    let settings = json!({
+        "url": "https://a.example/",
+        "auth_header": {"name": "A", "value": "v", "Bearer tok": 1}
+    });
+    let bytes = settings.to_string();
+    let got = logged(|| {
+        let r = refused(settings.clone());
+        assert!(
+            !r.contains("Bearer tok"),
+            "the key reached the refusal: {r}"
+        );
+        assert!(r.starts_with("settings: unknown field "), "{r}");
+        for r in [
+            Webhook::open(bytes.as_bytes(), &[], 1).expect_err("open refuses"),
+            Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1)
+                .expect("opens")
+                .refresh(bytes.as_bytes(), &[], 2)
+                .expect_err("refresh refuses"),
+        ] {
+            let text = r.text().expect("says why");
+            assert!(!text.contains("Bearer tok"), "{text}");
+        }
+    });
+    assert!(!all_text(&got).contains("Bearer tok"), "{got:?}");
+}
+
+/// W11: the schema's bounds are the ones validation enforces (`check`): a deadline of 1 to the
+/// 30-year ceiling, an in-flight bound up to the semaphore's permit ceiling (an instance stating 0
+/// beside a larger sibling validates, so the schema admits 0).
+#[test]
+fn the_settings_schema_bounds_are_the_ones_check_enforces() {
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../settings.schema.json")).expect("JSON");
+    let p = &schema["properties"];
+    assert_eq!(p["delivery_timeout_secs"]["minimum"], 1);
+    assert_eq!(p["delivery_timeout_secs"]["maximum"], MAX_DURATION_SECS);
+    assert_eq!(p["max_inflight_deliveries"]["minimum"], 0);
+    assert_eq!(p["max_inflight_deliveries"]["maximum"], MAX_PERMITS as u64);
 }
