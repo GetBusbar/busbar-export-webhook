@@ -42,7 +42,7 @@ use busbar_contract::abi::export::{
     CHECK_PHASE_LIMITS,
 };
 use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, OutHead, Outcome, BLOB_JSON};
+use busbar_contract::abi::mechanism::call::{AbiStr, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::cred::Cred;
@@ -87,9 +87,9 @@ const TARGET_FROM: &str = "settings.url";
 /// `max_inflight_deliveries` (64 when unset), which the host applies per instance, clamped to at
 /// least one; `check` refuses the LARGEST instance's bound past [`MAX_PERMITS`] or below 1
 /// ([`check`]).
-const MAX_INFLIGHT: u32 = u32::MAX;
+pub const MAX_INFLIGHT: u32 = u32::MAX;
 /// The one need's index in the Statement.
-const NEED: u32 = 0;
+pub const NEED: u32 = 0;
 
 mod config;
 mod redact;
@@ -100,11 +100,6 @@ pub use redact::{log_target, scrub};
 /// This sink's settings (the configuration's `WebhookSettings`).
 pub type Settings = WebhookSettings;
 
-const NONE: AbiStr = AbiStr {
-    ptr: std::ptr::null(),
-    len: 0,
-};
-
 /// The one need: outbound over a secure connection to the `url` setting's target, public
 /// destinations only (refusing loopback, link-local, private, CGNAT and cloud-metadata targets). It is framed by the `http` transport — the scheme its claim names; an
 /// `https://` target is secured by the host's connector, and the open-web egress class refuses any
@@ -113,18 +108,10 @@ const NEEDS: &[Need] = &[Need {
     direction: DIRECTION_OUTBOUND,
     egress_class: EGRESS_OPEN_WEB,
     transport: abi_str("http"),
-    auth: NONE,
     target_from: abi_str(TARGET_FROM),
-    trust_from: NONE,
-    details: Blob::ABSENT,
-    keep_response_headers: std::ptr::null(),
-    keep_response_headers_len: 0,
-    timeout_ms: 0,
     // The receiver's response head is not read: the named (empty) list, nothing denied beyond it.
     keep_mode: busbar_contract::abi::host::conn::connector::KEEP_NAMED,
-    _reserved: 0,
-    deny_response_headers: std::ptr::null(),
-    deny_response_headers_len: 0,
+    ..Need::EMPTY
 }];
 
 /// The streams this sink carries: the request log.
