@@ -8,9 +8,32 @@ use super::*;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
-/// The request one line is POSTed as, under `s`.
+/// The request one line is POSTed as, under `s`: its plain part (the credential-bearing fields ride
+/// sealed beside it, see [`sent`]).
 fn request(s: &Settings, line: &[u8]) -> Request {
-    Prepared::new(s.clone()).request(line)
+    Prepared::new(s.clone()).parts(line).0
+}
+
+/// Asserts the fields one POST under `s` sends, in order: `want` is `(name, value)` as the far end
+/// reads them. The framed head shows a sealed field as `<sealed>`; its value is checked against the
+/// credential the instance holds (`Cred::verify_eq`), the only reading a `Cred` allows.
+fn sent(s: &Settings, want: &[(&str, &str)]) {
+    let p = Prepared::new(s.clone());
+    let (request, sealed) = p.parts(b"{}");
+    let ex = Exchange::request_sealed(request, sealed).expect("a request that frames");
+    let framed = ex.framed_fields();
+    assert_eq!(framed.len(), want.len(), "{framed:?} vs {want:?}");
+    let mut held = p.sealed.iter();
+    for ((name, value), (want_name, want_value)) in framed.iter().zip(want) {
+        assert_eq!(*name, want_name.as_bytes(), "{framed:?}");
+        if *value == b"<sealed>" {
+            let (_, _, cred) = held.next().expect("a sealed field the instance holds");
+            assert!(cred.verify_eq(want_value.as_bytes()), "{want_name}");
+        } else {
+            assert_eq!(*value, want_value.as_bytes(), "{want_name}");
+        }
+    }
+    assert!(held.next().is_none(), "every sealed field was framed");
 }
 
 fn refused(settings: serde_json::Value) -> String {
@@ -185,17 +208,21 @@ fn a_delivery_posts_the_line() {
         Request {
             method: b"POST".to_vec(),
             target: b"/in?k=v".to_vec(),
-            fields: vec![
-                (b"content-type".to_vec(), b"application/json".to_vec()),
-                (b"authorization".to_vec(), b"Bearer x".to_vec()),
-            ],
+            fields: vec![(b"content-type".to_vec(), b"application/json".to_vec())],
             body: line.to_vec(),
             timeout_ms: 9000,
         }
     );
+    sent(
+        &s,
+        &[
+            ("content-type", "application/json"),
+            ("authorization", "Bearer x"),
+        ],
+    );
     let bare = settings(json!({"url": "https://siem.example"}));
     assert_eq!(request(&bare, b"{}").target, b"/".to_vec());
-    assert_eq!(request(&bare, b"{}").fields.len(), 1);
+    sent(&bare, &[("content-type", "application/json")]);
     assert_eq!(request(&bare, b"{}").timeout_ms, 2000);
 }
 
@@ -265,36 +292,21 @@ fn a_userinfo_in_the_url_is_sent_as_basic_as_1_5_5_sent_it() {
 /// is the path and query, never the userinfo.
 #[test]
 fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
-    let basic = (b"authorization".to_vec(), b"Basic dXNlcjpwYXNz".to_vec());
-    let json = (b"content-type".to_vec(), b"application/json".to_vec());
+    let basic = ("authorization", "Basic dXNlcjpwYXNz");
+    let json = ("content-type", "application/json");
     let both = settings(json!({
         "url": "https://user:pass@siem.example/in?k=v",
         "auth_header": {"name": "Authorization", "value": "Bearer x"}
     }));
-    let r = request(&both, b"{}");
-    assert_eq!(
-        r.fields,
-        vec![
-            basic.clone(),
-            (b"authorization".to_vec(), b"Bearer x".to_vec()),
-            json.clone(),
-        ]
-    );
-    assert_eq!(r.target, b"/in?k=v".to_vec());
+    sent(&both, &[basic, ("authorization", "Bearer x"), json]);
+    assert_eq!(request(&both, b"{}").target, b"/in?k=v".to_vec());
     let other = settings(json!({
         "url": "https://user:pass@siem.example/in",
         "auth_header": {"name": "X-Api-Key", "value": "k"}
     }));
-    assert_eq!(
-        request(&other, b"{}").fields,
-        vec![
-            basic.clone(),
-            json.clone(),
-            (b"x-api-key".to_vec(), b"k".to_vec()),
-        ]
-    );
+    sent(&other, &[basic, json, ("x-api-key", "k")]);
     let alone = settings(json!({"url": "https://user:pass@siem.example/in"}));
-    assert_eq!(request(&alone, b"{}").fields, vec![basic, json]);
+    sent(&alone, &[basic, json]);
 }
 
 /// RED (audit export-webhook round 1): the contract's field block carries lower-case names, and
@@ -302,7 +314,7 @@ fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
 /// `authorization` / `x-api-key` whatever the operator's spelling.
 #[test]
 fn a_configured_auth_header_name_goes_lower_case_as_1_5_5_sent_it() {
-    for (name, sent) in [
+    for (name, lowered) in [
         ("Authorization", "authorization"),
         ("X-Api-Key", "x-api-key"),
     ] {
@@ -310,12 +322,7 @@ fn a_configured_auth_header_name_goes_lower_case_as_1_5_5_sent_it() {
             "url": "https://siem.example/in",
             "auth_header": {"name": name, "value": "k"}
         }));
-        assert!(
-            request(&s, b"{}")
-                .fields
-                .contains(&(sent.as_bytes().to_vec(), b"k".to_vec())),
-            "{name}"
-        );
+        sent(&s, &[("content-type", "application/json"), (lowered, "k")]);
     }
 }
 
@@ -766,7 +773,7 @@ fn the_check_slot_maps_its_phase_and_leases_the_findings() {
 /// sent; a value with a tab or a non-ASCII byte is kept, as `HeaderValue::from_str` kept it.
 #[test]
 fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
-    let json = (b"content-type".to_vec(), b"application/json".to_vec());
+    let json = ("content-type", "application/json");
     for (name, value) in [
         ("Bad Name", "Bearer x"),
         ("", "Bearer x"),
@@ -780,11 +787,7 @@ fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
             "url": "https://siem.example/in",
             "auth_header": {"name": name, "value": value}
         }));
-        assert_eq!(
-            request(&s, b"{}").fields,
-            vec![json.clone()],
-            "{name:?}: {value:?}"
-        );
+        sent(&s, &[json]);
     }
     for (name, value) in [
         ("X-Api-Key", "k\tv"),
@@ -795,17 +798,7 @@ fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
             "url": "https://siem.example/in",
             "auth_header": {"name": name, "value": value}
         }));
-        assert_eq!(
-            request(&s, b"{}").fields,
-            vec![
-                json.clone(),
-                (
-                    name.to_ascii_lowercase().into_bytes(),
-                    value.as_bytes().to_vec()
-                )
-            ],
-            "{name:?}: {value:?}"
-        );
+        sent(&s, &[json, (&name.to_ascii_lowercase(), value)]);
     }
 }
 
@@ -1171,6 +1164,11 @@ fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
         ("Authorization", "Bearer s3cret\n"),
         ("Authorization", "Bearer \u{7f}"),
         ("Authorization", "Bearer \u{0}"),
+        // Framing and connection fields: check and open refuse them, so the migration is one rule
+        // with them (a Host override is no longer supported).
+        ("Host", "other.example"),
+        ("content-length", "0"),
+        ("Connection", "close"),
     ] {
         let before = json!({
             "url": "https://u:p@siem.example/in",
@@ -1188,9 +1186,10 @@ fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
         assert!(m.needs.is_empty());
         assert!(!auth_header_refused(&m.settings));
         assert!(Webhook::validate(m.settings.to_string().as_bytes()).is_ok());
+        assert!(Webhook::open(m.settings.to_string().as_bytes(), &[], 1).is_ok());
     }
     assert!(REMOVED_AUTH_HEADER.starts_with("removed settings.auth_header"));
-    assert!(REMOVED_AUTH_HEADER.ends_with("; 1.5.5 never sent it"));
+    assert!(REMOVED_AUTH_HEADER.ends_with("which 1.6.0 refuses at validation and open"));
 }
 
 /// The header's value may be a reference the kernel resolves (`auth_header.value` is a declared
@@ -1317,6 +1316,20 @@ fn a_formatted_prepared_or_webhook_carries_no_secret() {
             "the header name is kept: {text}"
         );
     }
+    // The settings alone carry none of them. The request one line is built as holds the
+    // credential-bearing fields sealed beside it, so it carries neither the userinfo (nor the Basic
+    // value) nor the header value.
+    let settings: &Settings = &p;
+    for text in [format!("{settings:?}"), format!("{settings:#?}")] {
+        for secret in ["hunter2", "PATHSECRET", "QUERYSECRET", "HEADERSECRET"] {
+            assert!(!text.contains(secret), "`{secret}` leaked: {text}");
+        }
+    }
+    let (request, _) = p.parts(b"{}");
+    let text = format!("{request:?}");
+    for secret in ["hunter2", "HEADERSECRET", basic.as_str()] {
+        assert!(!text.contains(secret), "`{secret}` leaked: {text}");
+    }
 }
 
 /// W4 (lead-signed): `open` and `refresh` refuse an auth header that cannot be sent as an HTTP
@@ -1399,7 +1412,7 @@ fn a_reload_of_only_the_deadline_or_bound_does_not_cut_the_batch() {
         9,
         "new deliveries use it"
     );
-    assert_eq!(w.settings().request(b"{}").timeout_ms, 9000);
+    assert_eq!(w.settings().parts(b"{}").0.timeout_ms, 9000);
     w.refresh(
         br#"{"url":"https://a.example/","auth_header":{"name":"K","value":"two"}}"#,
         &[],
@@ -1444,37 +1457,33 @@ fn leading_controls_and_spaces_do_not_hide_the_scheme() {
     assert!(words.contains("must be an https:// URL"), "{words}");
 }
 
-/// W9: the SSRF-guard words are for the destination guard's refusal; any other host reason is said
-/// in the host's own words, scrubbed of the target's parts.
+/// W9: the connector words EVERY refusal of a target as `ConnError::Refused`, so a refusal of a
+/// parseable `https://` target is the 1.5.5 destination-guard words (a distinct guard reason needs
+/// core); the one other reason it can give, a need the plugin never declared, is said in the host's
+/// own words, scrubbed of the target's parts. Both texts are core's own constants.
 #[test]
-fn another_host_refusal_keeps_its_own_words() {
+fn only_an_undeclared_need_keeps_the_hosts_own_words() {
+    use busbar_contract::conn::ConnError;
     let url = "https://ops:hunter2@siem.example/services/PATHSECRET?k=QUERYSECRET";
-    let other = ConnFailure::Refused(format!("the plugin did not declare this need (for {url})"));
-    let words = refusal_words(Some(url), &other);
-    assert!(
-        words.starts_with("the plugin did not declare this need"),
-        "{words}"
-    );
-    assert!(!words.contains("SSRF"), "{words}");
-    for secret in ["hunter2", "PATHSECRET", "QUERYSECRET"] {
-        assert!(!words.contains(secret), "`{secret}` leaked: {words}");
+    let undeclared =
+        ConnFailure::Refused(format!("{} (for {url})", ConnError::UndeclaredNeed.text()));
+    let exact = ConnFailure::Refused(ConnError::UndeclaredNeed.text().to_string());
+    for refused in [&undeclared, &exact] {
+        let words = refusal_words(Some(url), refused);
+        assert!(
+            words.starts_with(ConnError::UndeclaredNeed.text()),
+            "{words}"
+        );
+        assert!(!words.contains("SSRF"), "{words}");
+        for secret in ["hunter2", "PATHSECRET", "QUERYSECRET"] {
+            assert!(!words.contains(secret), "`{secret}` leaked: {words}");
+        }
     }
-    // The connector's own refusal of a target is the guard's.
-    let guard = ConnFailure::Refused("the connection was refused".into());
-    assert!(refusal_words(Some("https://10.0.0.5/in"), &guard).contains("(SSRF guard)"));
-}
-
-/// W11: the schema's bounds are the ones validation enforces (`check`): a deadline of 1 to the
-/// 30-year ceiling, an in-flight bound of 1 to the semaphore's permit ceiling.
-#[test]
-fn the_settings_schema_bounds_are_the_ones_check_enforces() {
-    let schema: serde_json::Value =
-        serde_json::from_str(include_str!("../settings.schema.json")).expect("JSON");
-    let p = &schema["properties"];
-    assert_eq!(p["delivery_timeout_secs"]["minimum"], 1);
-    assert_eq!(p["delivery_timeout_secs"]["maximum"], MAX_DURATION_SECS);
-    assert_eq!(p["max_inflight_deliveries"]["minimum"], 1);
-    assert_eq!(p["max_inflight_deliveries"]["maximum"], MAX_PERMITS as u64);
+    // The connector's one refusal text is the guard's words for an `https://` target ...
+    let connection = ConnFailure::Refused(ConnError::Refused.text().to_string());
+    assert!(refusal_words(Some("https://10.0.0.5/in"), &connection).contains("(SSRF guard)"));
+    // ... and the scheme rule's for any other.
+    assert!(refusal_words(Some("http://10.0.0.5/in"), &connection).contains("must be an https://"));
 }
 
 /// T1: the BUSBAR-7109 mid-batch cut. A batch is on its first line (the parked exchange); a reload

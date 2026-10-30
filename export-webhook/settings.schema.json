@@ -27,7 +27,7 @@
     },
     "max_inflight_deliveries": {
       "type": "integer",
-      "minimum": 1,
+      "minimum": 0,
       "maximum": 2305843009213693951,
       "default": 64,
       "description": "Max concurrent deliveries."

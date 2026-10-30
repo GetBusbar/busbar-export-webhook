@@ -67,6 +67,12 @@ fn answer(seen: &[u8]) -> Option<Vec<u8>> {
         let mut r = format!("HTTP/1.1 200 OK\r\ncontent-length: {BIG}\r\n\r\n").into_bytes();
         r.resize(r.len() + BIG, b'x');
         r
+    } else if head.starts_with("post /fail-big") {
+        // A 503 with a body past the cap: the status is still what the sink reports.
+        let mut r = format!("HTTP/1.1 503 Service Unavailable\r\ncontent-length: {BIG}\r\n\r\n")
+            .into_bytes();
+        r.resize(r.len() + BIG, b'x');
+        r
     } else if head.starts_with("post /fail") {
         b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n".to_vec()
     } else {
@@ -175,6 +181,7 @@ fn deliver_through_the_harness() {
     a_transport_error_drops_the_line_as_busbar_7072();
     the_first_line_after_a_refresh_goes_on_the_new_settings();
     a_200_with_a_huge_body_is_still_a_delivered_line();
+    a_non_2xx_with_a_huge_body_still_logs_its_status();
     a_disabled_instance_posts_nothing();
     blank_lines_are_not_posted();
 }
@@ -351,10 +358,11 @@ fn a_disabled_instance_posts_nothing() {
     let answer = deliver(&p, &d, "{\"line\":0}\n{\"line\":1}\n");
     assert!(answer.starts_with("Ready "), "deliver: {answer}");
     assert!(seen().is_empty(), "a disabled instance posted");
-    assert!(
-        naming(&tape.take(), "BUSBAR-70").is_empty(),
-        "nothing attempted, nothing dropped"
-    );
+    let host = tape.take();
+    // The refusal is raised once, at the first ask; nothing was attempted, so nothing was dropped.
+    assert_eq!(naming(&host, "BUSBAR-7070").len(), 1, "{host:?}");
+    assert!(naming(&host, "BUSBAR-7071").is_empty(), "{host:?}");
+    assert!(naming(&host, "BUSBAR-7072").is_empty(), "{host:?}");
 }
 
 /// T2: blank lines in a batch are not POSTed (1.5.5 skipped empty lines).
@@ -369,4 +377,19 @@ fn blank_lines_are_not_posted() {
         got[0].ends_with("{\"line\":0}") && got[1].ends_with("{\"line\":1}"),
         "{got:?}"
     );
+}
+
+/// W2: a non-2xx reply with a body past the reply cap is still ONE BUSBAR-7071 line naming its
+/// status (the head is judged; the body is never read).
+fn a_non_2xx_with_a_huge_body_still_logs_its_status() {
+    seen();
+    let (p, d, tape) = opened(&serde_json::json!({"url": format!("https://{FAR_END}/fail-big")}));
+    let answer = deliver(&p, &d, "{\"line\":0}\n");
+    assert!(answer.starts_with("Ready "), "deliver: {answer}");
+    assert_eq!(seen().len(), 1);
+    let host = tape.take();
+    let dropped = naming(&host, "BUSBAR-7071");
+    assert_eq!(dropped.len(), 1, "{host:?}");
+    assert!(dropped[0].contains("503"), "{}", dropped[0]);
+    assert!(naming(&host, "BUSBAR-7072").is_empty(), "{host:?}");
 }
