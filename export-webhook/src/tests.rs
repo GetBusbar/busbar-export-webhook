@@ -1117,7 +1117,7 @@ fn a_reload_back_to_the_same_settings_does_not_cut_the_batch() {
     let mut at = Posting {
         settings,
         generation,
-        line: 0,
+        offset: 0,
         issued: 0,
         exchange: None,
     };
@@ -1379,7 +1379,7 @@ fn a_reload_of_only_the_deadline_or_bound_does_not_cut_the_batch() {
     let mut at = Posting {
         settings,
         generation,
-        line: 0,
+        offset: 0,
         issued: 0,
         exchange: None,
     };
