@@ -1463,3 +1463,16 @@ fn another_host_refusal_keeps_its_own_words() {
     let guard = ConnFailure::Refused("the connection was refused".into());
     assert!(refusal_words(Some("https://10.0.0.5/in"), &guard).contains("(SSRF guard)"));
 }
+
+/// W11: the schema's bounds are the ones validation enforces (`check`): a deadline of 1 to the
+/// 30-year ceiling, an in-flight bound of 1 to the semaphore's permit ceiling.
+#[test]
+fn the_settings_schema_bounds_are_the_ones_check_enforces() {
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../settings.schema.json")).expect("JSON");
+    let p = &schema["properties"];
+    assert_eq!(p["delivery_timeout_secs"]["minimum"], 1);
+    assert_eq!(p["delivery_timeout_secs"]["maximum"], MAX_DURATION_SECS);
+    assert_eq!(p["max_inflight_deliveries"]["minimum"], 1);
+    assert_eq!(p["max_inflight_deliveries"]["maximum"], MAX_PERMITS as u64);
+}
