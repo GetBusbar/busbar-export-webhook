@@ -23,7 +23,9 @@ use busbar_plugin_loader::dispatch::{
     load_linked, Bind, ConnTable, Diagnostic, Dispatcher, Dropped, EnvelopeSink, Frame, LinkedRow,
     Metric, Plugin,
 };
-use busbar_test_kit::conformance::{bind, called, dispatcher, input, on_ticket, open_resumed};
+use busbar_test_kit::conformance::{
+    bind, called, dispatcher, input, on_ticket, open_resumed, refresh,
+};
 use busbar_test_kit::conformance_host::{anchors, far_end, host, Doors};
 
 /// The transport doors the host serves, as `tests/support/conformance_host.rs` names them.
@@ -163,6 +165,7 @@ fn deliver_through_the_harness() {
     records_in_one_post_per_line_out();
     a_non_2xx_answer_drops_the_line_as_busbar_7071();
     a_transport_error_drops_the_line_as_busbar_7072();
+    the_first_line_after_a_refresh_goes_on_the_new_settings();
 }
 
 /// Records in -> one HTTPS POST per line out, in order: the target's path and query, the
@@ -273,4 +276,43 @@ fn no_secret(host: &[String]) {
             "`{secret}` reached the host: {host:?}"
         );
     }
+}
+
+/// LINE 0 AFTER A RELOAD (audit XW2), as the plugin and the loader answer it today: a delivery that
+/// STARTS after a `refresh` reads the instance's settings at its start, so its first line (and
+/// every other) is POSTed on the NEW settings: the new path and query, the new userinfo's Basic
+/// value, the new auth header; nothing of the old settings rides it, and nothing is dropped (no
+/// BUSBAR-7109: that cut is only for a batch a reload overtook mid-delivery). The host re-declares
+/// the need from the refreshed settings before the plugin sees them, so the pin and the request
+/// agree. NOTE: the kernel at this pin never refreshes an export instance (it opens each once, at
+/// boot); this pins the plugin's side for when it does.
+fn the_first_line_after_a_refresh_goes_on_the_new_settings() {
+    seen();
+    let (p, d, tape) = opened(&serde_json::json!({
+        "url": format!("https://old-user:old-pw@{FAR_END}/old?o=1"),
+        "auth_header": {"name": "X-Api-Key", "value": "old-key"}
+    }));
+    let new = serde_json::json!({
+        "url": format!("https://new-user:new-pw@{FAR_END}/new?n=2"),
+        "auth_header": {"name": "X-Api-Key", "value": "new-key"}
+    });
+    let refreshed = called(&refresh(&p, new.to_string().as_bytes()));
+    assert!(refreshed.starts_with("Ready "), "refresh: {refreshed}");
+    let answer = deliver(&p, &d, "{\"line\":0}\n{\"line\":1}\n");
+    assert!(answer.starts_with("Ready "), "deliver: {answer}");
+    let got = seen();
+    assert_eq!(got.len(), 2, "{got:?}");
+    for req in &got {
+        assert!(req.starts_with("POST /new?n=2 HTTP/1.1\r\n"), "{req}");
+        let lower = req.to_ascii_lowercase();
+        // `new-user:new-pw`, padded standard base64.
+        assert!(
+            lower.contains("\r\nauthorization: basic bmv3lxvzzxi6bmv3lxb3\r\n"),
+            "{req}"
+        );
+        assert!(lower.contains("\r\nx-api-key: new-key\r\n"), "{req}");
+        assert!(!req.contains("old"), "{req}");
+    }
+    let host = tape.take();
+    assert!(naming(&host, "BUSBAR-7").is_empty(), "{host:?}");
 }
