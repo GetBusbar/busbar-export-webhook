@@ -868,7 +868,7 @@ fn the_settings_schema_marks_no_nested_secret() {
 fn the_auth_header_value_is_redacted_from_debug() {
     let header = ExportAuthHeader {
         name: "Authorization".into(),
-        value: "Bearer s3cret-token".into(),
+        value: String::from("Bearer s3cret-token").into(),
     };
     let settings = WebhookSettings {
         url: "https://siem.example/in".into(),
@@ -1312,7 +1312,10 @@ fn a_formatted_prepared_or_webhook_carries_no_secret() {
             assert!(!text.contains(secret), "`{secret}` leaked: {text}");
         }
         assert!(text.contains("siem.example"), "the host is kept: {text}");
-        assert!(text.contains("X-Api-Key"), "the header name is kept: {text}");
+        assert!(
+            text.contains("X-Api-Key"),
+            "the header name is kept: {text}"
+        );
     }
 }
 
@@ -1328,7 +1331,9 @@ fn open_and_refresh_refuse_an_auth_header_that_cannot_be_sent() {
     assert_eq!(r.outcome(), Outcome::Failed);
     assert_eq!(r.text(), Some(words));
     let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
-    let r = w.refresh(bytes.as_bytes(), &[], 2).expect_err("refresh refuses");
+    let r = w
+        .refresh(bytes.as_bytes(), &[], 2)
+        .expect_err("refresh refuses");
     assert_eq!(r.text(), Some(words));
     assert_eq!(w.settings().auth_header, None, "the old settings stay");
     // `validate` keeps its current behaviour.
@@ -1389,7 +1394,11 @@ fn a_reload_of_only_the_deadline_or_bound_does_not_cut_the_batch() {
         !w.reloaded_since(&mut at),
         "a deadline/bound change cut the batch"
     );
-    assert_eq!(w.settings().delivery_timeout_secs, 9, "new deliveries use it");
+    assert_eq!(
+        w.settings().delivery_timeout_secs,
+        9,
+        "new deliveries use it"
+    );
     assert_eq!(w.settings().request(b"{}").timeout_ms, 9000);
     w.refresh(
         br#"{"url":"https://a.example/","auth_header":{"name":"K","value":"two"}}"#,
@@ -1426,7 +1435,10 @@ fn leading_controls_and_spaces_do_not_hide_the_scheme() {
     ] {
         let words = refusal_words(Some(url), &refused);
         assert!(words.contains("(SSRF guard)"), "{url:?}: {words}");
-        assert!(!words.contains("must be an https:// URL"), "{url:?}: {words}");
+        assert!(
+            !words.contains("must be an https:// URL"),
+            "{url:?}: {words}"
+        );
     }
     let words = refusal_words(Some(" http://10.0.0.5/hook"), &refused);
     assert!(words.contains("must be an https:// URL"), "{words}");
@@ -1441,7 +1453,10 @@ fn another_host_refusal_keeps_its_own_words() {
         "the plugin did not declare this need ({url} PATHSECRET)"
     ));
     let words = refusal_words(Some(url), &other);
-    assert!(words.starts_with("the plugin did not declare this need"), "{words}");
+    assert!(
+        words.starts_with("the plugin did not declare this need"),
+        "{words}"
+    );
     assert!(!words.contains("SSRF"), "{words}");
     for secret in ["pw", "PATHSECRET", "QUERYSECRET"] {
         assert!(!words.contains(secret), "`{secret}` leaked: {words}");
