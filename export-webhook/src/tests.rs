@@ -1414,3 +1414,20 @@ fn a_finding_is_numbered_by_the_configured_position() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains("(#1)"), "{lines:?}");
 }
+
+/// W8: the scheme is read as the URL parser reads it: leading C0 controls and spaces are stripped
+/// first, so a padded `https://` private target is the destination guard's, not the scheme rule's.
+#[test]
+fn leading_controls_and_spaces_do_not_hide_the_scheme() {
+    let refused = ConnFailure::Refused("destination refused".into());
+    for url in [
+        " https://10.0.0.5/hook",
+        "\u{1}\u{1f}  HTTPS://10.0.0.5/hook",
+    ] {
+        let words = refusal_words(Some(url), &refused);
+        assert!(words.contains("(SSRF guard)"), "{url:?}: {words}");
+        assert!(!words.contains("must be an https:// URL"), "{url:?}: {words}");
+    }
+    let words = refusal_words(Some(" http://10.0.0.5/hook"), &refused);
+    assert!(words.contains("must be an https:// URL"), "{words}");
+}
