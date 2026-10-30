@@ -40,6 +40,9 @@ const FAR_END: &str = "localhost:51656";
 /// A loopback port nothing listens on: a dial there is refused (the transport-error path).
 const NOBODY: &str = "localhost:51657";
 
+/// The body the far end answers `/big` with: past the SDK's 16 MiB reply cap.
+const BIG: usize = 17 << 20;
+
 /// Every whole request the far end read, in order.
 static SEEN: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
@@ -59,7 +62,12 @@ fn answer(seen: &[u8]) -> Option<Vec<u8>> {
     SEEN.lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push(seen.to_vec());
-    Some(if head.starts_with("post /fail") {
+    Some(if head.starts_with("post /big") {
+        // A 200 whose body is past the SDK's 16 MiB reply cap: the sink judges the head alone.
+        let mut r = format!("HTTP/1.1 200 OK\r\ncontent-length: {BIG}\r\n\r\n").into_bytes();
+        r.resize(r.len() + BIG, b'x');
+        r
+    } else if head.starts_with("post /fail") {
         b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n".to_vec()
     } else {
         b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n".to_vec()
@@ -166,6 +174,7 @@ fn deliver_through_the_harness() {
     a_non_2xx_answer_drops_the_line_as_busbar_7071();
     a_transport_error_drops_the_line_as_busbar_7072();
     the_first_line_after_a_refresh_goes_on_the_new_settings();
+    a_200_with_a_huge_body_is_still_a_delivered_line();
 }
 
 /// Records in -> one HTTPS POST per line out, in order: the target's path and query, the
@@ -315,4 +324,19 @@ fn the_first_line_after_a_refresh_goes_on_the_new_settings() {
     }
     let host = tape.take();
     assert!(naming(&host, "BUSBAR-7").is_empty(), "{host:?}");
+}
+
+/// W2: the sink judges a delivery on the reply's HEAD (1.5.5 dropped the body unread): a 200 whose
+/// body is past the SDK's reply cap is a delivered line, not a BUSBAR-7072.
+fn a_200_with_a_huge_body_is_still_a_delivered_line() {
+    seen();
+    let (p, d, tape) = opened(&serde_json::json!({"url": format!("https://{FAR_END}/big")}));
+    let answer = deliver(&p, &d, "{\"line\":0}\n{\"line\":1}\n");
+    assert!(answer.starts_with("Ready "), "deliver: {answer}");
+    assert_eq!(seen().len(), 2, "both lines POSTed");
+    let host = tape.take();
+    assert!(
+        naming(&host, "BUSBAR-70").is_empty(),
+        "a 200 is a delivered line: {host:?}"
+    );
 }
