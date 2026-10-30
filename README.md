@@ -36,7 +36,7 @@ Security notes:
 ## Build
 
 ```bash
-cargo build --release -p busbar-export-webhook-plugin
+cargo build --release -p busbar-export-webhook-plugin --features dropped-in
 ```
 
 ## Tests
