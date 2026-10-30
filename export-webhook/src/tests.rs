@@ -1315,3 +1315,47 @@ fn a_formatted_prepared_or_webhook_carries_no_secret() {
         assert!(text.contains("X-Api-Key"), "the header name is kept: {text}");
     }
 }
+
+/// W4 (lead-signed): `open` and `refresh` refuse an auth header that cannot be sent as an HTTP
+/// header, in fixed words that never echo the value; `validate`, which sees unresolved references,
+/// keeps its behaviour.
+#[test]
+fn open_and_refresh_refuse_an_auth_header_that_cannot_be_sent() {
+    let words = "settings: `auth_header` cannot be sent as an HTTP header";
+    let bad = json!({"url": "https://a.example/", "auth_header": {"name": "A", "value": "tok\n"}});
+    let bytes = bad.to_string();
+    let r = Webhook::open(bytes.as_bytes(), &[], 1).expect_err("open refuses");
+    assert_eq!(r.outcome(), Outcome::Failed);
+    assert_eq!(r.text(), Some(words));
+    let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
+    let r = w.refresh(bytes.as_bytes(), &[], 2).expect_err("refresh refuses");
+    assert_eq!(r.text(), Some(words));
+    assert_eq!(w.settings().auth_header, None, "the old settings stay");
+    // `validate` keeps its current behaviour.
+    assert!(Webhook::validate(bytes.as_bytes()).is_ok());
+}
+
+/// W5 (lead-signed): framing and connection fields are not auth headers: refused at `check` and at
+/// `open`, whatever their case.
+#[test]
+fn a_framing_or_connection_header_is_refused() {
+    let words = "settings: `auth_header` cannot be sent as an HTTP header";
+    for name in [
+        "content-length",
+        "Transfer-Encoding",
+        "HOST",
+        "connection",
+        "te",
+        "upgrade",
+        "trailer",
+        "keep-alive",
+        "proxy-connection",
+    ] {
+        let s = json!({"url": "https://a.example/", "auth_header": {"name": name, "value": "1"}});
+        let lines = check(CheckPhase::Instances, &[("w".to_string(), s.clone())]);
+        assert_eq!(lines.len(), 1, "{name}: {lines:?}");
+        assert!(lines[0].contains("settings.auth_header"), "{}", lines[0]);
+        let r = Webhook::open(s.to_string().as_bytes(), &[], 1).expect_err(name);
+        assert_eq!(r.text(), Some(words), "{name}");
+    }
+}
