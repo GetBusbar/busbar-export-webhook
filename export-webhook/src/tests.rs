@@ -1576,3 +1576,49 @@ fn the_settings_schema_bounds_are_the_ones_check_enforces() {
     assert_eq!(p["max_inflight_deliveries"]["minimum"], 0);
     assert_eq!(p["max_inflight_deliveries"]["maximum"], MAX_PERMITS as u64);
 }
+
+/// KIND 1: `validate` refuses exactly what `open` refuses: an `auth_header` that cannot be sent as
+/// an HTTP header (a literal value with a newline), in the words `open` uses.
+#[test]
+fn validate_refuses_an_auth_header_that_open_refuses() {
+    let settings =
+        json!({"url": "https://a.example/", "auth_header": {"name": "Authorization", "value": "tok\n"}})
+            .to_string();
+    let opened = Webhook::open(settings.as_bytes(), &[], 1).expect_err("open refuses");
+    let validated = Webhook::validate(settings.as_bytes()).expect_err("validate refuses");
+    assert_eq!(validated.text(), opened.text());
+    assert!(!validated.text().unwrap().contains("tok"));
+}
+
+/// KIND 2: a host failure text echoing the request's credentials (the Basic value, its token) logs none of them.
+#[test]
+fn a_failure_echoing_the_requests_credentials_logs_none_of_them() {
+    let url = "https://alice:s3cret@hooks.example/in";
+    let token = base64(b"alice:s3cret");
+    let got = logged(|| {
+        report(
+            url,
+            Err(ConnFailure::Failed(format!(
+                "echoed Authorization: Basic {token}"
+            ))),
+        );
+    });
+    let text = all_text(&got);
+    assert_eq!(got.len(), 1, "{got:?}");
+    for secret in [token.as_str(), "s3cret"] {
+        assert!(!text.contains(secret), "{secret}: {text}");
+    }
+}
+
+/// KIND 3 (D1): a URL that does not parse is read by hand: an `@` after its host is refused.
+#[test]
+fn an_unparsable_url_with_an_at_after_its_host_is_ambiguous() {
+    let url = "https://svc:pa/ss@siem.example/in";
+    assert!(url::Url::parse(url).is_err());
+    let refusal = ambiguous_url(url).expect("ambiguous");
+    assert!(refusal.contains("is ambiguous"), "{refusal}");
+    assert!(!refusal.contains("pa/ss"), "{refusal}");
+    let settings = json!({ "url": url }).to_string();
+    assert!(Webhook::validate(settings.as_bytes()).is_err());
+    assert!(ambiguous_url("https://svc:pa/ss/siem.example/in").is_none());
+}
