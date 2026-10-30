@@ -579,9 +579,11 @@ pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
 /// instance stating `0` beside a larger sibling therefore validates and runs at one permit; refusing
 /// it per instance would tighten customer-visible behaviour.
 pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
-    let parsed: Vec<Settings> = instances
+    // Each parsed instance keeps its configured position: an unparsable one before it still counts.
+    let parsed: Vec<(usize, Settings)> = instances
         .iter()
-        .filter_map(|(_, s)| serde_json::from_value(s.clone()).ok())
+        .enumerate()
+        .filter_map(|(i, (_, s))| Some((i, serde_json::from_value(s.clone()).ok()?)))
         .collect();
     let mut errors = Vec::new();
     if phase == CheckPhase::Instances {
@@ -590,7 +592,7 @@ pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Ve
     }
     let bound = parsed
         .iter()
-        .map(|w| w.max_inflight_deliveries)
+        .map(|(_, w)| w.max_inflight_deliveries)
         .max()
         .unwrap_or(DEFAULT_MAX_INFLIGHT);
     if bound < 1 {
@@ -610,9 +612,9 @@ pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Ve
     errors
 }
 
-/// Each instance's delivery deadline, numbered by its position among the instances.
-fn instance_checks(parsed: &[Settings], errors: &mut Vec<String>) {
-    for (i, w) in parsed.iter().enumerate() {
+/// Each instance's delivery deadline, numbered by its configured position.
+fn instance_checks(parsed: &[(usize, Settings)], errors: &mut Vec<String>) {
+    for (i, w) in parsed {
         if let Some(h) = w.auth_header.as_ref().filter(|h| !header_builds(h)) {
             errors.push(format!(
                 "the `module: request-log-webhook` export instance targeting '{}' (#{i}) sets \
