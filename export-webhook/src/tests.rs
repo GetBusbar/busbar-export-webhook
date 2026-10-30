@@ -1631,3 +1631,21 @@ fn an_unparsable_url_with_an_at_after_its_host_is_ambiguous() {
     assert!(Webhook::validate(settings.as_bytes()).is_err());
     assert!(ambiguous_url("https://svc:pa/ss/siem.example/in").is_none());
 }
+
+/// The ambiguous-url refusal shows the target as the log lines do: a webhook's path and query are
+/// often its secret, so they are `/***` and `?***`, the host kept.
+#[test]
+fn the_ambiguous_url_refusal_never_echoes_the_path_or_query() {
+    for url in [
+        "https://tok/en@siem.example/services/CANARYPATH?key=CANARYQUERY",
+        "https://svc:pa/ss@siem.example:8443/services/CANARYPATH?key=CANARYQUERY",
+    ] {
+        let refusal = ambiguous_url(url).expect(url);
+        for canary in ["CANARYPATH", "CANARYQUERY", "tok", "pa/ss"] {
+            assert!(!refusal.contains(canary), "{canary}: {refusal}");
+        }
+        assert!(refusal.contains("***@siem.example"), "{refusal}");
+        assert!(refusal.contains("/***"), "{refusal}");
+        assert!(refusal.contains("is ambiguous"), "{refusal}");
+    }
+}
