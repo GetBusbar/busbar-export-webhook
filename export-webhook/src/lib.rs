@@ -194,12 +194,15 @@ fn parse_to_run(settings: &[u8]) -> Result<Settings, Refusal> {
 /// The words and the cut are the SDK's (`sdk::url::ambiguous_url`); the parse is this plugin's own
 /// WHATWG reader, the one its target is dialled by.
 pub fn ambiguous_url(url: &str) -> Option<String> {
+    // The refusal names the target as the log lines do ([`log_target`]): the userinfo cut, a path
+    // `/***` and a query `?***`, for a webhook's path or query is often its secret.
+    let shown = log_target(&sdk_url::cut_userinfo(url, "***@"));
     match url::Url::parse(url) {
-        Ok(parsed) => sdk_url::ambiguous_url(url, &parsed[url::Position::BeforePath..]),
+        Ok(parsed) => sdk_url::ambiguous_url(&shown, &parsed[url::Position::BeforePath..]),
         Err(_) => {
             let (_, rest) = url.split_once("://")?;
             let tail = &rest[rest.find(['/', '?', '#'])?..];
-            sdk_url::ambiguous_url(url, tail)
+            sdk_url::ambiguous_url(&shown, tail)
         }
     }
 }
