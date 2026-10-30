@@ -1359,3 +1359,43 @@ fn a_framing_or_connection_header_is_refused() {
         assert_eq!(r.text(), Some(words), "{name}");
     }
 }
+
+/// W6: a reload that changes only the delivery deadline or the in-flight bound does not cut a
+/// batch (new deliveries use the new deadline); one that changes the target or the credential does.
+#[test]
+fn a_reload_of_only_the_deadline_or_bound_does_not_cut_the_batch() {
+    let w = Webhook::open(
+        br#"{"url":"https://a.example/","auth_header":{"name":"K","value":"one"}}"#,
+        &[],
+        1,
+    )
+    .expect("opens");
+    let (settings, generation) = w.current();
+    let mut at = Posting {
+        settings,
+        generation,
+        line: 0,
+        issued: 0,
+        exchange: None,
+    };
+    w.refresh(
+        br#"{"url":"https://a.example/","auth_header":{"name":"K","value":"one"},
+             "delivery_timeout_secs":9,"max_inflight_deliveries":3}"#,
+        &[],
+        2,
+    )
+    .expect("timeout and bound only");
+    assert!(
+        !w.reloaded_since(&mut at),
+        "a deadline/bound change cut the batch"
+    );
+    assert_eq!(w.settings().delivery_timeout_secs, 9, "new deliveries use it");
+    assert_eq!(w.settings().request(b"{}").timeout_ms, 9000);
+    w.refresh(
+        br#"{"url":"https://a.example/","auth_header":{"name":"K","value":"two"}}"#,
+        &[],
+        3,
+    )
+    .expect("credential");
+    assert!(w.reloaded_since(&mut at), "a credential change cuts it");
+}
