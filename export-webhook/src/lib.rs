@@ -190,7 +190,6 @@ pub fn ambiguous_url(url: &str) -> Option<String> {
 }
 
 /// One opened instance.
-#[derive(Debug)]
 pub struct Webhook {
     /// Its settings and the request every line shares. `open` and `refresh` refuse settings that do
     /// not parse, so an instance never holds unparsed ones and never sits silently dead.
@@ -201,6 +200,21 @@ pub struct Webhook {
     /// The host's verdict on the target, asked once: at boot by `ready` (and again after a
     /// `refresh` clears it, by the next delivery or readiness ask); `None` until then.
     live: Mutex<Option<bool>>,
+}
+
+/// `Debug` names the settings through [`Prepared`]'s redacting `Debug`, and the counters; the
+/// verdict is a plain flag.
+impl std::fmt::Debug for Webhook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Webhook")
+            .field("settings", &self.settings())
+            .field("generation", &self.generation.load(Ordering::Acquire))
+            .field(
+                "live",
+                &*self.live.lock().unwrap_or_else(PoisonError::into_inner),
+            )
+            .finish()
+    }
 }
 
 impl Life for Webhook {
@@ -314,11 +328,35 @@ impl Webhook {
 /// appended as an `http::HeaderMap` appends, so a configured auth header named `Authorization` is
 /// sent too, after the userinfo's. The configured name goes lower-cased (the contract's field block
 /// is lower-case).
-#[derive(Debug)]
 pub struct Prepared {
     settings: Settings,
     target: Vec<u8>,
     fields: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+/// `Debug` prints the settings through the sink's own redaction: the url as the logs name it
+/// ([`log_target`]), the auth header by name only, the fields by name only, and the target path
+/// and query as `***` unless it is the root.
+impl std::fmt::Debug for Prepared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<std::borrow::Cow<'_, str>> = self
+            .fields
+            .iter()
+            .map(|(n, _)| String::from_utf8_lossy(n))
+            .collect();
+        let header = self.settings.auth_header.as_ref().map(|h| (&h.name, "***"));
+        f.debug_struct("Prepared")
+            .field("url", &log_target(&self.settings.url))
+            .field("auth_header", &header)
+            .field(
+                "max_inflight_deliveries",
+                &self.settings.max_inflight_deliveries,
+            )
+            .field("delivery_timeout_secs", &self.settings.delivery_timeout_secs)
+            .field("target", &if self.target == b"/" { "/" } else { "***" })
+            .field("fields", &names)
+            .finish()
+    }
 }
 
 impl Deref for Prepared {
