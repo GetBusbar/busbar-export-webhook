@@ -175,6 +175,8 @@ fn deliver_through_the_harness() {
     a_transport_error_drops_the_line_as_busbar_7072();
     the_first_line_after_a_refresh_goes_on_the_new_settings();
     a_200_with_a_huge_body_is_still_a_delivered_line();
+    a_disabled_instance_posts_nothing();
+    blank_lines_are_not_posted();
 }
 
 /// Records in -> one HTTPS POST per line out, in order: the target's path and query, the
@@ -338,5 +340,33 @@ fn a_200_with_a_huge_body_is_still_a_delivered_line() {
     assert!(
         naming(&host, "BUSBAR-70").is_empty(),
         "a 200 is a delivered line: {host:?}"
+    );
+}
+
+/// T2: an instance whose target the host refused (an `http://` target, refused by the open-web
+/// class) is disabled at boot, and its `deliver` posts nothing and answers READY.
+fn a_disabled_instance_posts_nothing() {
+    seen();
+    let (p, d, tape) = opened(&serde_json::json!({"url": format!("http://{FAR_END}/in")}));
+    let answer = deliver(&p, &d, "{\"line\":0}\n{\"line\":1}\n");
+    assert!(answer.starts_with("Ready "), "deliver: {answer}");
+    assert!(seen().is_empty(), "a disabled instance posted");
+    assert!(
+        naming(&tape.take(), "BUSBAR-70").is_empty(),
+        "nothing attempted, nothing dropped"
+    );
+}
+
+/// T2: blank lines in a batch are not POSTed (1.5.5 skipped empty lines).
+fn blank_lines_are_not_posted() {
+    seen();
+    let (p, d, _tape) = opened(&serde_json::json!({"url": format!("https://{FAR_END}/in")}));
+    let answer = deliver(&p, &d, "\n{\"line\":0}\n\n\n{\"line\":1}\n\n");
+    assert!(answer.starts_with("Ready "), "deliver: {answer}");
+    let got = seen();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(
+        got[0].ends_with("{\"line\":0}") && got[1].ends_with("{\"line\":1}"),
+        "{got:?}"
     );
 }
