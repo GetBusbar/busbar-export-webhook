@@ -541,8 +541,12 @@ pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
 }
 
 /// `url` names the `https` scheme, read without case (RFC 3986).
+///
+/// Leading C0 controls and spaces are skipped first, as the WHATWG URL parser skips them, so the
+/// scheme is the one the parser would read.
 fn is_https(url: &str) -> bool {
-    url.split_once("://")
+    url.trim_start_matches(|c: char| c <= ' ')
+        .split_once("://")
         .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
 }
 
