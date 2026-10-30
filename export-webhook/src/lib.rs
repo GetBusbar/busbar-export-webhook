@@ -201,12 +201,20 @@ fn parse_to_run(settings: &[u8]) -> Result<Settings, Refusal> {
 /// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
 /// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
 /// lines. The refusal shows the url with everything between `://` and its last `@` cut, never the
-/// credential. A url that does not parse, or has no `@` after its host, is not ambiguous here.
+/// credential. A url that does not parse is read the same way by hand: the text after `://`, from
+/// its first `/`, `?` or `#`, is what a parser would take for the path (`https://svc:pa/ss@siem/…`
+/// fails on the port `pa`). A url with no `@` after its host is not ambiguous here.
 /// The words and the cut are the SDK's (`sdk::url::ambiguous_url`); the parse is this plugin's own
 /// WHATWG reader, the one its target is dialled by.
 pub fn ambiguous_url(url: &str) -> Option<String> {
-    let parsed = url::Url::parse(url).ok()?;
-    sdk_url::ambiguous_url(url, &parsed[url::Position::BeforePath..])
+    match url::Url::parse(url) {
+        Ok(parsed) => sdk_url::ambiguous_url(url, &parsed[url::Position::BeforePath..]),
+        Err(_) => {
+            let (_, rest) = url.split_once("://")?;
+            let tail = &rest[rest.find(['/', '?', '#'])?..];
+            sdk_url::ambiguous_url(url, tail)
+        }
+    }
 }
 
 /// One opened instance.
@@ -242,7 +250,19 @@ impl Life for Webhook {
 
     /// The settings' shape, in the configuration grammar's own serde words.
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
-        parse(settings).map(|_| ())
+        // The same check `open` and `refresh` run (`parse_to_run`). A secret reference the kernel has
+        // not resolved (an object where the value goes) cannot be judged here: it is read as before.
+        let unresolved = serde_json::from_slice::<serde_json::Value>(settings)
+            .ok()
+            .is_some_and(|v| {
+                v.pointer("/auth_header/value")
+                    .is_some_and(|v| v.is_object())
+            });
+        if unresolved {
+            parse(settings).map(|_| ())
+        } else {
+            parse_to_run(settings).map(|_| ())
+        }
     }
 
     /// Refuses settings that do not parse, in the same words as [`Life::validate`]: an instance
@@ -632,7 +652,7 @@ pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
                 mask_url(u)
             ),
         },
-        (Some(u), _) => scrub(&refused.to_string(), u),
+        (Some(u), _) => scrub(&refused.to_string(), u, None),
         (None, _) => refused.to_string(),
     }
 }
@@ -660,7 +680,11 @@ fn is_https(url: &str) -> bool {
 /// BUSBAR-7072 for a transport failure — each at WARN. The target is named by scheme and host only ([`log_target`]:
 /// its userinfo, path and query can each carry the webhook's secret) and the host's failure text is
 /// scrubbed of the target's parts ([`scrub`]).
-pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
+pub fn report(
+    url: &str,
+    header_value: Option<&str>,
+    answered: Result<ExchangeResponse, ConnFailure>,
+) {
     match answered {
         Ok(r) if (200..300).contains(&r.status) => {}
         Ok(r) => tracing::warn!(
@@ -672,7 +696,7 @@ pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
         Err(e) => tracing::warn!(
             diag = %TRANSPORT_ERROR,
             webhook_url = ?log_target(url),
-            error_kind = %scrub(&e.to_string(), url),
+            error_kind = %scrub(&e.to_string(), url, header_value),
             "request-log webhook delivery failed (transport error); this log was dropped"
         ),
     }
@@ -908,7 +932,11 @@ impl SafeSlot for Deliver {
                     }
                 }
             };
-            report(&at.settings.url, answered);
+            report(
+                &at.settings.url,
+                at.settings.auth_header.as_ref().map(|h| h.value.as_str()),
+                answered,
+            );
             at.offset = next;
             if hook.cut_by_reload(&mut at, &batch[next.min(batch.len())..]) {
                 break;
