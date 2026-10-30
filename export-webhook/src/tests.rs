@@ -1399,3 +1399,18 @@ fn a_reload_of_only_the_deadline_or_bound_does_not_cut_the_batch() {
     .expect("credential");
     assert!(w.reloaded_since(&mut at), "a credential change cuts it");
 }
+
+/// W7: `#i` is the instance's configured position, even when an earlier instance does not parse.
+#[test]
+fn a_finding_is_numbered_by_the_configured_position() {
+    let instances = [
+        ("a".to_string(), json!({"bogus": 1})),
+        (
+            "b".to_string(),
+            json!({"url": "https://b.example/", "delivery_timeout_secs": 0}),
+        ),
+    ];
+    let lines = check(CheckPhase::Instances, &instances);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("(#1)"), "{lines:?}");
+}
