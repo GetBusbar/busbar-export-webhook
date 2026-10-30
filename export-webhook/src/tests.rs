@@ -1448,17 +1448,15 @@ fn leading_controls_and_spaces_do_not_hide_the_scheme() {
 /// in the host's own words, scrubbed of the target's parts.
 #[test]
 fn another_host_refusal_keeps_its_own_words() {
-    let url = "https://u:pw@siem.example/services/PATHSECRET?k=QUERYSECRET";
-    let other = ConnFailure::Refused(format!(
-        "the plugin did not declare this need ({url} PATHSECRET)"
-    ));
+    let url = "https://ops:hunter2@siem.example/services/PATHSECRET?k=QUERYSECRET";
+    let other = ConnFailure::Refused(format!("the plugin did not declare this need (for {url})"));
     let words = refusal_words(Some(url), &other);
     assert!(
         words.starts_with("the plugin did not declare this need"),
         "{words}"
     );
     assert!(!words.contains("SSRF"), "{words}");
-    for secret in ["pw", "PATHSECRET", "QUERYSECRET"] {
+    for secret in ["hunter2", "PATHSECRET", "QUERYSECRET"] {
         assert!(!words.contains(secret), "`{secret}` leaked: {words}");
     }
     // The connector's own refusal of a target is the guard's.

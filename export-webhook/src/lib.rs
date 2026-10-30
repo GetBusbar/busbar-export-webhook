@@ -518,16 +518,17 @@ fn base64(bytes: &[u8]) -> String {
 
 /// BUSBAR-7070's words for a refused target: a target that is not an `https://`
 /// URL is the scheme rule (the scheme read without case); one that does not parse is an invalid
-/// URL; a parseable `https://` target the host refused is the destination guard, the only rule
-/// left on that path. Userinfo is masked. A host that gave no verdict, or any
-/// failure that is not a refusal, is said in the host's words.
+/// URL; a parseable `https://` target the connector refused with the destination guard's text
+/// ([`guard_refusal`]) is the destination guard. Userinfo is masked. A host that gave no verdict, a
+/// refusal for any other reason, or any failure that is not a refusal, is said in the host's words,
+/// scrubbed of the target's parts.
 pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
     match (url, refused) {
         (Some(u), ConnFailure::Refused(_)) if !is_https(u) => format!(
             "observability.request_log_webhook_url must be an https:// URL (got '{}')",
             mask_url(u)
         ),
-        (Some(u), ConnFailure::Refused(_)) => match url::Url::parse(u) {
+        (Some(u), ConnFailure::Refused(t)) if guard_refusal(t) => match url::Url::parse(u) {
             Err(e) => format!("observability.request_log_webhook_url is not a valid URL: {e}"),
             Ok(_) => format!(
                 "observability.request_log_webhook_url must not target a loopback/link-local/\
@@ -538,6 +539,16 @@ pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
         (Some(u), _) => scrub(&refused.to_string(), u),
         (None, _) => refused.to_string(),
     }
+}
+
+/// Whether a host refusal's text is the destination guard's: the connector refuses a target it will
+/// not carry with `ConnError::Refused`, whose text is "the connection was refused" (an empty text,
+/// and the legacy "destination refused", say the same). Any other reason (an undeclared need, a
+/// fault) is not the guard's and is not worded as it.
+fn guard_refusal(text: &str) -> bool {
+    ["", "the connection was refused", "destination refused"]
+        .iter()
+        .any(|g| text.trim().eq_ignore_ascii_case(g))
 }
 
 /// `url` names the `https` scheme, read without case (RFC 3986).
