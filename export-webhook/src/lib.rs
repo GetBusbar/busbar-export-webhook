@@ -177,6 +177,23 @@ fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
     Ok(settings)
 }
 
+/// The settings an instance runs on: [`parse`]d, and an `auth_header` that cannot be sent is
+/// refused (lead-signed): the instance would otherwise POST every line unauthenticated. The value is
+/// never echoed.
+fn parse_to_run(settings: &[u8]) -> Result<Settings, Refusal> {
+    let parsed = parse(settings)?;
+    if parsed
+        .auth_header
+        .as_ref()
+        .is_some_and(|h| !header_builds(h))
+    {
+        return Err(Refusal::failed(
+            "settings: `auth_header` cannot be sent as an HTTP header",
+        ));
+    }
+    Ok(parsed)
+}
+
 /// The ambiguous-URL refusal: `Some(the refusal)` when `url` parses but
 /// carries an `@` after its host — `https://tok/en@siem.example/…` or `https://u:123/x@siem.example/…`,
 /// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
@@ -230,7 +247,7 @@ impl Life for Webhook {
     /// that opened on them would drop every delivery without a word.
     fn open(settings: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
         Ok(Self {
-            settings: RwLock::new(Arc::new(Prepared::new(parse(settings)?))),
+            settings: RwLock::new(Arc::new(Prepared::new(parse_to_run(settings)?))),
             generation: AtomicU64::new(0),
             live: Mutex::new(None),
         })
@@ -252,7 +269,7 @@ impl Life for Webhook {
     /// A reload's settings replace the instance's, and its target is asked about afresh; settings
     /// that do not parse are refused and the old ones (and their verdict) stay.
     fn refresh(&self, settings: &[u8], _: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
-        let parsed = parse(settings)?;
+        let parsed = parse_to_run(settings)?;
         // Hold the verdict across the settings write (lock order live -> settings, as `admitted`),
         // so no delivery reads the new settings beside the old target's cached verdict.
         let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
@@ -420,11 +437,29 @@ impl Prepared {
     }
 }
 
-/// Whether the auth header can be built, and so is sent: `HeaderName::from_bytes` takes a name of 1
-/// to 65535 RFC 9110 token bytes, and `HeaderValue::from_str` a value of visible ASCII, space, tab
-/// and non-ASCII bytes (no other control byte, no DEL). A header that fails either is left out and
-/// the line POSTed without it; this sink also refuses such a header at validation.
+/// Whether the auth header can be sent: it is an HTTP header ([`header_is_http`]) and not one of
+/// the framing or connection fields, which the sink's own request owns and a configured one could
+/// use to desync the exchange (names compared without case).
 fn header_builds(h: &ExportAuthHeader) -> bool {
+    const OWNED: [&str; 9] = [
+        "content-length",
+        "transfer-encoding",
+        "host",
+        "connection",
+        "te",
+        "upgrade",
+        "trailer",
+        "keep-alive",
+        "proxy-connection",
+    ];
+    header_is_http(h) && !OWNED.iter().any(|n| h.name.eq_ignore_ascii_case(n))
+}
+
+/// Whether the auth header is a header 1.5.5 could build: `HeaderName::from_bytes` takes a name of 1
+/// to 65535 RFC 9110 token bytes, and `HeaderValue::from_str` a value of visible ASCII, space, tab
+/// and non-ASCII bytes (no other control byte, no DEL). 1.5.5 left a header that fails either out
+/// and POSTed the line without it; 1.6.0 refuses one at `open`/`refresh` and `check`s it.
+fn header_is_http(h: &ExportAuthHeader) -> bool {
     let token = |b: &u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b);
     let name = h.name.as_bytes();
     (1..=usize::from(u16::MAX)).contains(&name.len())
@@ -642,7 +677,7 @@ fn auth_header_unbuildable(settings: &serde_json::Value) -> bool {
         *value = serde_json::Value::String(String::new());
     }
     serde_json::from_value::<Settings>(probe)
-        .is_ok_and(|s| s.auth_header.is_some_and(|h| !header_builds(&h)))
+        .is_ok_and(|s| s.auth_header.is_some_and(|h| !header_is_http(&h)))
 }
 
 /// `check`'s instances, `(name, settings)` in configuration order (settings that are not JSON read
