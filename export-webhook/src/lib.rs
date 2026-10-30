@@ -54,6 +54,7 @@ use busbar_contract::abi::sdk::mask::mask_url;
 use busbar_contract::abi::sdk::migrate::{Migrate, Migrated};
 use busbar_contract::abi::sdk::url::{self as sdk_url, Userinfo};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
+use zeroize::Zeroizing;
 
 /// The plugin's canonical name.
 pub const NAME: &str = "busbar-export-webhook";
@@ -331,7 +332,8 @@ impl Webhook {
 pub struct Prepared {
     settings: Settings,
     target: Vec<u8>,
-    fields: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Name and value of each field; the values can hold a credential and are wiped when dropped.
+    fields: Vec<(Vec<u8>, Zeroizing<Vec<u8>>)>,
 }
 
 /// `Debug` prints the settings through the sink's own redaction: the url as the logs name it
@@ -352,7 +354,10 @@ impl std::fmt::Debug for Prepared {
                 "max_inflight_deliveries",
                 &self.settings.max_inflight_deliveries,
             )
-            .field("delivery_timeout_secs", &self.settings.delivery_timeout_secs)
+            .field(
+                "delivery_timeout_secs",
+                &self.settings.delivery_timeout_secs,
+            )
             .field("target", &if self.target == b"/" { "/" } else { "***" })
             .field("fields", &names)
             .finish()
@@ -370,14 +375,18 @@ impl Prepared {
     fn new(settings: Settings) -> Self {
         let mut fields = Vec::new();
         if let Some(basic) = basic_authorization(&settings.url) {
-            append(&mut fields, b"authorization", &basic);
+            append(&mut fields, b"authorization", Zeroizing::new(basic));
         }
-        append(&mut fields, b"content-type", b"application/json");
+        append(
+            &mut fields,
+            b"content-type",
+            Zeroizing::new(b"application/json".to_vec()),
+        );
         if let Some(h) = settings.auth_header.as_ref().filter(|h| header_builds(h)) {
             append(
                 &mut fields,
                 h.name.to_ascii_lowercase().as_bytes(),
-                h.value.as_bytes(),
+                Zeroizing::new(h.value.as_bytes().to_vec()),
             );
         }
         let target = match url::Url::parse(&settings.url) {
@@ -400,7 +409,11 @@ impl Prepared {
         Request {
             method: b"POST".to_vec(),
             target: self.target.clone(),
-            fields: self.fields.clone(),
+            fields: self
+                .fields
+                .iter()
+                .map(|(n, v)| (n.clone(), v.to_vec()))
+                .collect(),
             body: line.to_vec(),
             timeout_ms: self.settings.delivery_timeout_secs.saturating_mul(1000),
         }
@@ -423,8 +436,8 @@ fn header_builds(h: &ExportAuthHeader) -> bool {
 
 /// One field appended as an `http::HeaderMap` appends it: after the last field of the same name
 /// (names compared without case), or last when there is none.
-fn append(fields: &mut Vec<(Vec<u8>, Vec<u8>)>, name: &[u8], value: &[u8]) {
-    let field = (name.to_vec(), value.to_vec());
+fn append(fields: &mut Vec<(Vec<u8>, Zeroizing<Vec<u8>>)>, name: &[u8], value: Zeroizing<Vec<u8>>) {
+    let field = (name.to_vec(), value);
     match fields
         .iter()
         .rposition(|(n, _)| n.eq_ignore_ascii_case(name))

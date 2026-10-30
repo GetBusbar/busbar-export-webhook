@@ -4,7 +4,8 @@
 //! The `settings:` grammar of an `export.<name>.module: request-log-webhook` instance — config
 //! grammar, tracked by the config-schema gate here, where the sink that reads it lives.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+use zeroize::Zeroizing;
 
 /// `settings:` of an `export.<name>.module: request-log-webhook` instance — relocated from the retired
 /// `observability` webhook keys. Also absorbs the retired `generic-webhook` exporter: its ONLY extra
@@ -51,7 +52,14 @@ impl std::fmt::Debug for WebhookSettings {
 #[serde(deny_unknown_fields)]
 pub struct ExportAuthHeader {
     pub name: String,
-    pub value: String,
+    /// The credential, wiped from memory when the header is dropped.
+    #[serde(deserialize_with = "wiped")]
+    pub value: Zeroizing<String>,
+}
+
+/// The value read as a plain string and held wiped-on-drop.
+fn wiped<'de, D: Deserializer<'de>>(d: D) -> Result<Zeroizing<String>, D::Error> {
+    String::deserialize(d).map(Zeroizing::new)
 }
 
 impl std::fmt::Debug for ExportAuthHeader {
