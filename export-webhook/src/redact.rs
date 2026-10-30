@@ -13,6 +13,8 @@
 //! only their userinfo and secret-looking query values are masked
 //! (`busbar_contract::abi::sdk::mask::mask_url`).
 
+use busbar_contract::abi::sdk::url as sdk_url;
+
 /// What a redacted part becomes.
 const REDACTED: &str = "***";
 
@@ -51,7 +53,8 @@ pub fn log_target(url: &str) -> String {
 
 /// `text` (a host's failure words, say) with every part of `url` that can carry a credential
 /// replaced by `***`: the URL itself (as written and masked, `mask_url`), its path, query, userinfo,
-/// each also percent-decoded.
+/// each also percent-decoded; the decoding and the cut (as written and as serde quotes it, longest
+/// first) are the SDK's (`sdk::url::and_decoded`, `sdk::url::scrub`).
 pub fn scrub(text: &str, url: &str) -> String {
     let mut parts = vec![url.to_string(), crate::mask_url(url)];
     if let Ok(u) = url::Url::parse(url) {
@@ -66,12 +69,7 @@ pub fn scrub(text: &str, url: &str) -> String {
         }
         parts.push(u.username().to_string());
     }
-    let decoded: Vec<String> = parts
-        .iter()
-        .map(|p| String::from_utf8_lossy(&crate::percent_decode(p.as_bytes())).into_owned())
-        .collect();
-    parts.extend(decoded);
-    replace_all(text, parts)
+    sdk_url::scrub(text, sdk_url::and_decoded(parts), true)
 }
 
 /// Every credential-bearing string the settings JSON holds: every string (and map key) under
@@ -98,29 +96,6 @@ pub fn settings_credentials(settings: &serde_json::Value) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(h) = settings.get("auth_header") {
         walk(h, &mut out);
-    }
-    out
-}
-
-/// `text` with each of `secrets` (as written, and as serde's `{:?}` escapes it inside a quoted
-/// string) replaced by `***`, longest first so no secret is left half-cut.
-pub fn replace_all(text: &str, secrets: Vec<String>) -> String {
-    let mut all: Vec<String> = secrets
-        .into_iter()
-        .flat_map(|s| {
-            let escaped = format!("{s:?}");
-            let escaped = escaped[1..escaped.len() - 1].to_string();
-            [s, escaped]
-        })
-        .filter(|s| !s.is_empty())
-        .collect();
-    all.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    all.dedup();
-    let mut out = text.to_string();
-    for s in &all {
-        if out.contains(s.as_str()) {
-            out = out.replace(s.as_str(), REDACTED);
-        }
     }
     out
 }
