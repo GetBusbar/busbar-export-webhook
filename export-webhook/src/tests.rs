@@ -1275,3 +1275,43 @@ fn no_declared_code_is_one_the_core_catalogue_holds() {
         );
     }
 }
+
+// ── Audit round 1 (codeaudit-r1) ─────────────────────────────────────────────────────────────────
+
+/// W1: a formatted `Prepared` or `Webhook` carries none of the secrets its settings hold: the url's
+/// userinfo (and the Basic value it became), its secret path and query, the auth header's value.
+#[test]
+fn a_formatted_prepared_or_webhook_carries_no_secret() {
+    let w = Webhook::open(
+        json!({
+            "url": "https://ops:hunter2@siem.example/services/PATHSECRET?api_key=QUERYSECRET",
+            "auth_header": {"name": "X-Api-Key", "value": "HEADERSECRET"}
+        })
+        .to_string()
+        .as_bytes(),
+        &[],
+        1,
+    )
+    .expect("opens");
+    let p = w.settings();
+    // `ops:hunter2`, padded standard base64.
+    let basic = base64(b"ops:hunter2");
+    for text in [
+        format!("{p:?}"),
+        format!("{p:#?}"),
+        format!("{w:?}"),
+        format!("{w:#?}"),
+    ] {
+        for secret in [
+            "hunter2",
+            "PATHSECRET",
+            "QUERYSECRET",
+            "HEADERSECRET",
+            basic.as_str(),
+        ] {
+            assert!(!text.contains(secret), "`{secret}` leaked: {text}");
+        }
+        assert!(text.contains("siem.example"), "the host is kept: {text}");
+        assert!(text.contains("X-Api-Key"), "the header name is kept: {text}");
+    }
+}
