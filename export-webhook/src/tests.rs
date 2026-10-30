@@ -1562,3 +1562,17 @@ fn a_credential_looking_key_in_auth_header_never_reaches_the_refusal_or_the_log(
     });
     assert!(!all_text(&got).contains("Bearer tok"), "{got:?}");
 }
+
+/// W11: the schema's bounds are the ones validation enforces (`check`): a deadline of 1 to the
+/// 30-year ceiling, an in-flight bound up to the semaphore's permit ceiling (an instance stating 0
+/// beside a larger sibling validates, so the schema admits 0).
+#[test]
+fn the_settings_schema_bounds_are_the_ones_check_enforces() {
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../settings.schema.json")).expect("JSON");
+    let p = &schema["properties"];
+    assert_eq!(p["delivery_timeout_secs"]["minimum"], 1);
+    assert_eq!(p["delivery_timeout_secs"]["maximum"], MAX_DURATION_SECS);
+    assert_eq!(p["max_inflight_deliveries"]["minimum"], 0);
+    assert_eq!(p["max_inflight_deliveries"]["maximum"], MAX_PERMITS as u64);
+}

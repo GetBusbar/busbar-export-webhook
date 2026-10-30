@@ -456,7 +456,11 @@ impl Prepared {
         // a field that carries a credential is held as a `Cred`.
         let mut fields: Vec<(Vec<u8>, Field)> = Vec::new();
         if let Some(basic) = basic_authorization(&settings.url) {
-            append(&mut fields, b"authorization", Field::Secret(cred(basic)));
+            append(
+                &mut fields,
+                b"authorization",
+                Field::Secret(cred(basic, &settings.url)),
+            );
         }
         append(
             &mut fields,
@@ -467,7 +471,7 @@ impl Prepared {
             append(
                 &mut fields,
                 h.name.to_ascii_lowercase().as_bytes(),
-                Field::Secret(cred(h.value.as_bytes().to_vec())),
+                Field::Secret(cred(h.value.as_bytes().to_vec(), &settings.url)),
             );
         }
         let (mut plain, mut sealed) = (Vec::new(), Vec::new());
@@ -524,16 +528,20 @@ enum Field {
     Secret(Cred),
 }
 
-/// A credential-bearing field value held as a `Cred` (it has no getter, no `Debug`; the string it
-/// was made from is wiped).
-fn cred(value: Vec<u8>) -> Cred {
+/// A credential-bearing field value held as a `Cred` for the target `url` (it has no getter, no
+/// `Debug`; the string it was made from is wiped).
+fn cred(value: Vec<u8>, url: &str) -> Cred {
     // A value that is not UTF-8 cannot come from a settings string or a Basic value; lossy keeps
     // this total.
     let mut v = serde_json::Value::String(
         String::from_utf8(value)
             .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
     );
-    Cred::take(&mut v).unwrap_or_else(Cred::empty)
+    // Required to go out secured when the operator's url names a secure scheme: the SDK's
+    // secured-connection check applies to it.
+    Cred::take(&mut v)
+        .unwrap_or_else(Cred::empty)
+        .secure_for(url)
 }
 
 /// Whether the auth header can be sent: it is an HTTP header ([`header_is_http`]) and not one of
@@ -750,8 +758,8 @@ fn instance_checks(parsed: &[(usize, Settings)], errors: &mut Vec<String>) {
 }
 
 /// The migration's report line when it removes an `auth_header` 1.6.0 refuses.
-pub const REMOVED_AUTH_HEADER: &str = "removed settings.auth_header: it cannot be sent as an HTTP \
-     header (its name or value is not a valid HTTP header, or its name is a framing or connection \
+pub const REMOVED_AUTH_HEADER: &str = "removed settings.auth_header: 1.6.0 does not send it, as it \
+     cannot be sent as an HTTP header (its name or value is not a valid HTTP header, or its name is a framing or connection \
      field such as Host or Content-Length), which 1.6.0 refuses at validation and open";
 
 /// THE 1.5.5 UPGRADE (`busbar --migrate-config`; owner ruling 2026-10-27): this sink's own
