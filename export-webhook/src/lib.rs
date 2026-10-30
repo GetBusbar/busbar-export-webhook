@@ -796,7 +796,9 @@ impl SafeSlot for Deliver {
                     let mut c = host.connector_from(instance.ticket(), at.issued);
                     let started = match at.exchange.take() {
                         Some(ex) => Ok(ex),
-                        None => Exchange::request(at.settings.request(line)),
+                        None => {
+                            Exchange::request(at.settings.request(line)).map(Exchange::head_only)
+                        }
                     };
                     match started {
                         Err(e) => Err(e),
