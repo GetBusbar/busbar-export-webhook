@@ -277,10 +277,15 @@ impl Life for Webhook {
             .settings
             .write()
             .unwrap_or_else(PoisonError::into_inner);
-        // Settings equal to the held ones are no reload for a delivery in flight.
+        // Only what decides where lines go and with which credentials is a reload for a delivery
+        // in flight (the generation); any other change (the deadline, the bound) is published for
+        // the deliveries that start or POST a line after it.
         if current.settings != parsed {
+            let moves = !current.routes_as(&parsed);
             *current = Arc::new(Prepared::new(parsed));
-            self.generation.fetch_add(1, Ordering::Release);
+            if moves {
+                self.generation.fetch_add(1, Ordering::Release);
+            }
         }
         drop(current);
         *live = None;
@@ -294,7 +299,7 @@ impl Webhook {
         self.current().0
     }
 
-    /// Whether the settings now differ in content from those `at` started under. The generation
+    /// Whether the target or the credentials now differ from those `at` started under. The generation
     /// is the fast path; when it moved, the content is compared (a reload back to the same
     /// settings is no reload for the batch) and `at` takes the new generation.
     fn reloaded_since(&self, at: &mut Posting) -> bool {
@@ -303,7 +308,7 @@ impl Webhook {
         }
         let (now, generation) = self.current();
         at.generation = generation;
-        now.settings != at.settings.settings
+        !now.routes_as(&at.settings.settings)
     }
 
     /// The settings and the generation they are, read together.
@@ -419,6 +424,12 @@ impl Prepared {
             target,
             fields,
         }
+    }
+
+    /// Whether `other` sends lines where these do and with the same credentials: the url and the
+    /// auth header, not the deadline or the in-flight bound.
+    fn routes_as(&self, other: &Settings) -> bool {
+        self.settings.url == other.url && self.settings.auth_header == other.auth_header
     }
 
     /// The request that POSTs `line`.
@@ -644,7 +655,7 @@ pub const REMOVED_AUTH_HEADER: &str = "removed settings.auth_header: its name or
 /// 1.5.5 left an `auth_header` it could not build out of every delivery and sent the line without
 /// it (export-webhook #33 W1); 1.6.0 refuses such a header at validation ([`check`]). The migration
 /// removes exactly the header that refusal names, reporting [`REMOVED_AUTH_HEADER`]: settings that
-/// parse as [`Settings`] and carry an `auth_header` that does not build ([`header_builds`]). A value
+/// parse as [`Settings`] and carry an `auth_header` 1.5.5 could not build ([`header_is_http`]). A value
 /// written as a reference the kernel resolves (`auth_header.value` is a declared secret field) is
 /// unknown here, so only the header's name is judged. Anything else, a section the grammar refuses
 /// for its shape included, is unchanged: that refusal is the operator's to read.
