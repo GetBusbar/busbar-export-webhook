@@ -458,7 +458,7 @@ fn the_declaration_states_the_shed_counter_and_the_codes() {
         .iter()
         .map(|c| c["code"].as_u64().unwrap())
         .collect();
-    assert_eq!(codes, vec![7070, 7071, 7072, 7107]);
+    assert_eq!(codes, vec![7070, 7071, 7072, 7109]);
 }
 
 /// Every metric a catalogue action cites (a backticked `*_total` token) is a series the declaration
@@ -1235,6 +1235,43 @@ fn a_section_1_6_0_does_not_refuse_for_its_header_is_unchanged() {
             migrated(settings.clone()),
             Migrated::unchanged(settings.clone()),
             "{settings}"
+        );
+    }
+}
+
+/// NO DECLARED CODE IS ONE THE CORE'S CATALOGUE HOLDS: the core at `.busbar-ref` (`BUSBAR_CHECKOUT`,
+/// `crates/busbar-kernel/src/diagnostics/catalog.toml`) refuses a plugin that declares a code its
+/// catalogue already holds ("plugin '<name>' declares BUSBAR-NNNN: the catalogue already holds that
+/// code"), identical or not, so a collision is a busbar that does not boot. An unset variable is a
+/// failure, never a skip.
+#[test]
+fn no_declared_code_is_one_the_core_catalogue_holds() {
+    let busbar = std::env::var_os("BUSBAR_CHECKOUT").expect(
+        "BUSBAR_CHECKOUT is unset: the core catalogue is busbar's at .busbar-ref (plugin-ci exports it)",
+    );
+    let path =
+        std::path::PathBuf::from(busbar).join("crates/busbar-kernel/src/diagnostics/catalog.toml");
+    let catalog = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("the core catalogue at {}: {e}", path.display()));
+    let held: std::collections::BTreeSet<u64> = catalog
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("code"))
+        .filter_map(|rest| rest.trim().strip_prefix('='))
+        .filter_map(|n| n.trim().parse().ok())
+        .collect();
+    assert!(
+        !held.is_empty(),
+        "no `code = N` row read from {}",
+        path.display()
+    );
+    let declares: serde_json::Value = serde_json::from_str(DECLARES).unwrap();
+    for d in declares["diagnostics"].as_array().unwrap() {
+        let code = d["code"].as_u64().unwrap();
+        assert!(
+            !held.contains(&code),
+            "BUSBAR-{code:04} ({}) is a code the core catalogue at {} already holds",
+            d["slug"],
+            path.display()
         );
     }
 }
