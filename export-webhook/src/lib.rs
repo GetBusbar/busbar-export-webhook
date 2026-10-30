@@ -52,6 +52,7 @@ pub use busbar_contract::abi::sdk::export::{NO_EXPOSITION, NO_ROUTE};
 use busbar_contract::abi::sdk::life::{settings_value, Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::mask::mask_url;
 use busbar_contract::abi::sdk::migrate::{Migrate, Migrated};
+use busbar_contract::abi::sdk::url::{self as sdk_url, Userinfo};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 
 /// The plugin's canonical name.
@@ -167,7 +168,7 @@ fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
     // settings' credential strings are cut from it, the words otherwise serde's (H2).
     let credentials = redact::settings_credentials(&value);
     let settings: Settings = serde_json::from_value(value).map_err(|e| {
-        Refusal::failed(redact::replace_all(&format!("settings: {e}"), credentials))
+        Refusal::failed(sdk_url::scrub(&format!("settings: {e}"), credentials, true))
     })?;
     if let Some(refusal) = ambiguous_url(&settings.url) {
         return Err(Refusal::failed(refusal));
@@ -181,24 +182,11 @@ fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
 /// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
 /// lines. The refusal shows the url with everything between `://` and its last `@` cut, never the
 /// credential. A url that does not parse, or has no `@` after its host, is not ambiguous here.
+/// The words and the cut are the SDK's (`sdk::url::ambiguous_url`); the parse is this plugin's own
+/// WHATWG reader, the one its target is dialled by.
 pub fn ambiguous_url(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
-    if !parsed[url::Position::BeforePath..].contains('@') {
-        return None;
-    }
-    let shown = match url.split_once("://") {
-        Some((scheme, rest)) => match rest.rfind('@') {
-            Some(at) => format!("{scheme}://***@{}", &rest[at + 1..]),
-            None => url.to_string(),
-        },
-        None => url.to_string(),
-    };
-    Some(format!(
-        "settings: url `{shown}` is ambiguous: it has an `@` after its host, so what comes before \
-         that `@` would be read as the host and path, not as a credential. Percent-encode a `/`, \
-         `?` or `#` inside the credential (`%2F`, `%3F`, `%23`), or write an `@` meant for the path \
-         as `%40`"
-    ))
+    sdk_url::ambiguous_url(url, &parsed[url::Position::BeforePath..])
 }
 
 /// One opened instance.
@@ -413,35 +401,19 @@ fn append(fields: &mut Vec<(Vec<u8>, Vec<u8>)>, name: &[u8], value: &[u8]) {
 /// username that is not leaves no field at all; a password that is not is left out), and, when
 /// either is set, the value is `Basic ` and the padded standard base64 of `{username}:` followed by
 /// the password, if any. The host's connector drops the userinfo from the target the `url` setting
-/// gives the need.
+/// gives the need. The decoding and the encoding are the SDK's (`sdk::url::basic_authorization`,
+/// read as [`Userinfo::Utf8`], reqwest 0.12's reading for 1.5.5); the parse is this plugin's own.
 pub fn basic_authorization(url: &str) -> Option<Vec<u8>> {
     let u = url::Url::parse(url).ok()?;
     if !u.has_authority() {
         return None;
     }
-    let username = String::from_utf8(percent_decode(u.username().as_bytes())).ok()?;
-    let password = u
-        .password()
-        .and_then(|p| String::from_utf8(percent_decode(p.as_bytes())).ok());
-    if username.is_empty() && password.is_none() {
-        return None;
-    }
-    let mut credentials = format!("{username}:").into_bytes();
-    if let Some(p) = password {
-        credentials.extend_from_slice(p.as_bytes());
-    }
-    let mut value = b"Basic ".to_vec();
-    value.extend_from_slice(base64(&credentials).as_bytes());
-    Some(value)
+    sdk_url::basic_authorization(u.username(), u.password(), Userinfo::Utf8).map(String::into_bytes)
 }
 
-/// `%XX` (two hex digits, either case) decoded to its byte; any other byte, a `%` not followed by
-/// two hex digits included, kept as it is: the `percent-encoding` crate's `percent_decode`.
-fn percent_decode(s: &[u8]) -> Vec<u8> {
-    percent_encoding::percent_decode(s).collect()
-}
-
-/// The standard base64 alphabet, padded: the `base64` crate's `STANDARD` engine.
+/// The standard base64 alphabet, padded: the `base64` crate's `STANDARD` engine, the encoding
+/// `sdk::url::basic_authorization` writes; kept for the tests' RFC 4648 vectors.
+#[cfg(test)]
 fn base64(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(bytes)

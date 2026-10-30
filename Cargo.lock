@@ -261,7 +261,6 @@ version = "1.6.0"
 dependencies = [
  "base64 0.22.1",
  "busbar-contract",
- "percent-encoding",
  "serde",
  "serde_json",
  "tracing",
