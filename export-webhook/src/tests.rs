@@ -1698,3 +1698,19 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
         }
     }
 }
+
+/// RED before: the 7070 scheme rule read the text before `://`, so a url the parser reads as
+/// `https` but written without slashes (`https:10.0.0.5/in`) was worded as the scheme rule. The rule
+/// follows the parsed scheme.
+#[test]
+fn the_7070_scheme_rule_follows_the_parsed_scheme() {
+    let refused = ConnFailure::Refused("destination refused".into());
+    for url in ["https:10.0.0.5/in", "https:/10.0.0.5/in", "HTTPS:\\\\10.0.0.5\\in"] {
+        assert_eq!(url::Url::parse(url).expect(url).scheme(), "https", "{url}");
+        let words = refusal_words(Some(url), &refused);
+        assert!(words.contains("(SSRF guard)"), "{url}: {words}");
+        assert!(!words.contains("must be an https://"), "{url}: {words}");
+    }
+    let words = refusal_words(Some("http:10.0.0.5/in"), &refused);
+    assert!(words.contains("must be an https://"), "{words}");
+}
