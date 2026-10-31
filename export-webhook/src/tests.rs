@@ -501,7 +501,7 @@ fn validation_errors_mask_the_targets_userinfo() {
         ("https://u:s3cret@h.example/x", "https://***@h.example/x"),
         ("https://:s3cret@h.example/x", "https://***@h.example/x"),
         ("https://s3cret@h.example/x", "https://***@h.example/x"),
-        ("https://u:s3cret@/x", "https://***@/x"),
+        ("https://u:s3cret@/x", "https:***"),
     ] {
         let instances = [(
             "w".to_string(),
@@ -974,7 +974,7 @@ fn the_log_target_names_only_scheme_host_and_port() {
         log_target("https://u:p@a.example/s/T/B/X?k=v#f"),
         "https://***@a.example/***?***"
     );
-    assert_eq!(log_target("https://u:p@/x"), "https://***@/***");
+    assert_eq!(log_target("https://u:p@/x"), "https:***");
     assert_eq!(log_target("not a url"), "***");
 }
 
@@ -1183,7 +1183,12 @@ fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
             json!({"url": "https://u:p@siem.example/in", "delivery_timeout_secs": 5}),
             "{name:?}: {value:?}"
         );
-        assert_eq!(m.report, vec![REMOVED_AUTH_HEADER.to_string()]);
+        let want = if is_framing(name) {
+            removed_framing_header(name)
+        } else {
+            REMOVED_AUTH_HEADER.to_string()
+        };
+        assert_eq!(m.report, vec![want]);
         assert!(m.needs.is_empty());
         assert!(!auth_header_refused(&m.settings));
         assert!(Webhook::validate(m.settings.to_string().as_bytes()).is_ok());
@@ -1363,7 +1368,6 @@ fn open_and_refresh_refuse_an_auth_header_that_cannot_be_sent() {
 /// `open`, whatever their case.
 #[test]
 fn a_framing_or_connection_header_is_refused() {
-    let words = "settings: `auth_header` cannot be sent as an HTTP header";
     for name in [
         "content-length",
         "Transfer-Encoding",
@@ -1375,12 +1379,13 @@ fn a_framing_or_connection_header_is_refused() {
         "keep-alive",
         "proxy-connection",
     ] {
+        let words = framing_words(name);
         let s = json!({"url": "https://a.example/", "auth_header": {"name": name, "value": "1"}});
         let lines = check(CheckPhase::Instances, &[("w".to_string(), s.clone())]);
         assert_eq!(lines.len(), 1, "{name}: {lines:?}");
         assert!(lines[0].contains("settings.auth_header"), "{}", lines[0]);
         let r = Webhook::open(s.to_string().as_bytes(), &[], 1).expect_err(name);
-        assert_eq!(r.text(), Some(words), "{name}");
+        assert_eq!(r.text(), Some(words.as_str()), "{name}");
     }
 }
 
@@ -1632,8 +1637,8 @@ fn an_unparsable_url_with_an_at_after_its_host_is_ambiguous() {
     assert!(ambiguous_url("https://svc:pa/ss/siem.example/in").is_none());
 }
 
-/// The ambiguous-url refusal shows the target as the log lines do: a webhook's path and query are
-/// often its secret, so they are `/***` and `?***`, the host kept.
+/// The ambiguous-url refusal shows only `<scheme>:***`: the parser's host of an ambiguous url is the
+/// front of its credential, and a webhook's path and query are often its secret.
 #[test]
 fn the_ambiguous_url_refusal_never_echoes_the_path_or_query() {
     for url in [
@@ -1644,8 +1649,10 @@ fn the_ambiguous_url_refusal_never_echoes_the_path_or_query() {
         for canary in ["CANARYPATH", "CANARYQUERY", "tok", "pa/ss"] {
             assert!(!refusal.contains(canary), "{canary}: {refusal}");
         }
-        assert!(refusal.contains("***@siem.example"), "{refusal}");
-        assert!(refusal.contains("/***"), "{refusal}");
+        assert!(
+            refusal.contains("url `https:***` is ambiguous"),
+            "{refusal}"
+        );
         assert!(refusal.contains("is ambiguous"), "{refusal}");
     }
 }
