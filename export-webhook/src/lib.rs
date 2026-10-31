@@ -635,28 +635,40 @@ fn base64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-/// BUSBAR-7070's words for a refused target: one that does not parse is an invalid URL; one whose
-/// parsed scheme is not `https` (the parser lower-cases it and skips leading controls and spaces) is
-/// the scheme rule; any other refusal of a parseable `https://` target is worded as the destination guard (the
+/// BUSBAR-7070's words for a refused target, 1.5.5's: a target whose raw text is not an `https://`
+/// URL is the scheme rule ([`is_https`]); one that does not parse is an invalid URL; any other refusal of a parseable `https://` target is worded as the destination guard (the
 /// connector gives one text for every target refusal, so nothing tells them apart). Userinfo is
 /// masked. A host that gave no verdict, a need the plugin never declared ([`undeclared`]), or any
 /// failure that is not a refusal, is said in the host's words, scrubbed of the target's parts.
 pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
     match (url, refused) {
+        (Some(u), ConnFailure::Refused(_)) if !undeclared(refused) && !is_https(u) => format!(
+            "observability.request_log_webhook_url must be an https:// URL (got '{}')",
+            shown_target(u)
+        ),
         (Some(u), ConnFailure::Refused(_)) if !undeclared(refused) => match url::Url::parse(u) {
             Err(e) => format!("observability.request_log_webhook_url is not a valid URL: {e}"),
-            Ok(parsed) if parsed.scheme() != "https" => format!(
-                "observability.request_log_webhook_url must be an https:// URL (got '{}')",
-                log_target(u)
-            ),
             Ok(_) => format!(
                 "observability.request_log_webhook_url must not target a loopback/link-local/\
                  private/CGNAT/cloud-metadata host (SSRF guard); got '{}'",
-                log_target(u)
+                shown_target(u)
             ),
         },
         (Some(u), _) => scrub(&refused.to_string(), u, None),
         (None, _) => refused.to_string(),
+    }
+}
+
+/// How a refusal or check line names the target `url`: a url 1.5.5 accepted, one that parses with no
+/// `@` after its host and is written with `://`, is echoed as 1.5.5's `mask_url` did (userinfo
+/// masked, the rest as written). Any other (ambiguous, unparseable with an `@`, or written without
+/// its slashes, which `mask_url` cannot read) takes the masked forms of [`log_target`].
+fn shown_target(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(u) if !u[url::Position::BeforePath..].contains('@') && url.contains("://") => {
+            mask_url(url)
+        }
+        _ => log_target(url),
     }
 }
 
@@ -667,6 +679,17 @@ pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
 /// core.
 fn undeclared(refused: &ConnFailure) -> bool {
     matches!(refused, ConnFailure::Refused(t) if t.starts_with(busbar_contract::conn::ConnError::UndeclaredNeed.text()))
+}
+
+/// `url` names the `https` scheme, read without case and judged on the raw text before any parse, as
+/// 1.5.5 did.
+///
+/// Leading C0 controls and spaces are skipped first, as the WHATWG URL parser skips them, so the
+/// scheme is the one the parser would read.
+fn is_https(url: &str) -> bool {
+    url.trim_start_matches(|c: char| c <= ' ')
+        .split_once("://")
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
 }
 
 /// What became of one line: nothing to say for a 2xx; BUSBAR-7071 for any other status,
@@ -746,7 +769,7 @@ fn instance_checks(parsed: &[(usize, Settings)], errors: &mut Vec<String>) {
             errors.push(format!(
                 "the `module: request-log-webhook` export instance targeting '{}' (#{i}): {} — \
                  remove the header",
-                log_target(&w.url),
+                shown_target(&w.url),
                 framing_words(&h.name)
             ));
         } else if let Some(h) = w.auth_header.as_ref().filter(|h| !header_builds(h)) {
@@ -756,7 +779,7 @@ fn instance_checks(parsed: &[(usize, Settings)], errors: &mut Vec<String>) {
                  (name {:?}: the name must be a non-empty RFC 9110 token, and the value may hold \
                  no control byte other than tab); 1.5.5 left such a header out and sent the log \
                  without it — fix or remove the header",
-                log_target(&w.url),
+                shown_target(&w.url),
                 h.name
             ));
         }
@@ -766,7 +789,7 @@ fn instance_checks(parsed: &[(usize, Settings)], errors: &mut Vec<String>) {
                  settings.delivery_timeout_secs: {}, above the {MAX_DURATION_SECS}-second (30-year) \
                  ceiling every duration is bounded by — a delivery deadline that far out overflows \
                  the clock",
-                log_target(&w.url),
+                shown_target(&w.url),
                 w.delivery_timeout_secs
             ));
         }
@@ -775,7 +798,7 @@ fn instance_checks(parsed: &[(usize, Settings)], errors: &mut Vec<String>) {
                 "the `module: request-log-webhook` export instance targeting '{}' (#{i}) sets \
                  settings.delivery_timeout_secs: 0, which would abort every delivery — it must be \
                  >= 1",
-                log_target(&w.url)
+                shown_target(&w.url)
             ));
         }
     }

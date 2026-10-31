@@ -1766,10 +1766,16 @@ fn a_framing_auth_header_name_is_refused_in_true_words() {
 /// `admin`. Only `http` and `https` are shown; any other is `***`.
 #[test]
 fn an_ambiguous_echo_shows_only_an_http_or_https_scheme() {
-    for url in ["admin:secret@host/x", "ftp:svc-token@host/x?k=SECRET"] {
+    for url in ["admin:secret@host/x", "ftp:svc/tok@host/x?k=SECRET"] {
         let refusal = ambiguous_url(url).expect(url);
-        assert!(refusal.contains("url `***` is ambiguous"), "{url}: {refusal}");
-        assert!(!refusal.contains("admin") && !refusal.contains("ftp"), "{refusal}");
+        assert!(
+            refusal.contains("url `***` is ambiguous"),
+            "{url}: {refusal}"
+        );
+        assert!(
+            !refusal.contains("admin") && !refusal.contains("ftp"),
+            "{refusal}"
+        );
         assert_eq!(log_target(url), "***", "{url}");
     }
     assert!(ambiguous_url("HTTP:tok/en@host/x")
