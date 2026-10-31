@@ -1714,3 +1714,40 @@ fn the_7070_scheme_rule_follows_the_parsed_scheme() {
     let words = refusal_words(Some("http:10.0.0.5/in"), &refused);
     assert!(words.contains("must be an https://"), "{words}");
 }
+
+/// RED before: a framing or connection field named as the auth header was refused as "not a valid
+/// HTTP header" (open, validate, check) and the migration said the same of it, though the name is a
+/// valid header: the http framer states these fields itself. Each says so.
+#[test]
+fn a_framing_auth_header_name_is_refused_in_true_words() {
+    for name in ["Host", "content-length", "Transfer-Encoding", "proxy-connection"] {
+        let say = format!(
+            "settings.auth_header.name `{name}` is a framing/connection field the http framer \
+             states itself; 1.6.0 does not send it"
+        );
+        let s = json!({"url": "https://a.example/", "auth_header": {"name": name, "value": "1"}});
+        let bytes = s.to_string();
+        assert_eq!(
+            Webhook::open(bytes.as_bytes(), &[], 1).expect_err(name).text(),
+            Some(say.as_str()),
+            "{name}"
+        );
+        assert_eq!(
+            Webhook::validate(bytes.as_bytes()).expect_err(name).text(),
+            Some(say.as_str()),
+            "{name}"
+        );
+        let lines = check(CheckPhase::Instances, &[("w".to_string(), s.clone())]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains(&say), "{name}: {}", lines[0]);
+        assert!(!lines[0].contains("not a valid"), "{name}: {}", lines[0]);
+        let m = migrated(s);
+        assert_eq!(m.report.len(), 1, "{name}");
+        assert!(m.report[0].contains(&say), "{name}: {}", m.report[0]);
+        assert!(!m.report[0].contains("not a valid"), "{name}: {}", m.report[0]);
+    }
+    // A name that is no token keeps the generic words.
+    let bad = json!({"url": "https://a.example/", "auth_header": {"name": "Bad Name", "value": "1"}});
+    let m = migrated(bad);
+    assert_eq!(m.report, vec![REMOVED_AUTH_HEADER.to_string()]);
+}
