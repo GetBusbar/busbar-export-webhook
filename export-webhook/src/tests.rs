@@ -91,14 +91,14 @@ fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
     assert_eq!(
         one(json!({"url": "https://a/b", "delivery_timeout_secs": 0})),
         vec![
-            "the `module: request-log-webhook` export instance targeting 'https://a/b' (#0) sets \
+            "the `module: request-log-webhook` export instance targeting 'https://a/***' (#0) sets \
              settings.delivery_timeout_secs: 0, which would abort every delivery — it must be >= 1"
         ]
     );
     assert_eq!(
         one(json!({"url": "https://a/b", "delivery_timeout_secs": u64::MAX})),
         vec![format!(
-            "the `module: request-log-webhook` export instance targeting 'https://a/b' (#0) sets \
+            "the `module: request-log-webhook` export instance targeting 'https://a/***' (#0) sets \
              settings.delivery_timeout_secs: {}, above the 946080000-second (30-year) ceiling \
              every duration is bounded by — a delivery deadline that far out overflows the clock",
             u64::MAX
@@ -118,7 +118,7 @@ fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
     let mut two = check(CheckPhase::Limits, &two_instances);
     two.extend(check(CheckPhase::Instances, &two_instances));
     assert_eq!(two.len(), 1, "{two:?}");
-    assert!(two[0].contains("'https://b/' (#1)"), "{two:?}");
+    assert!(two[0].contains("'https://b' (#1)"), "{two:?}");
     assert!(check(CheckPhase::Limits, &[]).is_empty());
     // Each phase answers only its own lines: the deadline is not a limit, the bound not an
     // instance's own.
@@ -382,11 +382,11 @@ fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     let refused = ConnFailure::Refused("destination refused".into());
     assert_eq!(
         refusal_words(Some("http://127.0.0.1:4000/sidecar"), &refused),
-        "observability.request_log_webhook_url must be an https:// URL (got 'http://127.0.0.1:4000/sidecar')"
+        "observability.request_log_webhook_url must be an https:// URL (got 'http://127.0.0.1:4000/***')"
     );
     assert_eq!(
         refusal_words(Some("HTTP://u:p@siem.example/in"), &refused),
-        "observability.request_log_webhook_url must be an https:// URL (got 'HTTP://***@siem.example/in')"
+        "observability.request_log_webhook_url must be an https:// URL (got 'http://***@siem.example/***')"
     );
     // RED (Q128 export-webhook LOW, src/lib.rs:391-403): 1.5.5 named the other two refusals on this
     // path in its own words too (v1.5.5 observability.rs validate_webhook_url): a URL that does not
@@ -398,7 +398,7 @@ fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     assert_eq!(
         refusal_words(Some("HTTPS://u:p@169.254.169.254/in"), &refused),
         "observability.request_log_webhook_url must not target a loopback/link-local/private/CGNAT/\
-         cloud-metadata host (SSRF guard); got 'HTTPS://***@169.254.169.254/in'"
+         cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/***'"
     );
     assert_eq!(
         refusal_words(Some("http://siem.example/in"), &ConnFailure::Unarmed),
@@ -498,10 +498,10 @@ fn a_catalogue_action_cites_only_declared_metrics() {
 #[test]
 fn validation_errors_mask_the_targets_userinfo() {
     for (url, shown) in [
-        ("https://u:s3cret@h.example/x", "https://***@h.example/x"),
-        ("https://:s3cret@h.example/x", "https://***@h.example/x"),
-        ("https://s3cret@h.example/x", "https://***@h.example/x"),
-        ("https://u:s3cret@/x", "https://***@/x"),
+        ("https://u:s3cret@h.example/x", "https://***@h.example/***"),
+        ("https://:s3cret@h.example/x", "https://***@h.example/***"),
+        ("https://s3cret@h.example/x", "https://***@h.example/***"),
+        ("https://u:s3cret@/x", "https:***"),
     ] {
         let instances = [(
             "w".to_string(),
@@ -555,12 +555,12 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
         (
             "HTTP://u:s3cret@siem.example/in",
             "observability.request_log_webhook_url must be an https:// URL (got \
-             'HTTP://***@siem.example/in'); disabling this webhook exporter",
+             'http://***@siem.example/***'); disabling this webhook exporter",
         ),
         (
             "https://u:s3cret@169.254.169.254/in",
             "observability.request_log_webhook_url must not target a loopback/link-local/private/\
-             CGNAT/cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/in'; \
+             CGNAT/cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/***'; \
              disabling this webhook exporter",
         ),
     ] {
@@ -579,7 +579,7 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
         lines(json!({"url": url, "auth_header": {"name": "Bad Name", "value": "Bearer s3cret"}})),
         vec![
             "the `module: request-log-webhook` export instance targeting \
-             'https://***@siem.example/in' (#0) sets settings.auth_header with a name or value \
+             'https://***@siem.example/***' (#0) sets settings.auth_header with a name or value \
              that is not a valid HTTP header (name \"Bad Name\": the name must be a non-empty RFC \
              9110 token, and the value may hold no control byte other than tab); 1.5.5 left such a \
              header out and sent the log without it — fix or remove the header"
@@ -590,7 +590,7 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
         lines(json!({"url": url, "delivery_timeout_secs": 0})),
         vec![
             "the `module: request-log-webhook` export instance targeting \
-             'https://***@siem.example/in' (#0) sets settings.delivery_timeout_secs: 0, which \
+             'https://***@siem.example/***' (#0) sets settings.delivery_timeout_secs: 0, which \
              would abort every delivery — it must be >= 1"
                 .to_string()
         ]
@@ -599,7 +599,7 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
         lines(json!({"url": url, "delivery_timeout_secs": u64::MAX})),
         vec![
             "the `module: request-log-webhook` export instance targeting \
-             'https://***@siem.example/in' (#0) sets settings.delivery_timeout_secs: \
+             'https://***@siem.example/***' (#0) sets settings.delivery_timeout_secs: \
              18446744073709551615, above the 946080000-second (30-year) ceiling every duration \
              is bounded by — a delivery deadline that far out overflows the clock"
                 .to_string()
@@ -974,7 +974,7 @@ fn the_log_target_names_only_scheme_host_and_port() {
         log_target("https://u:p@a.example/s/T/B/X?k=v#f"),
         "https://***@a.example/***?***"
     );
-    assert_eq!(log_target("https://u:p@/x"), "https://***@/***");
+    assert_eq!(log_target("https://u:p@/x"), "https:***");
     assert_eq!(log_target("not a url"), "***");
 }
 
@@ -1088,7 +1088,7 @@ fn an_auth_header_that_cannot_be_built_is_refused_at_validation() {
         let lines = check(CheckPhase::Instances, &instances);
         assert_eq!(lines.len(), 1, "{name:?}: {lines:?}");
         assert!(lines[0].contains("settings.auth_header"), "{}", lines[0]);
-        assert!(lines[0].contains("https://a.example/"), "{}", lines[0]);
+        assert!(lines[0].contains("https://a.example"), "{}", lines[0]);
         assert!(
             !lines[0].contains("s3cret"),
             "the value leaked: {}",
@@ -1183,7 +1183,12 @@ fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
             json!({"url": "https://u:p@siem.example/in", "delivery_timeout_secs": 5}),
             "{name:?}: {value:?}"
         );
-        assert_eq!(m.report, vec![REMOVED_AUTH_HEADER.to_string()]);
+        let want = if is_framing(name) {
+            removed_framing_header(name)
+        } else {
+            REMOVED_AUTH_HEADER.to_string()
+        };
+        assert_eq!(m.report, vec![want]);
         assert!(m.needs.is_empty());
         assert!(!auth_header_refused(&m.settings));
         assert!(Webhook::validate(m.settings.to_string().as_bytes()).is_ok());
@@ -1363,7 +1368,6 @@ fn open_and_refresh_refuse_an_auth_header_that_cannot_be_sent() {
 /// `open`, whatever their case.
 #[test]
 fn a_framing_or_connection_header_is_refused() {
-    let words = "settings: `auth_header` cannot be sent as an HTTP header";
     for name in [
         "content-length",
         "Transfer-Encoding",
@@ -1375,12 +1379,13 @@ fn a_framing_or_connection_header_is_refused() {
         "keep-alive",
         "proxy-connection",
     ] {
+        let words = framing_words(name);
         let s = json!({"url": "https://a.example/", "auth_header": {"name": name, "value": "1"}});
         let lines = check(CheckPhase::Instances, &[("w".to_string(), s.clone())]);
         assert_eq!(lines.len(), 1, "{name}: {lines:?}");
         assert!(lines[0].contains("settings.auth_header"), "{}", lines[0]);
         let r = Webhook::open(s.to_string().as_bytes(), &[], 1).expect_err(name);
-        assert_eq!(r.text(), Some(words), "{name}");
+        assert_eq!(r.text(), Some(words.as_str()), "{name}");
     }
 }
 
@@ -1632,8 +1637,8 @@ fn an_unparsable_url_with_an_at_after_its_host_is_ambiguous() {
     assert!(ambiguous_url("https://svc:pa/ss/siem.example/in").is_none());
 }
 
-/// The ambiguous-url refusal shows the target as the log lines do: a webhook's path and query are
-/// often its secret, so they are `/***` and `?***`, the host kept.
+/// The ambiguous-url refusal shows only `<scheme>:***`: the parser's host of an ambiguous url is the
+/// front of its credential, and a webhook's path and query are often its secret.
 #[test]
 fn the_ambiguous_url_refusal_never_echoes_the_path_or_query() {
     for url in [
@@ -1644,8 +1649,10 @@ fn the_ambiguous_url_refusal_never_echoes_the_path_or_query() {
         for canary in ["CANARYPATH", "CANARYQUERY", "tok", "pa/ss"] {
             assert!(!refusal.contains(canary), "{canary}: {refusal}");
         }
-        assert!(refusal.contains("***@siem.example"), "{refusal}");
-        assert!(refusal.contains("/***"), "{refusal}");
+        assert!(
+            refusal.contains("url `https:***` is ambiguous"),
+            "{refusal}"
+        );
         assert!(refusal.contains("is ambiguous"), "{refusal}");
     }
 }
@@ -1658,7 +1665,10 @@ fn the_ambiguous_url_refusal_never_echoes_the_path_or_query() {
 fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
     let refused = ConnFailure::Refused("destination refused".into());
     for (url, secrets) in [
-        ("https:user:pass@host/x?k=SECRET", &["user", "pass", "SECRET"][..]),
+        (
+            "https:user:pass@host/x?k=SECRET",
+            &["user", "pass", "SECRET"][..],
+        ),
         ("https:svc-token/abc@host/x", &["svc-token", "abc"][..]),
         ("https:svc:pa/ss@host/x", &["svc:", "pa/ss"][..]),
         (
@@ -1667,13 +1677,16 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
         ),
         ("https://svc:pa/ss@host/x", &["svc:", "pa/ss"][..]),
         ("http:svc-token/abc@host/x", &["svc-token", "abc"][..]),
-        ("ftp:svc-token@host/x?k=SECRET", &["svc-token", "SECRET"][..]),
-        ("https://bad host:99999/x@y?k=SECRET", &["SECRET", "bad host"][..]),
+        (
+            "ftp:svc-token@host/x?k=SECRET",
+            &["svc-token", "SECRET"][..],
+        ),
+        (
+            "https://bad host:99999/x@y?k=SECRET",
+            &["SECRET", "bad host"][..],
+        ),
     ] {
-        let mut lines = vec![
-            refusal_words(Some(url), &refused),
-            log_target(url),
-        ];
+        let mut lines = vec![refusal_words(Some(url), &refused), log_target(url)];
         let settings = json!({ "url": url }).to_string();
         let verdict = Webhook::validate(settings.as_bytes());
         if let Err(r) = &verdict {
@@ -1705,7 +1718,11 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
 #[test]
 fn the_7070_scheme_rule_follows_the_parsed_scheme() {
     let refused = ConnFailure::Refused("destination refused".into());
-    for url in ["https:10.0.0.5/in", "https:/10.0.0.5/in", "HTTPS:\\\\10.0.0.5\\in"] {
+    for url in [
+        "https:10.0.0.5/in",
+        "https:/10.0.0.5/in",
+        "HTTPS:\\\\10.0.0.5\\in",
+    ] {
         assert_eq!(url::Url::parse(url).expect(url).scheme(), "https", "{url}");
         let words = refusal_words(Some(url), &refused);
         assert!(words.contains("(SSRF guard)"), "{url}: {words}");
@@ -1720,7 +1737,12 @@ fn the_7070_scheme_rule_follows_the_parsed_scheme() {
 /// valid header: the http framer states these fields itself. Each says so.
 #[test]
 fn a_framing_auth_header_name_is_refused_in_true_words() {
-    for name in ["Host", "content-length", "Transfer-Encoding", "proxy-connection"] {
+    for name in [
+        "Host",
+        "content-length",
+        "Transfer-Encoding",
+        "proxy-connection",
+    ] {
         let say = format!(
             "settings.auth_header.name `{name}` is a framing/connection field the http framer \
              states itself; 1.6.0 does not send it"
@@ -1728,7 +1750,9 @@ fn a_framing_auth_header_name_is_refused_in_true_words() {
         let s = json!({"url": "https://a.example/", "auth_header": {"name": name, "value": "1"}});
         let bytes = s.to_string();
         assert_eq!(
-            Webhook::open(bytes.as_bytes(), &[], 1).expect_err(name).text(),
+            Webhook::open(bytes.as_bytes(), &[], 1)
+                .expect_err(name)
+                .text(),
             Some(say.as_str()),
             "{name}"
         );
@@ -1744,10 +1768,15 @@ fn a_framing_auth_header_name_is_refused_in_true_words() {
         let m = migrated(s);
         assert_eq!(m.report.len(), 1, "{name}");
         assert!(m.report[0].contains(&say), "{name}: {}", m.report[0]);
-        assert!(!m.report[0].contains("not a valid"), "{name}: {}", m.report[0]);
+        assert!(
+            !m.report[0].contains("not a valid"),
+            "{name}: {}",
+            m.report[0]
+        );
     }
     // A name that is no token keeps the generic words.
-    let bad = json!({"url": "https://a.example/", "auth_header": {"name": "Bad Name", "value": "1"}});
+    let bad =
+        json!({"url": "https://a.example/", "auth_header": {"name": "Bad Name", "value": "1"}});
     let m = migrated(bad);
     assert_eq!(m.report, vec![REMOVED_AUTH_HEADER.to_string()]);
 }

@@ -171,6 +171,9 @@ fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
 /// never echoed.
 fn parse_to_run(settings: &[u8]) -> Result<Settings, Refusal> {
     let parsed = parse(settings)?;
+    if let Some(h) = parsed.auth_header.as_ref().filter(|h| is_framing(&h.name)) {
+        return Err(Refusal::failed(framing_words(&h.name)));
+    }
     if parsed
         .auth_header
         .as_ref()
@@ -187,24 +190,19 @@ fn parse_to_run(settings: &[u8]) -> Result<Settings, Refusal> {
 /// carries an `@` after its host — `https://tok/en@siem.example/…` or `https://u:123/x@siem.example/…`,
 /// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
 /// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
-/// lines. The refusal shows the url with everything between `://` and its last `@` cut, never the
-/// credential. A url that does not parse is read the same way by hand: the text after `://`, from
-/// its first `/`, `?` or `#`, is what a parser would take for the path (`https://svc:pa/ss@siem/…`
-/// fails on the port `pa`). A url with no `@` after its host is not ambiguous here.
-/// The words and the cut are the SDK's (`sdk::url::ambiguous_url`); the parse is this plugin's own
-/// WHATWG reader, the one its target is dialled by.
+/// lines. A url that does not parse and holds an `@` anywhere is refused the same way
+/// (`https:svc:pa/ss@siem/…` fails on the port `pa`). A parsed url with no `@` after its host is not
+/// ambiguous here. The refusal shows only `<scheme>:***` ([`redact::unparsed_target`]): the parser's
+/// host of an ambiguous url is the front of the credential, so no part of the text is echoed. The
+/// words are the SDK's (`sdk::url::ambiguous_url`); the parse is this plugin's own WHATWG reader,
+/// the one its target is dialled by.
 pub fn ambiguous_url(url: &str) -> Option<String> {
-    // The refusal names the target as the log lines do ([`log_target`]): the userinfo cut, a path
-    // `/***` and a query `?***`, for a webhook's path or query is often its secret.
-    let shown = log_target(&sdk_url::cut_userinfo(url, "***@"));
-    match url::Url::parse(url) {
-        Ok(parsed) => sdk_url::ambiguous_url(&shown, &parsed[url::Position::BeforePath..]),
-        Err(_) => {
-            let (_, rest) = url.split_once("://")?;
-            let tail = &rest[rest.find(['/', '?', '#'])?..];
-            sdk_url::ambiguous_url(&shown, tail)
-        }
-    }
+    let from_path = match url::Url::parse(url) {
+        Ok(parsed) => parsed[url::Position::BeforePath..].to_string(),
+        Err(_) if url.contains('@') => "@".to_string(),
+        Err(_) => return None,
+    };
+    sdk_url::ambiguous_url(&redact::unparsed_target(url), &from_path)
 }
 
 /// One opened instance.
@@ -555,9 +553,15 @@ fn cred(value: Vec<u8>, url: &str) -> Cred {
 }
 
 /// Whether the auth header can be sent: it is an HTTP header ([`header_is_http`]) and not one of
-/// the framing or connection fields, which the sink's own request owns and a configured one could
-/// use to desync the exchange (names compared without case).
+/// the framing or connection fields ([`is_framing`]).
 fn header_builds(h: &ExportAuthHeader) -> bool {
+    header_is_http(h) && !is_framing(&h.name)
+}
+
+/// Whether `name` is one of the framing or connection fields, which the sink's own request states
+/// itself (the http framer) and a configured one could use to desync the exchange (names compared
+/// without case).
+fn is_framing(name: &str) -> bool {
     const OWNED: [&str; 9] = [
         "content-length",
         "transfer-encoding",
@@ -569,7 +573,16 @@ fn header_builds(h: &ExportAuthHeader) -> bool {
         "keep-alive",
         "proxy-connection",
     ];
-    header_is_http(h) && !OWNED.iter().any(|n| h.name.eq_ignore_ascii_case(n))
+    OWNED.iter().any(|n| name.eq_ignore_ascii_case(n))
+}
+
+/// The truth about a framing or connection field named as the auth header: the name is a valid
+/// header, but the http framer states these fields itself and 1.6.0 does not send one.
+fn framing_words(name: &str) -> String {
+    format!(
+        "settings.auth_header.name `{name}` is a framing/connection field the http framer states \
+         itself; 1.6.0 does not send it"
+    )
 }
 
 /// Whether the auth header is a header 1.5.5 could build: `HeaderName::from_bytes` takes a name of 1
@@ -622,24 +635,24 @@ fn base64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-/// BUSBAR-7070's words for a refused target: a target that is not an `https://`
-/// URL is the scheme rule (the scheme read without case); one that does not parse is an invalid
-/// URL; any other refusal of a parseable `https://` target is worded as the destination guard (the
+/// BUSBAR-7070's words for a refused target: one that does not parse is an invalid URL; one whose
+/// parsed scheme is not `https` (the parser lower-cases it and skips leading controls and spaces) is
+/// the scheme rule; any other refusal of a parseable `https://` target is worded as the destination guard (the
 /// connector gives one text for every target refusal, so nothing tells them apart). Userinfo is
 /// masked. A host that gave no verdict, a need the plugin never declared ([`undeclared`]), or any
 /// failure that is not a refusal, is said in the host's words, scrubbed of the target's parts.
 pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
     match (url, refused) {
-        (Some(u), ConnFailure::Refused(_)) if !undeclared(refused) && !is_https(u) => format!(
-            "observability.request_log_webhook_url must be an https:// URL (got '{}')",
-            mask_url(u)
-        ),
         (Some(u), ConnFailure::Refused(_)) if !undeclared(refused) => match url::Url::parse(u) {
             Err(e) => format!("observability.request_log_webhook_url is not a valid URL: {e}"),
+            Ok(parsed) if parsed.scheme() != "https" => format!(
+                "observability.request_log_webhook_url must be an https:// URL (got '{}')",
+                log_target(u)
+            ),
             Ok(_) => format!(
                 "observability.request_log_webhook_url must not target a loopback/link-local/\
                  private/CGNAT/cloud-metadata host (SSRF guard); got '{}'",
-                mask_url(u)
+                log_target(u)
             ),
         },
         (Some(u), _) => scrub(&refused.to_string(), u, None),
@@ -654,16 +667,6 @@ pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
 /// core.
 fn undeclared(refused: &ConnFailure) -> bool {
     matches!(refused, ConnFailure::Refused(t) if t.starts_with(busbar_contract::conn::ConnError::UndeclaredNeed.text()))
-}
-
-/// `url` names the `https` scheme, read without case (RFC 3986).
-///
-/// Leading C0 controls and spaces are skipped first, as the WHATWG URL parser skips them, so the
-/// scheme is the one the parser would read.
-fn is_https(url: &str) -> bool {
-    url.trim_start_matches(|c: char| c <= ' ')
-        .split_once("://")
-        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
 }
 
 /// What became of one line: nothing to say for a 2xx; BUSBAR-7071 for any other status,
@@ -739,14 +742,21 @@ pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Ve
 /// Each instance's delivery deadline, numbered by its configured position.
 fn instance_checks(parsed: &[(usize, Settings)], errors: &mut Vec<String>) {
     for (i, w) in parsed {
-        if let Some(h) = w.auth_header.as_ref().filter(|h| !header_builds(h)) {
+        if let Some(h) = w.auth_header.as_ref().filter(|h| is_framing(&h.name)) {
+            errors.push(format!(
+                "the `module: request-log-webhook` export instance targeting '{}' (#{i}): {} — \
+                 remove the header",
+                log_target(&w.url),
+                framing_words(&h.name)
+            ));
+        } else if let Some(h) = w.auth_header.as_ref().filter(|h| !header_builds(h)) {
             errors.push(format!(
                 "the `module: request-log-webhook` export instance targeting '{}' (#{i}) sets \
                  settings.auth_header with a name or value that is not a valid HTTP header \
                  (name {:?}: the name must be a non-empty RFC 9110 token, and the value may hold \
                  no control byte other than tab); 1.5.5 left such a header out and sent the log \
                  without it — fix or remove the header",
-                mask_url(&w.url),
+                log_target(&w.url),
                 h.name
             ));
         }
@@ -756,7 +766,7 @@ fn instance_checks(parsed: &[(usize, Settings)], errors: &mut Vec<String>) {
                  settings.delivery_timeout_secs: {}, above the {MAX_DURATION_SECS}-second (30-year) \
                  ceiling every duration is bounded by — a delivery deadline that far out overflows \
                  the clock",
-                mask_url(&w.url),
+                log_target(&w.url),
                 w.delivery_timeout_secs
             ));
         }
@@ -765,16 +775,26 @@ fn instance_checks(parsed: &[(usize, Settings)], errors: &mut Vec<String>) {
                 "the `module: request-log-webhook` export instance targeting '{}' (#{i}) sets \
                  settings.delivery_timeout_secs: 0, which would abort every delivery — it must be \
                  >= 1",
-                mask_url(&w.url)
+                log_target(&w.url)
             ));
         }
     }
 }
 
 /// The migration's report line when it removes an `auth_header` 1.6.0 refuses.
-pub const REMOVED_AUTH_HEADER: &str = "removed settings.auth_header: 1.6.0 does not send it, as it \
-     cannot be sent as an HTTP header (its name or value is not a valid HTTP header, or its name is a framing or connection \
-     field such as Host or Content-Length), which 1.6.0 refuses at validation and open";
+pub const REMOVED_AUTH_HEADER: &str =
+    "removed settings.auth_header: 1.6.0 does not send it, as it \
+     cannot be sent as an HTTP header (its name or value is not a valid HTTP header), which 1.6.0 \
+     refuses at validation and open";
+
+/// The migration's report line when it removes an `auth_header` named for a framing or connection
+/// field, which the http framer states itself ([`framing_words`]).
+pub fn removed_framing_header(name: &str) -> String {
+    format!(
+        "removed {}, which 1.6.0 refuses at validation and open",
+        framing_words(name)
+    )
+}
 
 /// THE 1.5.5 UPGRADE (`busbar --migrate-config`; owner ruling 2026-10-27): this sink's own
 /// migration of its settings section, stated on the door as `migrate`.
@@ -794,12 +814,17 @@ impl Migrate for Migration {
         if !auth_header_unbuildable(&settings) {
             return Migrated::unchanged(settings);
         }
+        let framing = settings
+            .pointer("/auth_header/name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|n| is_framing(n))
+            .map(removed_framing_header);
         if let Some(section) = settings.as_object_mut() {
             section.remove("auth_header");
         }
         Migrated {
             settings,
-            report: vec![REMOVED_AUTH_HEADER.to_string()],
+            report: vec![framing.unwrap_or_else(|| REMOVED_AUTH_HEADER.to_string())],
             needs: Vec::new(),
         }
     }
