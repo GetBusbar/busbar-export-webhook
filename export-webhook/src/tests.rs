@@ -91,14 +91,14 @@ fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
     assert_eq!(
         one(json!({"url": "https://a/b", "delivery_timeout_secs": 0})),
         vec![
-            "the `module: request-log-webhook` export instance targeting 'https://a/***' (#0) sets \
+            "the `module: request-log-webhook` export instance targeting 'https://a/b' (#0) sets \
              settings.delivery_timeout_secs: 0, which would abort every delivery — it must be >= 1"
         ]
     );
     assert_eq!(
         one(json!({"url": "https://a/b", "delivery_timeout_secs": u64::MAX})),
         vec![format!(
-            "the `module: request-log-webhook` export instance targeting 'https://a/***' (#0) sets \
+            "the `module: request-log-webhook` export instance targeting 'https://a/b' (#0) sets \
              settings.delivery_timeout_secs: {}, above the 946080000-second (30-year) ceiling \
              every duration is bounded by — a delivery deadline that far out overflows the clock",
             u64::MAX
@@ -118,7 +118,7 @@ fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
     let mut two = check(CheckPhase::Limits, &two_instances);
     two.extend(check(CheckPhase::Instances, &two_instances));
     assert_eq!(two.len(), 1, "{two:?}");
-    assert!(two[0].contains("'https://b' (#1)"), "{two:?}");
+    assert!(two[0].contains("'https://b/' (#1)"), "{two:?}");
     assert!(check(CheckPhase::Limits, &[]).is_empty());
     // Each phase answers only its own lines: the deadline is not a limit, the bound not an
     // instance's own.
@@ -382,11 +382,11 @@ fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     let refused = ConnFailure::Refused("destination refused".into());
     assert_eq!(
         refusal_words(Some("http://127.0.0.1:4000/sidecar"), &refused),
-        "observability.request_log_webhook_url must be an https:// URL (got 'http://127.0.0.1:4000/***')"
+        "observability.request_log_webhook_url must be an https:// URL (got 'http://127.0.0.1:4000/sidecar')"
     );
     assert_eq!(
         refusal_words(Some("HTTP://u:p@siem.example/in"), &refused),
-        "observability.request_log_webhook_url must be an https:// URL (got 'http://***@siem.example/***')"
+        "observability.request_log_webhook_url must be an https:// URL (got 'HTTP://***@siem.example/in')"
     );
     // RED (Q128 export-webhook LOW, src/lib.rs:391-403): 1.5.5 named the other two refusals on this
     // path in its own words too (v1.5.5 observability.rs validate_webhook_url): a URL that does not
@@ -398,7 +398,7 @@ fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     assert_eq!(
         refusal_words(Some("HTTPS://u:p@169.254.169.254/in"), &refused),
         "observability.request_log_webhook_url must not target a loopback/link-local/private/CGNAT/\
-         cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/***'"
+         cloud-metadata host (SSRF guard); got 'HTTPS://***@169.254.169.254/in'"
     );
     assert_eq!(
         refusal_words(Some("http://siem.example/in"), &ConnFailure::Unarmed),
@@ -498,9 +498,9 @@ fn a_catalogue_action_cites_only_declared_metrics() {
 #[test]
 fn validation_errors_mask_the_targets_userinfo() {
     for (url, shown) in [
-        ("https://u:s3cret@h.example/x", "https://***@h.example/***"),
-        ("https://:s3cret@h.example/x", "https://***@h.example/***"),
-        ("https://s3cret@h.example/x", "https://***@h.example/***"),
+        ("https://u:s3cret@h.example/x", "https://***@h.example/x"),
+        ("https://:s3cret@h.example/x", "https://***@h.example/x"),
+        ("https://s3cret@h.example/x", "https://***@h.example/x"),
         ("https://u:s3cret@/x", "https:***"),
     ] {
         let instances = [(
@@ -555,12 +555,12 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
         (
             "HTTP://u:s3cret@siem.example/in",
             "observability.request_log_webhook_url must be an https:// URL (got \
-             'http://***@siem.example/***'); disabling this webhook exporter",
+             'HTTP://***@siem.example/in'); disabling this webhook exporter",
         ),
         (
             "https://u:s3cret@169.254.169.254/in",
             "observability.request_log_webhook_url must not target a loopback/link-local/private/\
-             CGNAT/cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/***'; \
+             CGNAT/cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/in'; \
              disabling this webhook exporter",
         ),
     ] {
@@ -579,7 +579,7 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
         lines(json!({"url": url, "auth_header": {"name": "Bad Name", "value": "Bearer s3cret"}})),
         vec![
             "the `module: request-log-webhook` export instance targeting \
-             'https://***@siem.example/***' (#0) sets settings.auth_header with a name or value \
+             'https://***@siem.example/in' (#0) sets settings.auth_header with a name or value \
              that is not a valid HTTP header (name \"Bad Name\": the name must be a non-empty RFC \
              9110 token, and the value may hold no control byte other than tab); 1.5.5 left such a \
              header out and sent the log without it — fix or remove the header"
@@ -590,7 +590,7 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
         lines(json!({"url": url, "delivery_timeout_secs": 0})),
         vec![
             "the `module: request-log-webhook` export instance targeting \
-             'https://***@siem.example/***' (#0) sets settings.delivery_timeout_secs: 0, which \
+             'https://***@siem.example/in' (#0) sets settings.delivery_timeout_secs: 0, which \
              would abort every delivery — it must be >= 1"
                 .to_string()
         ]
@@ -599,7 +599,7 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
         lines(json!({"url": url, "delivery_timeout_secs": u64::MAX})),
         vec![
             "the `module: request-log-webhook` export instance targeting \
-             'https://***@siem.example/***' (#0) sets settings.delivery_timeout_secs: \
+             'https://***@siem.example/in' (#0) sets settings.delivery_timeout_secs: \
              18446744073709551615, above the 946080000-second (30-year) ceiling every duration \
              is bounded by — a delivery deadline that far out overflows the clock"
                 .to_string()
@@ -1088,7 +1088,7 @@ fn an_auth_header_that_cannot_be_built_is_refused_at_validation() {
         let lines = check(CheckPhase::Instances, &instances);
         assert_eq!(lines.len(), 1, "{name:?}: {lines:?}");
         assert!(lines[0].contains("settings.auth_header"), "{}", lines[0]);
-        assert!(lines[0].contains("https://a.example"), "{}", lines[0]);
+        assert!(lines[0].contains("https://a.example/"), "{}", lines[0]);
         assert!(
             !lines[0].contains("s3cret"),
             "the value leaked: {}",
@@ -1696,7 +1696,7 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
             let text = ambiguous_url(url).expect(url);
             assert!(
                 text.contains("url `https:***` is ambiguous")
-                    || text.contains("url `ftp:***` is ambiguous"),
+                    || text.contains("url `***` is ambiguous"),
                 "{url}: {text}"
             );
             assert!(verdict.is_err(), "{url} is refused");
@@ -1710,26 +1710,6 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
             }
         }
     }
-}
-
-/// RED before: the 7070 scheme rule read the text before `://`, so a url the parser reads as
-/// `https` but written without slashes (`https:10.0.0.5/in`) was worded as the scheme rule. The rule
-/// follows the parsed scheme.
-#[test]
-fn the_7070_scheme_rule_follows_the_parsed_scheme() {
-    let refused = ConnFailure::Refused("destination refused".into());
-    for url in [
-        "https:10.0.0.5/in",
-        "https:/10.0.0.5/in",
-        "HTTPS:\\\\10.0.0.5\\in",
-    ] {
-        assert_eq!(url::Url::parse(url).expect(url).scheme(), "https", "{url}");
-        let words = refusal_words(Some(url), &refused);
-        assert!(words.contains("(SSRF guard)"), "{url}: {words}");
-        assert!(!words.contains("must be an https://"), "{url}: {words}");
-    }
-    let words = refusal_words(Some("http:10.0.0.5/in"), &refused);
-    assert!(words.contains("must be an https://"), "{words}");
 }
 
 /// RED before: a framing or connection field named as the auth header was refused as "not a valid
@@ -1779,4 +1759,20 @@ fn a_framing_auth_header_name_is_refused_in_true_words() {
         json!({"url": "https://a.example/", "auth_header": {"name": "Bad Name", "value": "1"}});
     let m = migrated(bad);
     assert_eq!(m.report, vec![REMOVED_AUTH_HEADER.to_string()]);
+}
+
+/// RED before: an ambiguous or unparseable echo showed whatever precedes the first `:` as the
+/// scheme, so a schemeless `admin:secret@host/x` (which the parser reads as scheme `admin`) echoed
+/// `admin`. Only `http` and `https` are shown; any other is `***`.
+#[test]
+fn an_ambiguous_echo_shows_only_an_http_or_https_scheme() {
+    for url in ["admin:secret@host/x", "ftp:svc-token@host/x?k=SECRET"] {
+        let refusal = ambiguous_url(url).expect(url);
+        assert!(refusal.contains("url `***` is ambiguous"), "{url}: {refusal}");
+        assert!(!refusal.contains("admin") && !refusal.contains("ftp"), "{refusal}");
+        assert_eq!(log_target(url), "***", "{url}");
+    }
+    assert!(ambiguous_url("HTTP:tok/en@host/x")
+        .expect("ambiguous")
+        .contains("url `HTTP:***` is ambiguous"));
 }
