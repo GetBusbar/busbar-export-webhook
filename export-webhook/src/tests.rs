@@ -1649,3 +1649,52 @@ fn the_ambiguous_url_refusal_never_echoes_the_path_or_query() {
         assert!(refusal.contains("is ambiguous"), "{refusal}");
     }
 }
+
+/// RED before (HX-SLASHLESS): a url written without its slashes, or one the parser rejects, was
+/// echoed by helpers that need `://` (`mask_url`, the by-hand ambiguity read). Any url text that
+/// does not parse and holds an `@` is refused as ambiguous, and no refusal, 7070 line, check line or
+/// shown target holds a part of any of these.
+#[test]
+fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
+    let refused = ConnFailure::Refused("destination refused".into());
+    for (url, secrets) in [
+        ("https:user:pass@host/x?k=SECRET", &["user", "pass", "SECRET"][..]),
+        ("https:svc-token/abc@host/x", &["svc-token", "abc"][..]),
+        ("https:svc:pa/ss@host/x", &["svc:", "pa/ss"][..]),
+        (
+            "https://h/hook?to=ops@corp.com&key=SECRET",
+            &["ops", "corp", "SECRET"][..],
+        ),
+        ("https://svc:pa/ss@host/x", &["svc:", "pa/ss"][..]),
+        ("http:svc-token/abc@host/x", &["svc-token", "abc"][..]),
+        ("ftp:svc-token@host/x?k=SECRET", &["svc-token", "SECRET"][..]),
+        ("https://bad host:99999/x@y?k=SECRET", &["SECRET", "bad host"][..]),
+    ] {
+        let mut lines = vec![
+            refusal_words(Some(url), &refused),
+            log_target(url),
+        ];
+        let settings = json!({ "url": url }).to_string();
+        let verdict = Webhook::validate(settings.as_bytes());
+        if let Err(r) = &verdict {
+            lines.push(r.text().expect("a refusal says why").to_string());
+        }
+        if url::Url::parse(url).is_err() {
+            let text = ambiguous_url(url).expect(url);
+            assert!(
+                text.contains("url `https:***` is ambiguous")
+                    || text.contains("url `ftp:***` is ambiguous"),
+                "{url}: {text}"
+            );
+            assert!(verdict.is_err(), "{url} is refused");
+        }
+        let instance = json!({ "url": url, "delivery_timeout_secs": 0,
+            "auth_header": {"name": "Bad Name", "value": "x"} });
+        lines.extend(check(CheckPhase::Instances, &[("w".to_string(), instance)]));
+        for line in &lines {
+            for s in secrets {
+                assert!(!line.contains(s), "{url}: `{s}` in {line}");
+            }
+        }
+    }
+}
