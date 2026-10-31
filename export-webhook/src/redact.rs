@@ -9,8 +9,9 @@
 //! ([`log_target`]), and any text that came from elsewhere is scrubbed of the target's parts
 //! ([`scrub`]) and of the settings' credential strings ([`settings_credentials`]).
 //!
-//! The refusal lines that name the target (BUSBAR-7070, the checks, the ambiguous-url refusal) name
-//! it as the log lines do ([`log_target`], built from the parsed url).
+//! The refusal lines that name the target (BUSBAR-7070, the delivery-deadline check) keep the path:
+//! only their userinfo and secret-looking query values are masked
+//! (`busbar_contract::abi::sdk::mask::mask_url`).
 
 use busbar_contract::abi::sdk::url as sdk_url;
 
@@ -18,17 +19,18 @@ use busbar_contract::abi::sdk::url as sdk_url;
 const REDACTED: &str = "***";
 
 /// `url` as a delivery log line names it: scheme, a masked userinfo, host and port. A path other
-/// than `/` becomes `/***` and a query `?***`; a fragment is dropped. A string that is not a URL
-/// keeps only its scheme ([`unparsed_target`]).
+/// than `/` becomes `/***` and a query `?***`; a fragment is dropped. A string that is not a URL keeps
+/// only what precedes its authority's end, the rest `/***`.
 pub fn log_target(url: &str) -> String {
     let Ok(u) = url::Url::parse(url) else {
-        return unparsed_target(url);
+        let masked = crate::mask_url(url);
+        let Some((scheme, rest)) = masked.split_once("://") else {
+            return REDACTED.to_string();
+        };
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let tail = if end < rest.len() { "/***" } else { "" };
+        return format!("{scheme}://{}{tail}", &rest[..end]);
     };
-    // An ambiguous url (an `@` after its host) is refused at the door; were one to get here, its
-    // parsed host is the front of a credential, so it shows as an unparsed one does.
-    if u[url::Position::BeforePath..].contains('@') {
-        return unparsed_target(url);
-    }
     let Some(host) = u.host_str() else {
         return format!("{}:{REDACTED}", u.scheme());
     };
@@ -47,17 +49,6 @@ pub fn log_target(url: &str) -> String {
         out.push_str("?***");
     }
     out
-}
-
-/// What a line shows of url text that does not parse: `<scheme>:***` when it opens with `http` or
-/// `https`, else `***` (any other word before a `:` may be a credential). Nothing after the scheme is shown: without a parse there is no telling credential
-/// from host.
-pub(crate) fn unparsed_target(url: &str) -> String {
-    let scheme = url
-        .split_once(':')
-        .map(|(s, _)| s)
-        .filter(|s| s.eq_ignore_ascii_case("http") || s.eq_ignore_ascii_case("https"));
-    scheme.map_or_else(|| REDACTED.to_string(), |s| format!("{s}:{REDACTED}"))
 }
 
 /// `text` (a host's failure words, say) with every part of `url` that can carry a credential
