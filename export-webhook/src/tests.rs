@@ -333,9 +333,9 @@ fn a_configured_auth_header_name_goes_lower_case_as_1_5_5_sent_it() {
 fn a_failed_delivery_raises_its_code_once() {
     let url = "https://user:pw@siem.example/in";
     let got = logged(|| {
-        report(url, reply(204));
-        report(url, reply(503));
-        report(url, Err(ConnFailure::Failed("timed out".into())));
+        report(url, None, reply(204));
+        report(url, None, reply(503));
+        report(url, None, Err(ConnFailure::Failed("timed out".into())));
     });
     let names = |e: &Event| {
         e.iter()
@@ -367,7 +367,7 @@ fn a_failed_delivery_raises_its_code_once() {
 #[test]
 fn the_success_boundary_is_200_to_299() {
     for (status, raises) in [(199u16, true), (200, false), (299, false), (300, true)] {
-        let got = logged(|| report("https://a.example/", reply(status)));
+        let got = logged(|| report("https://a.example/", None, reply(status)));
         assert_eq!(got.len(), usize::from(raises), "{status}: {got:?}");
     }
 }
@@ -943,9 +943,10 @@ fn a_mistyped_auth_header_never_reaches_the_refusal() {
 fn a_failed_delivery_never_logs_the_targets_path_query_or_the_hosts_echo_of_them() {
     let url = format!("https://hooks.example/services/T000/B000/{CANARY}?api_key={CANARY}x");
     let got = logged(|| {
-        report(&url, reply(503));
+        report(&url, None, reply(503));
         report(
             &url,
+            None,
             Err(ConnFailure::Failed(format!(
                 "error sending request for url ({url}): connection reset"
             ))),
@@ -1333,8 +1334,8 @@ fn a_formatted_prepared_or_webhook_carries_no_secret() {
 }
 
 /// W4 (lead-signed): `open` and `refresh` refuse an auth header that cannot be sent as an HTTP
-/// header, in fixed words that never echo the value; `validate`, which sees unresolved references,
-/// keeps its behaviour.
+/// header, in fixed words that never echo the value; `validate` refuses the same (KIND 1), except
+/// for an unresolved reference, which it cannot judge.
 #[test]
 fn open_and_refresh_refuse_an_auth_header_that_cannot_be_sent() {
     let words = "settings: `auth_header` cannot be sent as an HTTP header";
@@ -1349,8 +1350,13 @@ fn open_and_refresh_refuse_an_auth_header_that_cannot_be_sent() {
         .expect_err("refresh refuses");
     assert_eq!(r.text(), Some(words));
     assert_eq!(w.settings().auth_header, None, "the old settings stay");
-    // `validate` keeps its current behaviour.
-    assert!(Webhook::validate(bytes.as_bytes()).is_ok());
+    // `validate` refuses what `open` refuses.
+    assert_eq!(
+        Webhook::validate(bytes.as_bytes())
+            .expect_err("refused")
+            .text(),
+        Some(words)
+    );
 }
 
 /// W5 (lead-signed): framing and connection fields are not auth headers: refused at `check` and at
@@ -1575,4 +1581,71 @@ fn the_settings_schema_bounds_are_the_ones_check_enforces() {
     assert_eq!(p["delivery_timeout_secs"]["maximum"], MAX_DURATION_SECS);
     assert_eq!(p["max_inflight_deliveries"]["minimum"], 0);
     assert_eq!(p["max_inflight_deliveries"]["maximum"], MAX_PERMITS as u64);
+}
+
+/// KIND 1: `validate` refuses exactly what `open` refuses: an `auth_header` that cannot be sent as
+/// an HTTP header (a literal value with a newline), in the words `open` uses.
+#[test]
+fn validate_refuses_an_auth_header_that_open_refuses() {
+    let settings =
+        json!({"url": "https://a.example/", "auth_header": {"name": "Authorization", "value": "tok\n"}})
+            .to_string();
+    let opened = Webhook::open(settings.as_bytes(), &[], 1).expect_err("open refuses");
+    let validated = Webhook::validate(settings.as_bytes()).expect_err("validate refuses");
+    assert_eq!(validated.text(), opened.text());
+    assert!(!validated.text().unwrap().contains("tok"));
+}
+
+/// KIND 2: a host failure text echoing the request's credentials (the Basic value, its token, the
+/// `auth_header` value) logs none of them.
+#[test]
+fn a_failure_echoing_the_requests_credentials_logs_none_of_them() {
+    let url = "https://alice:s3cret@hooks.example/in";
+    let token = base64(b"alice:s3cret");
+    let header = "HDRSECRET9c1";
+    let got = logged(|| {
+        report(
+            url,
+            Some(header),
+            Err(ConnFailure::Failed(format!(
+                "echoed Authorization: Basic {token} and x-key: {header}"
+            ))),
+        );
+    });
+    let text = all_text(&got);
+    assert_eq!(got.len(), 1, "{got:?}");
+    for secret in [token.as_str(), "Basic ", header, "s3cret"] {
+        assert!(!text.contains(secret), "{secret}: {text}");
+    }
+}
+
+/// KIND 3 (D1): a URL that does not parse is read by hand: an `@` after its host is refused.
+#[test]
+fn an_unparsable_url_with_an_at_after_its_host_is_ambiguous() {
+    let url = "https://svc:pa/ss@siem.example/in";
+    assert!(url::Url::parse(url).is_err());
+    let refusal = ambiguous_url(url).expect("ambiguous");
+    assert!(refusal.contains("is ambiguous"), "{refusal}");
+    assert!(!refusal.contains("pa/ss"), "{refusal}");
+    let settings = json!({ "url": url }).to_string();
+    assert!(Webhook::validate(settings.as_bytes()).is_err());
+    assert!(ambiguous_url("https://svc:pa/ss/siem.example/in").is_none());
+}
+
+/// The ambiguous-url refusal shows the target as the log lines do: a webhook's path and query are
+/// often its secret, so they are `/***` and `?***`, the host kept.
+#[test]
+fn the_ambiguous_url_refusal_never_echoes_the_path_or_query() {
+    for url in [
+        "https://tok/en@siem.example/services/CANARYPATH?key=CANARYQUERY",
+        "https://svc:pa/ss@siem.example:8443/services/CANARYPATH?key=CANARYQUERY",
+    ] {
+        let refusal = ambiguous_url(url).expect(url);
+        for canary in ["CANARYPATH", "CANARYQUERY", "tok", "pa/ss"] {
+            assert!(!refusal.contains(canary), "{canary}: {refusal}");
+        }
+        assert!(refusal.contains("***@siem.example"), "{refusal}");
+        assert!(refusal.contains("/***"), "{refusal}");
+        assert!(refusal.contains("is ambiguous"), "{refusal}");
+    }
 }

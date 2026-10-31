@@ -54,8 +54,10 @@ pub fn log_target(url: &str) -> String {
 /// `text` (a host's failure words, say) with every part of `url` that can carry a credential
 /// replaced by `***`: the URL itself (as written and masked, `mask_url`), its path, query, userinfo,
 /// each also percent-decoded; the decoding and the cut (as written and as serde quotes it, longest
-/// first) are the SDK's (`sdk::url::and_decoded`, `sdk::url::scrub`).
-pub fn scrub(text: &str, url: &str) -> String {
+/// first) are the SDK's (`sdk::url::and_decoded`, `sdk::url::scrub`). The request's own credentials
+/// are cut too, for a receiver may echo its request back: the `Authorization: Basic` value the
+/// userinfo became, its base64 token, and the `auth_header` value (`header_value`).
+pub fn scrub(text: &str, url: &str, header_value: Option<&str>) -> String {
     let mut parts = vec![url.to_string(), crate::mask_url(url)];
     if let Ok(u) = url::Url::parse(url) {
         if !matches!(u.path(), "" | "/") {
@@ -69,6 +71,12 @@ pub fn scrub(text: &str, url: &str) -> String {
         }
         parts.push(u.username().to_string());
     }
+    if let Some(basic) = crate::basic_authorization(url) {
+        let basic = String::from_utf8_lossy(&basic).into_owned();
+        parts.extend(basic.strip_prefix("Basic ").map(str::to_owned));
+        parts.push(basic);
+    }
+    parts.extend(header_value.filter(|v| !v.is_empty()).map(str::to_owned));
     sdk_url::scrub(text, sdk_url::and_decoded(parts), true)
 }
 
