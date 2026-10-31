@@ -42,7 +42,7 @@ use busbar_contract::abi::export::{
     CHECK_PHASE_LIMITS,
 };
 use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, OutHead, Outcome, BLOB_JSON};
+use busbar_contract::abi::mechanism::call::{AbiStr, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::cred::Cred;
@@ -87,9 +87,9 @@ const TARGET_FROM: &str = "settings.url";
 /// `max_inflight_deliveries` (64 when unset), which the host applies per instance, clamped to at
 /// least one; `check` refuses the LARGEST instance's bound past [`MAX_PERMITS`] or below 1
 /// ([`check`]).
-const MAX_INFLIGHT: u32 = u32::MAX;
+pub const MAX_INFLIGHT: u32 = u32::MAX;
 /// The one need's index in the Statement.
-const NEED: u32 = 0;
+pub const NEED: u32 = 0;
 
 mod config;
 mod redact;
@@ -100,11 +100,6 @@ pub use redact::{log_target, scrub};
 /// This sink's settings (the configuration's `WebhookSettings`).
 pub type Settings = WebhookSettings;
 
-const NONE: AbiStr = AbiStr {
-    ptr: std::ptr::null(),
-    len: 0,
-};
-
 /// The one need: outbound over a secure connection to the `url` setting's target, public
 /// destinations only (refusing loopback, link-local, private, CGNAT and cloud-metadata targets). It is framed by the `http` transport — the scheme its claim names; an
 /// `https://` target is secured by the host's connector, and the open-web egress class refuses any
@@ -113,18 +108,10 @@ const NEEDS: &[Need] = &[Need {
     direction: DIRECTION_OUTBOUND,
     egress_class: EGRESS_OPEN_WEB,
     transport: abi_str("http"),
-    auth: NONE,
     target_from: abi_str(TARGET_FROM),
-    trust_from: NONE,
-    details: Blob::ABSENT,
-    keep_response_headers: std::ptr::null(),
-    keep_response_headers_len: 0,
-    timeout_ms: 0,
     // The receiver's response head is not read: the named (empty) list, nothing denied beyond it.
     keep_mode: busbar_contract::abi::host::conn::connector::KEEP_NAMED,
-    _reserved: 0,
-    deny_response_headers: std::ptr::null(),
-    deny_response_headers_len: 0,
+    ..Need::EMPTY
 }];
 
 /// The streams this sink carries: the request log.
@@ -201,12 +188,23 @@ fn parse_to_run(settings: &[u8]) -> Result<Settings, Refusal> {
 /// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
 /// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
 /// lines. The refusal shows the url with everything between `://` and its last `@` cut, never the
-/// credential. A url that does not parse, or has no `@` after its host, is not ambiguous here.
+/// credential. A url that does not parse is read the same way by hand: the text after `://`, from
+/// its first `/`, `?` or `#`, is what a parser would take for the path (`https://svc:pa/ss@siem/…`
+/// fails on the port `pa`). A url with no `@` after its host is not ambiguous here.
 /// The words and the cut are the SDK's (`sdk::url::ambiguous_url`); the parse is this plugin's own
 /// WHATWG reader, the one its target is dialled by.
 pub fn ambiguous_url(url: &str) -> Option<String> {
-    let parsed = url::Url::parse(url).ok()?;
-    sdk_url::ambiguous_url(url, &parsed[url::Position::BeforePath..])
+    // The refusal names the target as the log lines do ([`log_target`]): the userinfo cut, a path
+    // `/***` and a query `?***`, for a webhook's path or query is often its secret.
+    let shown = log_target(&sdk_url::cut_userinfo(url, "***@"));
+    match url::Url::parse(url) {
+        Ok(parsed) => sdk_url::ambiguous_url(&shown, &parsed[url::Position::BeforePath..]),
+        Err(_) => {
+            let (_, rest) = url.split_once("://")?;
+            let tail = &rest[rest.find(['/', '?', '#'])?..];
+            sdk_url::ambiguous_url(&shown, tail)
+        }
+    }
 }
 
 /// One opened instance.
@@ -242,7 +240,19 @@ impl Life for Webhook {
 
     /// The settings' shape, in the configuration grammar's own serde words.
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
-        parse(settings).map(|_| ())
+        // The same check `open` and `refresh` run (`parse_to_run`). A secret reference the kernel has
+        // not resolved (an object where the value goes) cannot be judged here: it is read as before.
+        let unresolved = serde_json::from_slice::<serde_json::Value>(settings)
+            .ok()
+            .is_some_and(|v| {
+                v.pointer("/auth_header/value")
+                    .is_some_and(|v| v.is_object())
+            });
+        if unresolved {
+            parse(settings).map(|_| ())
+        } else {
+            parse_to_run(settings).map(|_| ())
+        }
     }
 
     /// Refuses settings that do not parse, in the same words as [`Life::validate`]: an instance
@@ -632,7 +642,7 @@ pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
                 mask_url(u)
             ),
         },
-        (Some(u), _) => scrub(&refused.to_string(), u),
+        (Some(u), _) => scrub(&refused.to_string(), u, None),
         (None, _) => refused.to_string(),
     }
 }
@@ -660,7 +670,11 @@ fn is_https(url: &str) -> bool {
 /// BUSBAR-7072 for a transport failure — each at WARN. The target is named by scheme and host only ([`log_target`]:
 /// its userinfo, path and query can each carry the webhook's secret) and the host's failure text is
 /// scrubbed of the target's parts ([`scrub`]).
-pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
+pub fn report(
+    url: &str,
+    header_value: Option<&str>,
+    answered: Result<ExchangeResponse, ConnFailure>,
+) {
     match answered {
         Ok(r) if (200..300).contains(&r.status) => {}
         Ok(r) => tracing::warn!(
@@ -672,7 +686,7 @@ pub fn report(url: &str, answered: Result<ExchangeResponse, ConnFailure>) {
         Err(e) => tracing::warn!(
             diag = %TRANSPORT_ERROR,
             webhook_url = ?log_target(url),
-            error_kind = %scrub(&e.to_string(), url),
+            error_kind = %scrub(&e.to_string(), url, header_value),
             "request-log webhook delivery failed (transport error); this log was dropped"
         ),
     }
@@ -908,7 +922,11 @@ impl SafeSlot for Deliver {
                     }
                 }
             };
-            report(&at.settings.url, answered);
+            report(
+                &at.settings.url,
+                at.settings.auth_header.as_ref().map(|h| h.value.as_str()),
+                answered,
+            );
             at.offset = next;
             if hook.cut_by_reload(&mut at, &batch[next.min(batch.len())..]) {
                 break;
