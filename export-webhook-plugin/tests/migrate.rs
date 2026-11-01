@@ -8,32 +8,16 @@
 //!
 //! RED before: the door stated no `migrate`, so the host passed the section through unchanged.
 
-use std::path::PathBuf;
-
 use busbar_plugin_loader::dispatch::load::raw;
 use busbar_plugin_loader::dispatch::migrate::{migrate_door, migrate_library};
 use serde_json::json;
 
-/// This crate's built cdylib (uplifted or under `deps`, newest wins). A missing artifact is a
-/// failure, never a skip.
-fn cdylib() -> PathBuf {
-    let exe = std::env::current_exe().expect("the test binary has a path");
-    let profile = exe
-        .parent()
-        .and_then(|d| d.parent())
-        .expect("target/<profile>");
-    let file = busbar_plugin_loader::plugin_library_filename("busbar_export_webhook_plugin");
-    [profile.join(&file), profile.join("deps").join(&file)]
-        .into_iter()
-        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
-        .max()
-        .map(|(_, p)| p)
-        .unwrap_or_else(|| panic!("the built cdylib {file} is missing: build the workspace first"))
-}
-
 #[test]
 fn the_door_migrates_an_auth_header_1_5_5_never_sent_both_ways() {
-    let bytes = std::fs::read(cdylib()).expect("the cdylib reads");
+    let bytes = std::fs::read(busbar_test_kit::conformance::cdylib_of(
+        "busbar_export_webhook_plugin",
+    ))
+    .expect("the cdylib reads");
     let bad = json!({
         "url": "https://siem.example/in",
         "auth_header": {"name": "Authorization", "value": "Bearer s3cret\r\nX-Injected: 1"}

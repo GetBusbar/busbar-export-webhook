@@ -20,11 +20,11 @@ use busbar_contract::abi::export::{self, DeliverIn};
 use busbar_contract::abi::mechanism::call::{Blob, DeadlineClass, OutHead, BLOB_JSONL};
 use busbar_plugin_loader::dispatch::kinds::export::Export;
 use busbar_plugin_loader::dispatch::{
-    load_linked, Bind, ConnTable, Diagnostic, Dispatcher, Dropped, EnvelopeSink, Frame, LinkedRow,
-    Metric, Plugin,
+    load_dropped, load_linked, Bind, ConnTable, Diagnostic, Dispatcher, Dropped, EnvelopeSink,
+    Frame, LinkedRow, Metric, Plugin,
 };
 use busbar_test_kit::conformance::{
-    bind, called, dispatcher, input, on_ticket, open_resumed, refresh,
+    bind, called, cdylib_of, dispatcher, input, on_ticket, open_resumed, refresh,
 };
 use busbar_test_kit::conformance_host::{anchors, far_end, host, Doors};
 
@@ -73,6 +73,10 @@ fn answer(seen: &[u8]) -> Option<Vec<u8>> {
             .into_bytes();
         r.resize(r.len() + BIG, b'x');
         r
+    } else if head.starts_with("post /no-content ") {
+        b"HTTP/1.1 204 No Content\r\n\r\n".to_vec()
+    } else if head.starts_with("post /redirect ") {
+        b"HTTP/1.1 302 Found\r\nlocation: /in?redirected=1\r\ncontent-length: 0\r\n\r\n".to_vec()
     } else if head.starts_with("post /fail") {
         b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n".to_vec()
     } else {
@@ -116,6 +120,13 @@ impl EnvelopeSink for Tape {
 
 /// The linked door, bound to the host connector and `tape`, opened over `settings` on a ticket.
 fn opened(settings: &serde_json::Value) -> (Plugin<Export>, Arc<Dispatcher>, Arc<Tape>) {
+    opened_door(settings, false)
+}
+
+fn opened_door(
+    settings: &serde_json::Value,
+    dropped: bool,
+) -> (Plugin<Export>, Arc<Dispatcher>, Arc<Tape>) {
     far_end(FAR_END, answer);
     let d = dispatcher();
     let tape = Arc::new(Tape::default());
@@ -124,11 +135,17 @@ fn opened(settings: &serde_json::Value) -> (Plugin<Export>, Arc<Dispatcher>, Arc
         conns: ConnTable::Host(host(DOORS, d.conn_waker(), Some(anchors()))),
         ..bind(&d, "deliver")
     };
-    let p = load_linked::<Export>(
-        &LinkedRow::of(busbar_export_webhook::door).expect("the linked door renders"),
-        b,
-    )
-    .expect("the linked door loads");
+    let row = LinkedRow::of(busbar_export_webhook::door).expect("the linked door renders");
+    let p = if dropped {
+        load_dropped::<Export>(
+            &cdylib_of("busbar_export_webhook_plugin"),
+            &row.statement,
+            b,
+        )
+        .expect("the dropped door loads")
+    } else {
+        load_linked::<Export>(&row, b).expect("the linked door loads")
+    };
     let open = called(&open_resumed(&p, &d, settings.to_string().as_bytes()));
     assert!(open.starts_with("Ready "), "open: {open}");
     tape.take();
@@ -173,10 +190,13 @@ fn naming<'a>(lines: &'a [String], code: &str) -> Vec<&'a String> {
     lines.iter().filter(|l| l.contains(code)).collect()
 }
 
-/// The three tests share the one far end and its record, so they run as one.
+/// These scenarios share the far end and its record, so they run under one delivery lock.
 #[test]
 fn deliver_through_the_harness() {
-    records_in_one_post_per_line_out();
+    for dropped in [false, true] {
+        records_in_one_post_per_line_out(dropped);
+        a_bodiless_204_is_delivered_and_a_redirect_is_not_followed(dropped);
+    }
     a_non_2xx_answer_drops_the_line_as_busbar_7071();
     a_transport_error_drops_the_line_as_busbar_7072();
     the_first_line_after_a_refresh_goes_on_the_new_settings();
@@ -189,12 +209,15 @@ fn deliver_through_the_harness() {
 /// Records in -> one HTTPS POST per line out, in order: the target's path and query, the
 /// userinfo's Basic `authorization` first, then `content-type: application/json`, then the
 /// configured auth header (lower-cased), and the line as the body; READY, and nothing dropped.
-fn records_in_one_post_per_line_out() {
+fn records_in_one_post_per_line_out(dropped: bool) {
     seen();
-    let (p, d, tape) = opened(&serde_json::json!({
-        "url": format!("https://us%40er:p4ss@{FAR_END}/in?k=v"),
-        "auth_header": {"name": "X-Api-Key", "value": "k3y-value"}
-    }));
+    let (p, d, tape) = opened_door(
+        &serde_json::json!({
+            "url": format!("https://us%40er:p4ss@{FAR_END}/in?k=v"),
+            "auth_header": {"name": "X-Api-Key", "value": "k3Y-VaLuE"}
+        }),
+        dropped,
+    );
     let batch = "{\"outcome\":\"ok\",\"ts\":1}\n{\"outcome\":\"ok\",\"ts\":2}\n";
     let answer = deliver(&p, &d, batch);
     assert!(answer.starts_with("Ready "), "deliver: {answer}");
@@ -207,7 +230,7 @@ fn records_in_one_post_per_line_out() {
         let (head, sent) = req.split_once("\r\n\r\n").expect("a whole request");
         let mut lines = head.split("\r\n");
         assert_eq!(lines.next(), Some("POST /in?k=v HTTP/1.1"), "{req}");
-        let fields: Vec<String> = lines.map(str::to_ascii_lowercase).collect();
+        let fields = header_fields(lines);
         let at = |name: &str| {
             fields
                 .iter()
@@ -216,7 +239,7 @@ fn records_in_one_post_per_line_out() {
         };
         // `us@er:p4ss`, padded standard base64.
         assert!(
-            fields.contains(&"authorization: basic dxnazxi6cdrzcw==".to_string()),
+            fields.contains(&"authorization: Basic dXNAZXI6cDRzcw==".to_string()),
             "{fields:?}"
         );
         assert!(
@@ -224,7 +247,7 @@ fn records_in_one_post_per_line_out() {
             "{fields:?}"
         );
         assert!(
-            fields.contains(&"x-api-key: k3y-value".to_string()),
+            fields.contains(&"x-api-key: k3Y-VaLuE".to_string()),
             "{fields:?}"
         );
         assert!(at("authorization") < at("content-type") && at("content-type") < at("x-api-key"));
@@ -322,13 +345,14 @@ fn the_first_line_after_a_refresh_goes_on_the_new_settings() {
     assert_eq!(got.len(), 2, "{got:?}");
     for req in &got {
         assert!(req.starts_with("POST /new?n=2 HTTP/1.1\r\n"), "{req}");
-        let lower = req.to_ascii_lowercase();
+        let (head, _) = req.split_once("\r\n\r\n").expect("a whole request");
+        let fields = header_fields(head.split("\r\n").skip(1));
         // `new-user:new-pw`, padded standard base64.
         assert!(
-            lower.contains("\r\nauthorization: basic bmv3lxvzzxi6bmv3lxb3\r\n"),
+            fields.contains(&"authorization: Basic bmV3LXVzZXI6bmV3LXB3".to_string()),
             "{req}"
         );
-        assert!(lower.contains("\r\nx-api-key: new-key\r\n"), "{req}");
+        assert!(fields.contains(&"x-api-key: new-key".to_string()), "{req}");
         assert!(!req.contains("old"), "{req}");
     }
     let host = tape.take();
@@ -392,4 +416,43 @@ fn a_non_2xx_with_a_huge_body_still_logs_its_status() {
     assert_eq!(dropped.len(), 1, "{host:?}");
     assert!(dropped[0].contains("503"), "{}", dropped[0]);
     assert!(naming(&host, "BUSBAR-7072").is_empty(), "{host:?}");
+}
+
+/// HTTP field names ignore case; credential values are opaque bytes.
+fn header_fields<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
+    lines
+        .map(|line| {
+            let (name, value) = line.split_once(':').expect("an HTTP field");
+            format!("{}:{value}", name.to_ascii_lowercase())
+        })
+        .collect()
+}
+
+fn a_bodiless_204_is_delivered_and_a_redirect_is_not_followed(dropped: bool) {
+    for (path, status) in [("/no-content", None), ("/redirect", Some("302"))] {
+        seen();
+        let (p, d, tape) = opened_door(
+            &serde_json::json!({"url": format!("https://{FAR_END}{path}")}),
+            dropped,
+        );
+        let answer = deliver(&p, &d, "{\"line\":0}\n");
+        assert!(answer.starts_with("Ready "), "deliver: {answer}");
+        let got = seen();
+        assert_eq!(got.len(), 1, "one POST with no redirect follow: {got:?}");
+        assert!(
+            got[0].starts_with(&format!("POST {path} HTTP/1.1\r\n")),
+            "{}",
+            got[0]
+        );
+        let host = tape.take();
+        let non_2xx = naming(&host, "BUSBAR-7071");
+        match status {
+            Some(status) => {
+                assert_eq!(non_2xx.len(), 1, "{host:?}");
+                assert!(non_2xx[0].contains(status), "{host:?}");
+            }
+            None => assert!(non_2xx.is_empty(), "a 204 is delivered: {host:?}"),
+        }
+        assert!(naming(&host, "BUSBAR-7072").is_empty(), "{host:?}");
+    }
 }

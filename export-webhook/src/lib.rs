@@ -30,7 +30,16 @@
 //!
 //! No `unsafe`: `check`'s instance list is read through the SDK's safe lend (`instances()`).
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(test), forbid(unsafe_code))]
+#![deny(unsafe_code)]
+
+#[cfg(test)]
+#[path = "tests/ownership_tests.rs"]
+mod ownership_tests;
+#[cfg(test)]
+#[allow(unsafe_code)]
+#[path = "tests/wipe_probe.rs"]
+mod wipe_probe;
 
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -835,7 +844,12 @@ impl Migrate for Migration {
             .filter(|n| is_framing(n))
             .map(removed_framing_header);
         if let Some(section) = settings.as_object_mut() {
-            section.remove("auth_header");
+            let removed = section.remove("auth_header");
+            #[cfg(test)]
+            if let Some(value) = &removed {
+                ownership_tests::watch_value_as("removed migration header", value);
+            }
+            drop(removed);
         }
         Migrated {
             settings,
@@ -849,6 +863,8 @@ impl Migrate for Migration {
 /// referenced value read as one that builds.
 fn auth_header_unbuildable(settings: &serde_json::Value) -> bool {
     let mut probe = settings.clone();
+    #[cfg(test)]
+    ownership_tests::watch_value_as("migration probe JSON", &probe);
     if let Some(value) = probe
         .pointer_mut("/auth_header/value")
         .filter(|v| v.is_object())
@@ -856,7 +872,7 @@ fn auth_header_unbuildable(settings: &serde_json::Value) -> bool {
         *value = serde_json::Value::String(String::new());
     }
     serde_json::from_value::<Settings>(probe)
-        .is_ok_and(|s| s.auth_header.is_some_and(|h| !header_builds(&h)))
+        .is_ok_and(|s| s.auth_header.as_ref().is_some_and(|h| !header_builds(h)))
 }
 
 /// `check`'s instances, `(name, settings)` in configuration order (settings that are not JSON read
@@ -866,10 +882,13 @@ fn instances(input: Lent<'_, CheckIn>) -> Vec<(String, serde_json::Value)> {
         .instances()
         .iter()
         .map(|c| {
+            let settings = serde_json::from_slice(c.field(|c| &c.settings).bytes())
+                .unwrap_or(serde_json::Value::Null);
+            #[cfg(test)]
+            ownership_tests::watch_value_as("check settings JSON", &settings);
             (
                 String::from_utf8_lossy(c.field(|c| &c.name).bytes()).into_owned(),
-                serde_json::from_slice(c.field(|c| &c.settings).bytes())
-                    .unwrap_or(serde_json::Value::Null),
+                settings,
             )
         })
         .collect()

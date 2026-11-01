@@ -701,6 +701,7 @@ fn ready_reads_the_hosts_refusal_and_names_the_scheme_rule() {
 /// know is refused. Mutation proof: swapping the two phase arms turns it red.
 #[test]
 fn the_check_slot_maps_its_phase_and_leases_the_findings() {
+    let probe = crate::wipe_probe::Probe::start();
     use busbar_contract::abi::export::{
         CheckIn, CheckInstance, CheckOut, Ops, CHECK_PHASE_INSTANCES, CHECK_PHASE_LIMITS,
     };
@@ -764,6 +765,10 @@ fn the_check_slot_maps_its_phase_and_leases_the_findings() {
         zeroed::<busbar_contract::abi::mechanism::call::OutHead>(),
     );
     assert_eq!(closed.outcome, Outcome::Ready);
+
+    probe
+        .finish()
+        .assert_wiped_on_linux(&["check settings JSON"]);
 }
 
 /// RED (audit export-webhook #4): PARITY WITH 1.5.5, which added the configured auth header only

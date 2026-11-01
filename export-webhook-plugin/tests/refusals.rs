@@ -9,7 +9,6 @@
 //! RED before: `scrape` answered READY with nothing written (or a bare REFUSED), and `serve` a bare
 //! answer with no cause.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use busbar_contract::abi::export::{self, ScrapeIn, ScrapeOut, ServeIn, ServeOut};
@@ -23,23 +22,6 @@ use busbar_plugin_loader::dispatch::{
 };
 
 const SETTINGS: &[u8] = br#"{"url":"https://w.example/in"}"#;
-
-/// This crate's built cdylib (uplifted or under `deps`, newest wins). A missing artifact is a
-/// failure, never a skip.
-fn cdylib() -> PathBuf {
-    let exe = std::env::current_exe().expect("the test binary has a path");
-    let profile = exe
-        .parent()
-        .and_then(|d| d.parent())
-        .expect("target/<profile>");
-    let file = busbar_plugin_loader::plugin_library_filename("busbar_export_webhook_plugin");
-    [profile.join(&file), profile.join("deps").join(&file)]
-        .into_iter()
-        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
-        .max()
-        .map(|(_, p)| p)
-        .unwrap_or_else(|| panic!("the busbar_export_webhook_plugin cdylib ({file}) is not built"))
-}
 
 fn row() -> LinkedRow {
     LinkedRow::of(busbar_export_webhook::door).expect("the linked door renders")
@@ -56,7 +38,12 @@ fn opened(dropped: bool) -> (Arc<Dispatcher>, Plugin<Export>) {
         conns: ConnTable::Probe,
     };
     let p = if dropped {
-        load_dropped::<Export>(&cdylib(), &row().statement, bind).expect("the dropped door loads")
+        load_dropped::<Export>(
+            &busbar_test_kit::conformance::cdylib_of("busbar_export_webhook_plugin"),
+            &row().statement,
+            bind,
+        )
+        .expect("the dropped door loads")
     } else {
         load_linked::<Export>(&row(), bind).expect("the linked door loads")
     };
