@@ -72,16 +72,15 @@ fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
     assert_eq!(
         one(json!({"url": "https://a/", "max_inflight_deliveries": 0})),
         vec![
-            "export.request-log-webhook.settings.max_inflight_deliveries must be >= 1 (a 0-permit \
-             semaphore admits nothing, silently dropping every webhook delivery)"
+            "the largest settings.max_inflight_deliveries among `module: request-log-webhook` \
+             export instances must be >= 1"
         ]
     );
     assert_eq!(
         one(json!({"url": "https://a/", "max_inflight_deliveries": 2305843009213693952u64})),
         vec![
-            "export.request-log-webhook.settings.max_inflight_deliveries must be <= \
-             2305843009213693951 (tokio::sync::Semaphore's hard permit ceiling — a value above \
-             it panics at build time instead of failing validation)"
+            "the largest settings.max_inflight_deliveries among `module: request-log-webhook` \
+             export instances must be <= 2305843009213693951"
         ]
     );
     assert!(
@@ -91,14 +90,14 @@ fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
     assert_eq!(
         one(json!({"url": "https://a/b", "delivery_timeout_secs": 0})),
         vec![
-            "the `module: request-log-webhook` export instance targeting 'https://a/b' (#0) sets \
-             settings.delivery_timeout_secs: 0, which would abort every delivery — it must be >= 1"
+            "export.w: the `module: request-log-webhook` export instance targeting 'https://a/***' (#0) sets \
+             settings.delivery_timeout_secs: 0 — it must be >= 1"
         ]
     );
     assert_eq!(
         one(json!({"url": "https://a/b", "delivery_timeout_secs": u64::MAX})),
         vec![format!(
-            "the `module: request-log-webhook` export instance targeting 'https://a/b' (#0) sets \
+            "export.w: the `module: request-log-webhook` export instance targeting 'https://a/***' (#0) sets \
              settings.delivery_timeout_secs: {}, above the 946080000-second (30-year) ceiling \
              every duration is bounded by — a delivery deadline that far out overflows the clock",
             u64::MAX
@@ -270,19 +269,23 @@ fn a_userinfo_in_the_url_is_sent_as_basic_as_1_5_5_sent_it() {
             "{url}"
         );
     }
-    // The base64 is the padded standard alphabet (RFC 4648 section 10's vectors).
-    for (plain, encoded) in [
-        ("", ""),
-        ("f", "Zg=="),
-        ("fo", "Zm8="),
-        ("foo", "Zm9v"),
-        ("foob", "Zm9vYg=="),
-        ("fooba", "Zm9vYmE="),
-        ("foobar", "Zm9vYmFy"),
+    // Exercise the production userinfo encoder: all padding lengths and the standard +/ alphabet.
+    for (userinfo, encoded) in [
+        ("f", "Basic Zjo="),
+        ("fo", "Basic Zm86"),
+        ("foo", "Basic Zm9vOg=="),
+        ("foob", "Basic Zm9vYjo="),
+        ("fooba", "Basic Zm9vYmE6"),
+        ("foobar", "Basic Zm9vYmFyOg=="),
+        ("xx:%EF%BF%BF", "Basic eHg677+/"),
     ] {
-        assert_eq!(base64(plain.as_bytes()), encoded, "{plain}");
+        let url = format!("https://{userinfo}@siem.example/in");
+        assert_eq!(
+            basic_authorization(&url).as_deref(),
+            Some(encoded.as_bytes()),
+            "{userinfo}"
+        );
     }
-    assert_eq!(base64(&[0xfb, 0xff, 0xbf]), "+/+/");
 }
 
 /// RED (audit export-webhook #1, ARCHITECT ruling (c)): the userinfo's field rides every POST
@@ -375,18 +378,17 @@ fn the_success_boundary_is_200_to_299() {
 /// A target the host refused is named in 1.5.5's words, as 1.5.5's `validate_webhook_url` named it:
 /// the `https://` scheme rule (the scheme read without case), a URL that does not parse, or the
 /// destination guard; a host that gave no verdict is named as such. The target is masked by the
-/// SDK's `mask_url` (coordinator ruling 2026-10-28, FAMILY.md export): as written, the userinfo cut
-/// to `***`, where 1.5.5 wrote it re-serialised by its URL parser (a lower-cased scheme).
+/// log target: userinfo, path and query credentials are hidden.
 #[test]
 fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     let refused = ConnFailure::Refused("destination refused".into());
     assert_eq!(
         refusal_words(Some("http://127.0.0.1:4000/sidecar"), &refused),
-        "observability.request_log_webhook_url must be an https:// URL (got 'http://127.0.0.1:4000/sidecar')"
+        "observability.request_log_webhook_url must be an https:// URL (got 'http://127.0.0.1:4000/***')"
     );
     assert_eq!(
         refusal_words(Some("HTTP://u:p@siem.example/in"), &refused),
-        "observability.request_log_webhook_url must be an https:// URL (got 'HTTP://***@siem.example/in')"
+        "observability.request_log_webhook_url must be an https:// URL (got 'http://***@siem.example/***')"
     );
     // RED (Q128 export-webhook LOW, src/lib.rs:391-403): 1.5.5 named the other two refusals on this
     // path in its own words too (v1.5.5 observability.rs validate_webhook_url): a URL that does not
@@ -398,7 +400,7 @@ fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     assert_eq!(
         refusal_words(Some("HTTPS://u:p@169.254.169.254/in"), &refused),
         "observability.request_log_webhook_url must not target a loopback/link-local/private/CGNAT/\
-         cloud-metadata host (SSRF guard); got 'HTTPS://***@169.254.169.254/in'"
+         cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/***'"
     );
     assert_eq!(
         refusal_words(Some("http://siem.example/in"), &ConnFailure::Unarmed),
@@ -498,9 +500,9 @@ fn a_catalogue_action_cites_only_declared_metrics() {
 #[test]
 fn validation_errors_mask_the_targets_userinfo() {
     for (url, shown) in [
-        ("https://u:s3cret@h.example/x", "https://***@h.example/x"),
-        ("https://:s3cret@h.example/x", "https://***@h.example/x"),
-        ("https://s3cret@h.example/x", "https://***@h.example/x"),
+        ("https://u:s3cret@h.example/x", "https://***@h.example/***"),
+        ("https://:s3cret@h.example/x", "https://***@h.example/***"),
+        ("https://s3cret@h.example/x", "https://***@h.example/***"),
         ("https://u:s3cret@/x", "https:***"),
     ] {
         let instances = [(
@@ -529,8 +531,7 @@ fn validation_errors_mask_the_targets_userinfo() {
     assert_eq!(mask_url("https://u:p@/x"), "https://***@/x");
 }
 
-/// THE THREE LINES THAT NAME A USERINFO TARGET, PINNED WHOLE (coordinator ruling 2026-10-28: the
-/// target is masked by the SDK's `mask_url`, as written, the scheme's case kept): the BUSBAR-7070
+/// The lines naming a userinfo target hide its path and normalize its scheme: the BUSBAR-7070
 /// boot error (over a host that refuses the target), the auth-header refusal and the two
 /// delivery-deadline refusals.
 #[test]
@@ -555,12 +556,12 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
         (
             "HTTP://u:s3cret@siem.example/in",
             "observability.request_log_webhook_url must be an https:// URL (got \
-             'HTTP://***@siem.example/in'); disabling this webhook exporter",
+             'http://***@siem.example/***'); disabling this webhook exporter",
         ),
         (
             "https://u:s3cret@169.254.169.254/in",
             "observability.request_log_webhook_url must not target a loopback/link-local/private/\
-             CGNAT/cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/in'; \
+             CGNAT/cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/***'; \
              disabling this webhook exporter",
         ),
     ] {
@@ -578,8 +579,8 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
     assert_eq!(
         lines(json!({"url": url, "auth_header": {"name": "Bad Name", "value": "Bearer s3cret"}})),
         vec![
-            "the `module: request-log-webhook` export instance targeting \
-             'https://***@siem.example/in' (#0) sets settings.auth_header with a name or value \
+            "export.w: the `module: request-log-webhook` export instance targeting \
+             'https://***@siem.example/***' (#0) sets settings.auth_header with a name or value \
              that is not a valid HTTP header (name \"Bad Name\": the name must be a non-empty RFC \
              9110 token, and the value may hold no control byte other than tab); 1.5.5 left such a \
              header out and sent the log without it — fix or remove the header"
@@ -589,17 +590,16 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
     assert_eq!(
         lines(json!({"url": url, "delivery_timeout_secs": 0})),
         vec![
-            "the `module: request-log-webhook` export instance targeting \
-             'https://***@siem.example/in' (#0) sets settings.delivery_timeout_secs: 0, which \
-             would abort every delivery — it must be >= 1"
+            "export.w: the `module: request-log-webhook` export instance targeting \
+             'https://***@siem.example/***' (#0) sets settings.delivery_timeout_secs: 0 — it must be >= 1"
                 .to_string()
         ]
     );
     assert_eq!(
         lines(json!({"url": url, "delivery_timeout_secs": u64::MAX})),
         vec![
-            "the `module: request-log-webhook` export instance targeting \
-             'https://***@siem.example/in' (#0) sets settings.delivery_timeout_secs: \
+            "export.w: the `module: request-log-webhook` export instance targeting \
+             'https://***@siem.example/***' (#0) sets settings.delivery_timeout_secs: \
              18446744073709551615, above the 946080000-second (30-year) ceiling every duration \
              is bounded by — a delivery deadline that far out overflows the clock"
                 .to_string()
@@ -804,9 +804,8 @@ fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
 
 /// THE SETTINGS SCHEMA MARKS NO FIELD SECRET BELOW THE ROOT (coordinator ruling (B), 2026-10-19:
 /// pack keeps 1.5.5's refusal of a nested `x-busbar-secret` marker, v1.5.5
-/// `crates/plugin-pack/src/main.rs:298-304`). `auth_header.value` is a plain string, as 1.5.5's
-/// `ExportAuthHeader { name, value: String }` read it (v1.5.5 `crates/busbar/src/config/mod.rs`),
-/// its `${VAR}` filled by the config's env interpolation. The schema names exactly the settings
+/// `crates/plugin-pack/src/main.rs:298-304`). `auth_header.value` names a reference the host
+/// resolves before opening the sink. The schema names exactly the settings
 /// grammar's keys. RED before the fix: `auth_header.value` carried a nested marker the packer
 /// refuses.
 #[test]
@@ -847,10 +846,13 @@ fn the_settings_schema_marks_no_nested_secret() {
         !marked_below_root(&schema, 0),
         "no secret marker below the root"
     );
-    assert_eq!(
-        schema["properties"]["auth_header"]["properties"]["value"]["type"],
-        "string"
-    );
+    let header_values = schema["properties"]["auth_header"]["properties"]["value"]["oneOf"]
+        .as_array()
+        .expect("header values accept literals and resolved references");
+    assert!(header_values.iter().any(|v| v["type"] == "string"));
+    assert!(header_values
+        .iter()
+        .any(|v| v["$ref"] == "#/$defs/reference"));
 }
 
 /// THE AUTH HEADER'S VALUE NEVER RENDERS THROUGH `Debug` (Q128 export-webhook M2: "the secret
@@ -1300,7 +1302,7 @@ fn a_formatted_prepared_or_webhook_carries_no_secret() {
     .expect("opens");
     let p = w.settings();
     // `ops:hunter2`, padded standard base64.
-    let basic = base64(b"ops:hunter2");
+    let basic = "b3BzOmh1bnRlcjI=";
     for text in [
         format!("{p:?}"),
         format!("{p:#?}"),
@@ -1312,7 +1314,7 @@ fn a_formatted_prepared_or_webhook_carries_no_secret() {
             "PATHSECRET",
             "QUERYSECRET",
             "HEADERSECRET",
-            basic.as_str(),
+            basic,
         ] {
             assert!(!text.contains(secret), "`{secret}` leaked: {text}");
         }
@@ -1606,7 +1608,7 @@ fn validate_refuses_an_auth_header_that_open_refuses() {
 #[test]
 fn a_failure_echoing_the_requests_credentials_logs_none_of_them() {
     let url = "https://alice:s3cret@hooks.example/in";
-    let token = base64(b"alice:s3cret");
+    let token = "YWxpY2U6czNjcmV0";
     let header = "HDRSECRET9c1";
     let got = logged(|| {
         report(
@@ -1619,7 +1621,7 @@ fn a_failure_echoing_the_requests_credentials_logs_none_of_them() {
     });
     let text = all_text(&got);
     assert_eq!(got.len(), 1, "{got:?}");
-    for secret in [token.as_str(), "Basic ", header, "s3cret"] {
+    for secret in [token, "Basic ", header, "s3cret"] {
         assert!(!text.contains(secret), "{secret}: {text}");
     }
 }

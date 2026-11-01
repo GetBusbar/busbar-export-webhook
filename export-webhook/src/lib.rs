@@ -627,14 +627,6 @@ pub fn basic_authorization(url: &str) -> Option<Vec<u8>> {
     sdk_url::basic_authorization(u.username(), u.password(), Userinfo::Utf8).map(String::into_bytes)
 }
 
-/// The standard base64 alphabet, padded: the `base64` crate's `STANDARD` engine, the encoding
-/// `sdk::url::basic_authorization` writes; kept for the tests' RFC 4648 vectors.
-#[cfg(test)]
-fn base64(bytes: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
 /// BUSBAR-7070's words for a refused target, 1.5.5's: a target whose raw text is not an `https://`
 /// URL is the scheme rule ([`is_https`]); one that does not parse is an invalid URL; any other refusal of a parseable `https://` target is worded as the destination guard (the
 /// connector gives one text for every target refusal, so nothing tells them apart). Userinfo is
@@ -1036,3 +1028,7 @@ pub use table::door;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/audit_reconciliation.rs"]
+mod audit_reconciliation;
