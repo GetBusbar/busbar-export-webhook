@@ -1340,7 +1340,7 @@ fn a_formatted_prepared_or_webhook_carries_no_secret() {
     }
     let (request, _) = p.parts(b"{}");
     let text = format!("{request:?}");
-    for secret in ["hunter2", "HEADERSECRET", basic.as_str()] {
+    for secret in ["hunter2", "HEADERSECRET", basic] {
         assert!(!text.contains(secret), "`{secret}` leaked: {text}");
     }
 }
