@@ -2,10 +2,10 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The `settings:` grammar of an `export.<name>.module: request-log-webhook` instance — config
-//! grammar, tracked by the config-schema gate here, where the sink that reads it lives.
+//! grammar, described by `settings.schema.json` beside the sink that reads it.
 
 use serde::{Deserialize, Deserializer};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// `settings:` of an `export.<name>.module: request-log-webhook` instance — relocated from the retired
 /// `observability` webhook keys. Also absorbs the retired `generic-webhook` exporter: its ONLY extra
@@ -15,14 +15,15 @@ use zeroize::Zeroizing;
 /// credential: the url is named as the sink's log lines name it (scheme, masked userinfo, host and
 /// port; a path or query is `***`), and the auth header's value is redacted.
 #[derive(Deserialize, Clone, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "ParsedSettings")]
 pub struct WebhookSettings {
     /// The webhook target URL — REQUIRED, `https://`-only, refused by the host's policy when it
     /// targets an internal host.
     pub url: String,
     /// An optional auth header applied to every delivery from THIS instance (e.g.
-    /// `{ name: Authorization, value: "Bearer ${WEBHOOK_TOKEN}" }`). The `value` rides the config's
-    /// `${VAR}` env interpolation, so a secret is never stored literally.
+    /// `{ name: Authorization, value: { env: WEBHOOK_AUTHORIZATION } }`). The host resolves the
+    /// reference to the complete header value before handing these settings to the sink. Existing
+    /// literal header values remain accepted by the export host's compatibility policy.
     #[serde(default)]
     pub auth_header: Option<ExportAuthHeader>,
     /// Max concurrent deliveries (default 64) — relocated from `max_inflight_webhook_deliveries`.
@@ -32,6 +33,47 @@ pub struct WebhookSettings {
     /// Applied PER INSTANCE (each sink carries its own deadline).
     #[serde(default = "default_timeout_secs")]
     pub delivery_timeout_secs: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename = "WebhookSettings", deny_unknown_fields)]
+struct ParsedSettings {
+    #[serde(deserialize_with = "wiped_url")]
+    url: Zeroizing<String>,
+    #[serde(default)]
+    auth_header: Option<ExportAuthHeader>,
+    #[serde(default = "default_max_inflight")]
+    max_inflight_deliveries: usize,
+    #[serde(default = "default_timeout_secs")]
+    delivery_timeout_secs: u64,
+}
+
+fn wiped_url<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Zeroizing<String>, D::Error> {
+    url_string(d).map(Zeroizing::new)
+}
+
+impl From<ParsedSettings> for WebhookSettings {
+    fn from(mut parsed: ParsedSettings) -> Self {
+        Self {
+            url: std::mem::take(&mut *parsed.url),
+            auth_header: parsed.auth_header,
+            max_inflight_deliveries: parsed.max_inflight_deliveries,
+            delivery_timeout_secs: parsed.delivery_timeout_secs,
+        }
+    }
+}
+
+impl Drop for WebhookSettings {
+    fn drop(&mut self) {
+        self.url.zeroize();
+    }
+}
+
+fn url_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let url = String::deserialize(d)?;
+    #[cfg(test)]
+    crate::wipe_probe::watch("decoded settings url", url.as_bytes());
+    Ok(url)
 }
 
 impl std::fmt::Debug for WebhookSettings {

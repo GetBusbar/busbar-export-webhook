@@ -1,6 +1,66 @@
-// SPDX-License-Identifier: Apache-2.0
 use super::*;
 use crate::wipe_probe::{watch, Probe};
+
+#[test]
+fn prepared_settings_and_parse_copies_are_wiped_after_use() {
+    let probe = Probe::start();
+    let settings = parse(br#"{"url":"https://operator:password-canary@receiver.example/private-canary?key=query-canary","auth_header":{"name":"authorization","value":"Bearer header-canary"}}"#).unwrap();
+    watch("settings url", settings.url.as_bytes());
+    let prepared = Prepared::new(settings);
+    watch("request target", &prepared.target);
+    assert!(!prepared.sealed.is_empty());
+    let text = scrub(
+        "header-canary password-canary",
+        &prepared.settings.url,
+        prepared
+            .settings
+            .auth_header
+            .as_ref()
+            .map(|h| h.value.as_str()),
+    );
+    assert!(!text.contains("password-canary"));
+    drop(prepared);
+    probe.finish().assert_wiped_on_linux(&[
+        "decoded settings url",
+        "settings JSON",
+        "request target",
+        "settings credential copy",
+        "parsed url",
+        "Basic value",
+        "redaction part",
+    ]);
+}
+
+#[test]
+fn a_partly_deserialized_url_is_wiped_when_a_later_field_is_refused() {
+    let probe = Probe::start();
+    let result =
+        parse(br#"{"url":"https://operator:refused-canary@receiver.example/","zz_unknown":true}"#);
+    assert!(result.is_err());
+    drop(result);
+    probe
+        .finish()
+        .assert_wiped_on_linux(&["decoded settings url"]);
+}
+
+#[test]
+fn a_settings_refusal_wipes_its_redaction_copies() {
+    let probe = Probe::start();
+    let refusal =
+        parse(br#"{"url":"https://receiver.example/","auth_header":"Bearer refused-canary"}"#)
+            .unwrap_err();
+    assert!(!format!("{refusal:?}").contains("refused-canary"));
+    probe
+        .finish()
+        .assert_wiped_on_linux(&["settings credential copy", "settings JSON"]);
+}
+
+// Observe only the initialized payloads owned by this settings value, before serde consumes or
+// borrows them. Map keys can also carry a secret in a malformed auth_header setting.
+pub(super) fn watch_settings_value(value: &serde_json::Value) {
+    watch_value_as("settings JSON", value);
+}
+
 pub(super) fn watch_value_as(label: &'static str, value: &serde_json::Value) {
     match value {
         serde_json::Value::String(text) => watch(label, text.as_bytes()),

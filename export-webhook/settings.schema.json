@@ -3,25 +3,44 @@
   "title": "request-log-webhook settings",
   "type": "object",
   "additionalProperties": false,
-  "required": ["url"],
+  "required": [
+    "url"
+  ],
   "properties": {
     "url": {
-      "type": "string",
-      "description": "The webhook target URL: https:// only, refused by the host's policy when it targets an internal host."
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/reference"
+        }
+      ],
+      "description": "The HTTPS webhook target, as a literal URL or an env/file/module reference resolved by the host."
     },
     "auth_header": {
       "type": "object",
       "description": "An optional auth header applied to every delivery from this instance.",
       "additionalProperties": false,
-      "required": ["name", "value"],
+      "required": [
+        "name",
+        "value"
+      ],
       "properties": {
         "name": {
           "type": "string",
           "description": "The header's name, e.g. Authorization."
         },
         "value": {
-          "type": "string",
-          "description": "The header's value (the credential), as written: a ${VAR} in it is filled from the environment when the config loads, so the secret is never stored literally."
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/reference"
+            }
+          ],
+          "description": "The complete credential header value, preferably provided by an env/file/module reference such as {\"env\":\"WEBHOOK_AUTHORIZATION\"}. The export host also preserves existing literal values."
         }
       }
     },
@@ -38,6 +57,51 @@
       "maximum": 946080000,
       "default": 2,
       "description": "Per-delivery timeout, seconds."
+    }
+  },
+  "$defs": {
+    "reference": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "env"
+          ],
+          "properties": {
+            "env": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "file"
+          ],
+          "properties": {
+            "file": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "module"
+          ],
+          "properties": {
+            "module": {
+              "type": "string"
+            },
+            "settings": {
+              "type": "object"
+            }
+          }
+        }
+      ]
     }
   }
 }

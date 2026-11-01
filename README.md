@@ -21,7 +21,7 @@ Configured under the `request-log-webhook` module name (`export.<name>.module: r
 | key | default | meaning |
 |---|---|---|
 | `url` | required | The webhook target. `https://` only; refused by the host when it names a loopback, link-local, private, CGNAT or cloud-metadata host. |
-| `auth_header` | none | `{ name, value }`: one header sent on every delivery. `value` is a secret reference (`{env:}`, `{file:}`, `{module:}`); a literal is refused. |
+| `auth_header` | none | `{ name, value }`: one header sent on every delivery. Prefer a secret reference (`{env:}`, `{file:}`, `{module:}`) for `value`; the export host also preserves existing literal header values. |
 | `max_inflight_deliveries` | 64 | Concurrent deliveries for this instance; at least 1 (the largest instance's bound is validated, and must not exceed `usize::MAX >> 3`). |
 | `delivery_timeout_secs` | 2 | Per-delivery deadline in seconds, from 1 up to 30 years (946080000). |
 

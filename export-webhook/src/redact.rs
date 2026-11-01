@@ -13,6 +13,7 @@
 //! it as the log lines do ([`log_target`], built from the parsed url).
 
 use busbar_contract::abi::sdk::url as sdk_url;
+use zeroize::Zeroizing;
 
 /// What a redacted part becomes.
 const REDACTED: &str = "***";
@@ -21,7 +22,7 @@ const REDACTED: &str = "***";
 /// than `/` becomes `/***` and a query `?***`; a fragment is dropped. A string that is not a URL
 /// keeps only its scheme ([`unparsed_target`]).
 pub fn log_target(url: &str) -> String {
-    let Ok(u) = url::Url::parse(url) else {
+    let Ok(u) = crate::parsed_url(url) else {
         return unparsed_target(url);
     };
     // An ambiguous url (an `@` after its host) is refused at the door; were one to get here, its
@@ -67,8 +68,8 @@ pub(crate) fn unparsed_target(url: &str) -> String {
 /// are cut too, for a receiver may echo its request back: the `Authorization: Basic` value the
 /// userinfo became, its base64 token, and the `auth_header` value (`header_value`).
 pub fn scrub(text: &str, url: &str, header_value: Option<&str>) -> String {
-    let mut parts = vec![url.to_string(), crate::mask_url(url)];
-    if let Ok(u) = url::Url::parse(url) {
+    let mut parts = Zeroizing::new(vec![url.to_string(), crate::mask_url(url)]);
+    if let Ok(u) = crate::parsed_url(url) {
         if !matches!(u.path(), "" | "/") {
             parts.push(u.path().to_string());
         }
@@ -81,12 +82,30 @@ pub fn scrub(text: &str, url: &str, header_value: Option<&str>) -> String {
         parts.push(u.username().to_string());
     }
     if let Some(basic) = crate::basic_authorization(url) {
-        let basic = String::from_utf8_lossy(&basic).into_owned();
+        let bytes = Zeroizing::new(basic);
+        let basic = String::from_utf8_lossy(&bytes).into_owned();
         parts.extend(basic.strip_prefix("Basic ").map(str::to_owned));
         parts.push(basic);
     }
     parts.extend(header_value.filter(|v| !v.is_empty()).map(str::to_owned));
-    sdk_url::scrub(text, sdk_url::and_decoded(parts), true)
+    if let Some(value) = header_value {
+        let value = value.trim_ascii_start();
+        if let Some((scheme, credential)) = value.split_once(|c: char| c.is_ascii_whitespace()) {
+            if scheme.eq_ignore_ascii_case("Bearer") || scheme.eq_ignore_ascii_case("Basic") {
+                let credential = credential.trim_ascii();
+                parts.extend((!credential.is_empty()).then(|| credential.to_owned()));
+            }
+        }
+    }
+    #[cfg(test)]
+    for part in parts.iter() {
+        crate::wipe_probe::watch("redaction part", part.as_bytes());
+    }
+    sdk_url::scrub(
+        text,
+        sdk_url::and_decoded(std::mem::take(&mut *parts)),
+        true,
+    )
 }
 
 /// Every credential-bearing string the settings JSON holds: every string (and map key) under
@@ -113,6 +132,10 @@ pub fn settings_credentials(settings: &serde_json::Value) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(h) = settings.get("auth_header") {
         walk(h, &mut out);
+    }
+    #[cfg(test)]
+    for credential in &out {
+        crate::wipe_probe::watch("settings credential copy", credential.as_bytes());
     }
     out
 }

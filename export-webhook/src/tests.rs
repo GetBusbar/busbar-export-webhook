@@ -117,7 +117,7 @@ fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
     let mut two = check(CheckPhase::Limits, &two_instances);
     two.extend(check(CheckPhase::Instances, &two_instances));
     assert_eq!(two.len(), 1, "{two:?}");
-    assert!(two[0].contains("'https://b/' (#1)"), "{two:?}");
+    assert!(two[0].contains("'https://b' (#1)"), "{two:?}");
     assert!(check(CheckPhase::Limits, &[]).is_empty());
     // Each phase answers only its own lines: the deadline is not a limit, the bound not an
     // instance's own.
@@ -1095,7 +1095,11 @@ fn an_auth_header_that_cannot_be_built_is_refused_at_validation() {
         let lines = check(CheckPhase::Instances, &instances);
         assert_eq!(lines.len(), 1, "{name:?}: {lines:?}");
         assert!(lines[0].contains("settings.auth_header"), "{}", lines[0]);
-        assert!(lines[0].contains("https://a.example/"), "{}", lines[0]);
+        assert!(
+            lines[0].contains("targeting 'https://a.example' (#0)"),
+            "{}",
+            lines[0]
+        );
         assert!(
             !lines[0].contains("s3cret"),
             "the value leaked: {}",
@@ -1121,6 +1125,7 @@ fn a_reload_back_to_the_same_settings_does_not_cut_the_batch() {
         offset: 0,
         issued: 0,
         exchange: None,
+        bindings_pinned: false,
     };
     assert!(!w.reloaded_since(&mut at));
     w.refresh(br#"{"url":"https://b.example/"}"#, &[], 2)
@@ -1340,7 +1345,7 @@ fn a_formatted_prepared_or_webhook_carries_no_secret() {
     }
     let (request, _) = p.parts(b"{}");
     let text = format!("{request:?}");
-    for secret in ["hunter2", "HEADERSECRET", basic.as_str()] {
+    for secret in ["hunter2", "HEADERSECRET", basic] {
         assert!(!text.contains(secret), "`{secret}` leaked: {text}");
     }
 }
@@ -1413,6 +1418,7 @@ fn a_reload_of_only_the_deadline_or_bound_does_not_cut_the_batch() {
         offset: 0,
         issued: 0,
         exchange: None,
+        bindings_pinned: false,
     };
     w.refresh(
         br#"{"url":"https://a.example/","auth_header":{"name":"K","value":"one"},
@@ -1520,6 +1526,7 @@ fn a_reload_of_the_target_mid_batch_drops_the_rest_once() {
         offset: 0,
         issued: 0,
         exchange: None,
+        bindings_pinned: false,
     };
     // Line 1 parks; the reload lands while it is parked.
     let (first, next) = next_line(batch, at.offset).expect("line 1");
@@ -1538,6 +1545,49 @@ fn a_reload_of_the_target_mid_batch_drops_the_rest_once() {
     // The last line never raises it, reload or not.
     let (_, end) = next_line(batch, 17).expect("line 3");
     assert!(!w.cut_by_reload(&mut at, &batch[end..]));
+}
+
+#[test]
+fn only_an_explicit_ticket_binding_capability_preserves_a_reloaded_batch() {
+    use busbar_contract::abi::mechanism::extensions;
+
+    for capability in [
+        None,
+        Some(&b""[..]),
+        Some(&b"0"[..]),
+        Some(&b"1"[..]),
+        Some(&b"2"[..]),
+    ] {
+        let encoded = capability
+            .map(|value| extensions::encode(&[(TICKET_BINDINGS, value)]))
+            .unwrap_or_default();
+        let w = Webhook::open(
+            br#"{"url":"https://a.example/","auth_header":{"name":"X-Api-Key","value":"old"}}"#,
+            &[],
+            1,
+        )
+        .unwrap();
+        let (settings, generation) = w.current();
+        let mut at = Posting {
+            settings,
+            generation,
+            offset: 0,
+            issued: 0,
+            exchange: None,
+            bindings_pinned: pinned_ticket_bindings(&encoded),
+        };
+        w.refresh(
+            br#"{"url":"https://b.example/","auth_header":{"name":"X-Api-Key","value":"new"}}"#,
+            &[],
+            2,
+        )
+        .unwrap();
+        let pinned = capability == Some(&b"1"[..]);
+        assert_eq!(w.cut_by_reload(&mut at, b"{\"line\":2}\n"), !pinned);
+        assert_eq!(at.settings.url, "https://a.example/");
+        assert_eq!(at.settings.auth_header.as_ref().unwrap().value, "old");
+        assert_eq!(w.settings().url, "https://b.example/");
+    }
 }
 
 /// `next_line` skips blank lines and answers the offset past the line it returns.
@@ -1717,6 +1767,55 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
             }
         }
     }
+}
+
+/// RED before: a framing or connection field named as the auth header was refused as "not a valid
+/// HTTP header" (open, validate, check) and the migration said the same of it, though the name is a
+/// valid header: the http framer states these fields itself. Each says so.
+#[test]
+fn a_framing_auth_header_name_is_refused_in_true_words() {
+    for name in [
+        "Host",
+        "content-length",
+        "Transfer-Encoding",
+        "proxy-connection",
+    ] {
+        let say = format!(
+            "settings.auth_header.name `{name}` is a framing/connection field the http framer \
+             states itself; 1.6.0 does not send it"
+        );
+        let s = json!({"url": "https://a.example/", "auth_header": {"name": name, "value": "1"}});
+        let bytes = s.to_string();
+        assert_eq!(
+            Webhook::open(bytes.as_bytes(), &[], 1)
+                .expect_err(name)
+                .text(),
+            Some(say.as_str()),
+            "{name}"
+        );
+        assert_eq!(
+            Webhook::validate(bytes.as_bytes()).expect_err(name).text(),
+            Some(say.as_str()),
+            "{name}"
+        );
+        let lines = check(CheckPhase::Instances, &[("w".to_string(), s.clone())]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains(&say), "{name}: {}", lines[0]);
+        assert!(!lines[0].contains("not a valid"), "{name}: {}", lines[0]);
+        let m = migrated(s);
+        assert_eq!(m.report.len(), 1, "{name}");
+        assert!(m.report[0].contains(&say), "{name}: {}", m.report[0]);
+        assert!(
+            !m.report[0].contains("not a valid"),
+            "{name}: {}",
+            m.report[0]
+        );
+    }
+    // A name that is no token keeps the generic words.
+    let bad =
+        json!({"url": "https://a.example/", "auth_header": {"name": "Bad Name", "value": "1"}});
+    let m = migrated(bad);
+    assert_eq!(m.report, vec![REMOVED_AUTH_HEADER.to_string()]);
 }
 
 /// RED before: an ambiguous or unparseable echo showed whatever precedes the first `:` as the

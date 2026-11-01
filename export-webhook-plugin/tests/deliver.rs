@@ -14,7 +14,9 @@
 //! BUSBAR-7071 line, a transport error ONE BUSBAR-7072 line, neither naming the url's userinfo,
 //! path or query, nor the auth header's value.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::net::TcpListener;
+use std::sync::{mpsc, Arc, Mutex, OnceLock, PoisonError};
+use std::time::Duration;
 
 use busbar_contract::abi::export::{self, DeliverIn};
 use busbar_contract::abi::mechanism::call::{Blob, DeadlineClass, OutHead, BLOB_JSONL};
@@ -26,7 +28,7 @@ use busbar_plugin_loader::dispatch::{
 use busbar_test_kit::conformance::{
     bind, called, cdylib_of, dispatcher, input, on_ticket, open_resumed, refresh,
 };
-use busbar_test_kit::conformance_host::{anchors, far_end, host, Doors};
+use busbar_test_kit::conformance_host::{anchors, far_end_on, host, Doors};
 
 /// The transport doors the host serves, as `tests/support/conformance_host.rs` names them.
 const DOORS: Doors = &[
@@ -34,17 +36,65 @@ const DOORS: Doors = &[
     ("http", busbar_transport_http::door::MACRO_DOOR),
 ];
 
-/// This test's far end: loopback, a port of its own (the conformance suite's is 51655).
-const FAR_END: &str = "localhost:51656";
+struct Targets {
+    first: String,
+    next: String,
+    failed: String,
+}
 
-/// A loopback port nothing listens on: a dial there is refused (the transport-error path).
-const NOBODY: &str = "localhost:51657";
+fn targets() -> &'static Targets {
+    static TARGETS: OnceLock<Targets> = OnceLock::new();
+    TARGETS.get_or_init(|| {
+        let secured = || {
+            let listener = TcpListener::bind("localhost:0").expect("bind a private TLS listener");
+            let address = far_end_on(listener, answer).expect("start the owned TLS listener");
+            format!("localhost:{}", address.port())
+        };
+        let first = secured();
+        let next = secured();
+        let failed = TcpListener::bind("localhost:0").expect("bind a private failing peer");
+        let failed_address = failed.local_addr().expect("the owned peer's address");
+        std::thread::spawn(move || {
+            for peer in failed.incoming() {
+                let Ok(peer) = peer else { break };
+                // Own the address continuously and close each connection before TLS completes.
+                // This is a real transport error, without assuming any unbound port stays free.
+                drop(peer);
+            }
+        });
+        Targets {
+            first,
+            next,
+            failed: format!("localhost:{}", failed_address.port()),
+        }
+    })
+}
+
+fn far_end() -> &'static str {
+    &targets().first
+}
+
+fn next_far_end() -> &'static str {
+    &targets().next
+}
+
+fn failing_peer() -> &'static str {
+    &targets().failed
+}
 
 /// The body the far end answers `/big` with: past the SDK's 16 MiB reply cap.
 const BIG: usize = 17 << 20;
 
 /// Every whole request the far end read, in order.
 static SEEN: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+static DELIVERY_LOCK: Mutex<()> = Mutex::new(());
+
+struct Pause {
+    reached: mpsc::SyncSender<()>,
+    release: mpsc::Receiver<()>,
+}
+
+static PAUSE: Mutex<Option<Pause>> = Mutex::new(None);
 
 /// The far end's answer once a whole request (its head, then the `content-length` body it states)
 /// has been read: `503` to a request for `/fail…`, else `200`. Each request is recorded.
@@ -62,6 +112,15 @@ fn answer(seen: &[u8]) -> Option<Vec<u8>> {
     SEEN.lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push(seen.to_vec());
+    let pause = head
+        .starts_with("post /pending-old?")
+        .then(|| PAUSE.lock().unwrap_or_else(PoisonError::into_inner).take())
+        .flatten();
+    if let Some(pause) = pause {
+        let _ = pause.reached.send(());
+        // Always release the server thread even if the test fails to reach REFRESH.
+        let _ = pause.release.recv_timeout(Duration::from_secs(10));
+    }
     Some(if head.starts_with("post /big") {
         // A 200 whose body is past the SDK's 16 MiB reply cap: the sink judges the head alone.
         let mut r = format!("HTTP/1.1 200 OK\r\ncontent-length: {BIG}\r\n\r\n").into_bytes();
@@ -127,7 +186,7 @@ fn opened_door(
     settings: &serde_json::Value,
     dropped: bool,
 ) -> (Plugin<Export>, Arc<Dispatcher>, Arc<Tape>) {
-    far_end(FAR_END, answer);
+    let _ = targets();
     let d = dispatcher();
     let tape = Arc::new(Tape::default());
     let b = Bind {
@@ -193,6 +252,7 @@ fn naming<'a>(lines: &'a [String], code: &str) -> Vec<&'a String> {
 /// These scenarios share the far end and its record, so they run under one delivery lock.
 #[test]
 fn deliver_through_the_harness() {
+    let _guard = DELIVERY_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     for dropped in [false, true] {
         records_in_one_post_per_line_out(dropped);
         a_bodiless_204_is_delivered_and_a_redirect_is_not_followed(dropped);
@@ -206,6 +266,22 @@ fn deliver_through_the_harness() {
     blank_lines_are_not_posted();
 }
 
+#[test]
+fn a_pending_multiline_batch_keeps_its_binding_across_a_successful_refresh() {
+    let _guard = DELIVERY_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    for dropped in [false, true] {
+        a_pending_batch_keeps_its_original_destination_and_credentials(false, dropped);
+    }
+}
+
+#[test]
+fn a_refused_refresh_keeps_both_the_pending_batch_and_the_next_batch_on_the_old_binding() {
+    let _guard = DELIVERY_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    for dropped in [false, true] {
+        a_pending_batch_keeps_its_original_destination_and_credentials(true, dropped);
+    }
+}
+
 /// Records in -> one HTTPS POST per line out, in order: the target's path and query, the
 /// userinfo's Basic `authorization` first, then `content-type: application/json`, then the
 /// configured auth header (lower-cased), and the line as the body; READY, and nothing dropped.
@@ -213,7 +289,7 @@ fn records_in_one_post_per_line_out(dropped: bool) {
     seen();
     let (p, d, tape) = opened_door(
         &serde_json::json!({
-            "url": format!("https://us%40er:p4ss@{FAR_END}/in?k=v"),
+            "url": format!("https://us%40er:p4ss@{}/in?k=v", far_end()),
             "auth_header": {"name": "X-Api-Key", "value": "k3Y-VaLuE"}
         }),
         dropped,
@@ -269,7 +345,7 @@ fn records_in_one_post_per_line_out(dropped: bool) {
 fn a_non_2xx_answer_drops_the_line_as_busbar_7071() {
     seen();
     let (p, d, tape) = opened(&serde_json::json!({
-        "url": format!("https://u53r:s3cr3t-pw@{FAR_END}/fail/T0KEN-PATH?api_key=s3cr3t-q"),
+        "url": format!("https://u53r:s3cr3t-pw@{}/fail/T0KEN-PATH?api_key=s3cr3t-q", far_end()),
         "auth_header": {"name": "Authorization", "value": "Bearer s3cr3t-h"}
     }));
     let answer = deliver(&p, &d, "{\"outcome\":\"ok\"}\n");
@@ -280,7 +356,7 @@ fn a_non_2xx_answer_drops_the_line_as_busbar_7071() {
     assert_eq!(dropped.len(), 1, "{host:?}");
     assert!(dropped[0].contains("503"), "{}", dropped[0]);
     assert!(
-        dropped[0].contains(&format!("https://***@{FAR_END}/***?***")),
+        dropped[0].contains(&format!("https://***@{}/***?***", far_end())),
         "{}",
         dropped[0]
     );
@@ -288,11 +364,11 @@ fn a_non_2xx_answer_drops_the_line_as_busbar_7071() {
     no_secret(&host);
 }
 
-/// A transport error (the target refuses the connection) drops the line: ONE BUSBAR-7072 line, the
+/// A transport error (the target closes before TLS completes) drops the line: ONE BUSBAR-7072 line, the
 /// host's error scrubbed of the target's parts; READY.
 fn a_transport_error_drops_the_line_as_busbar_7072() {
     let (p, d, tape) = opened(&serde_json::json!({
-        "url": format!("https://u53r:s3cr3t-pw@{NOBODY}/T0KEN-PATH?api_key=s3cr3t-q"),
+        "url": format!("https://u53r:s3cr3t-pw@{}/T0KEN-PATH?api_key=s3cr3t-q", failing_peer()),
         "auth_header": {"name": "Authorization", "value": "Bearer s3cr3t-h"}
     }));
     let answer = deliver(&p, &d, "{\"outcome\":\"ok\"}\n");
@@ -301,7 +377,7 @@ fn a_transport_error_drops_the_line_as_busbar_7072() {
     let dropped = naming(&host, "BUSBAR-7072");
     assert_eq!(dropped.len(), 1, "{host:?}");
     assert!(
-        dropped[0].contains(&format!("https://***@{NOBODY}/***?***")),
+        dropped[0].contains(&format!("https://***@{}/***?***", failing_peer())),
         "{}",
         dropped[0]
     );
@@ -330,11 +406,11 @@ fn no_secret(host: &[String]) {
 fn the_first_line_after_a_refresh_goes_on_the_new_settings() {
     seen();
     let (p, d, tape) = opened(&serde_json::json!({
-        "url": format!("https://old-user:old-pw@{FAR_END}/old?o=1"),
+        "url": format!("https://old-user:old-pw@{}/old?o=1", far_end()),
         "auth_header": {"name": "X-Api-Key", "value": "old-key"}
     }));
     let new = serde_json::json!({
-        "url": format!("https://new-user:new-pw@{FAR_END}/new?n=2"),
+        "url": format!("https://new-user:new-pw@{}/new?n=2", far_end()),
         "auth_header": {"name": "X-Api-Key", "value": "new-key"}
     });
     let refreshed = called(&refresh(&p, new.to_string().as_bytes()));
@@ -359,11 +435,120 @@ fn the_first_line_after_a_refresh_goes_on_the_new_settings() {
     assert!(naming(&host, "BUSBAR-7").is_empty(), "{host:?}");
 }
 
+/// The first POST has reached A while DELIVER waits for its response. A successful REFRESH moves
+/// new tickets to B; the rest of this multi-line ticket must still reach A with only A's
+/// credentials. A refused REFRESH changes neither the old ticket nor the next one. This uses the
+/// existing loader/test-kit API so the old host reaches the actual behavior assertion.
+fn a_pending_batch_keeps_its_original_destination_and_credentials(refuse: bool, dropped: bool) {
+    seen();
+    assert_ne!(
+        far_end(),
+        next_far_end(),
+        "the two bindings are distinct receivers"
+    );
+    let old = serde_json::json!({
+        "url": format!("https://old-user:old-pw@{}/pending-old?old=1", far_end()),
+        "auth_header": {"name": "X-Api-Key", "value": "old-key"},
+        "delivery_timeout_secs": 30,
+    });
+    let new = serde_json::json!({
+        "url": format!("https://new-user:new-pw@{}/pending-new?new=1", next_far_end()),
+        "auth_header": {
+            "name": if refuse { "Content-Length" } else { "X-Api-Key" },
+            "value": "new-key",
+        },
+        "delivery_timeout_secs": 30,
+    });
+    let (p, d, tape) = opened_door(&old, dropped);
+    let (reached, waiting) = mpsc::sync_channel(1);
+    let (release, held) = mpsc::sync_channel(1);
+    *PAUSE.lock().unwrap_or_else(PoisonError::into_inner) = Some(Pause {
+        reached,
+        release: held,
+    });
+    let old_batch = "{\"old\":0}\n{\"old\":1}\n\n{\"old\":2}\n";
+    let (reached, refreshed, delivered) = std::thread::scope(|scope| {
+        let delivery = scope.spawn(|| deliver(&p, &d, old_batch));
+        let reached = waiting.recv_timeout(Duration::from_secs(5));
+        let refreshed = called(&refresh(&p, new.to_string().as_bytes()));
+        // Release and join before any assertion, including a missing initial POST or a refused
+        // refresh that unexpectedly succeeded, so no far-end thread remains blocked on failure.
+        let _ = release.send(());
+        let delivered = delivery.join();
+        (reached, refreshed, delivered)
+    });
+    PAUSE.lock().unwrap_or_else(PoisonError::into_inner).take();
+    reached.expect("the first old POST arrived before REFRESH");
+    assert_eq!(
+        refreshed.starts_with("Ready "),
+        !refuse,
+        "refresh: {refreshed}"
+    );
+    assert!(delivered.unwrap().starts_with("Ready "));
+    let old_requests = seen();
+    assert_eq!(
+        old_requests.len(),
+        3,
+        "all old batch lines must finish on A"
+    );
+    for (request, body) in old_requests
+        .iter()
+        .zip(["{\"old\":0}", "{\"old\":1}", "{\"old\":2}"])
+    {
+        assert_binding(request, far_end(), "/pending-old?old=1", "old-key", true);
+        assert_eq!(request.split_once("\r\n\r\n").unwrap().1, body);
+    }
+    let next = deliver(&p, &d, "{\"next\":0}\n{\"next\":1}\n");
+    assert!(next.starts_with("Ready "), "next delivery: {next}");
+    let new_requests = seen();
+    assert_eq!(new_requests.len(), 2);
+    for request in &new_requests {
+        if refuse {
+            assert_binding(request, far_end(), "/pending-old?old=1", "old-key", true);
+        } else {
+            assert_binding(
+                request,
+                next_far_end(),
+                "/pending-new?new=1",
+                "new-key",
+                false,
+            );
+        }
+    }
+    let host = tape.take();
+    assert!(
+        naming(&host, "BUSBAR-7109").is_empty(),
+        "a pinned batch was cut: {host:?}"
+    );
+    assert!(
+        naming(&host, "BUSBAR-7072").is_empty(),
+        "a batch lost its destination: {host:?}"
+    );
+}
+
+fn assert_binding(request: &str, destination: &str, path: &str, key: &str, old: bool) {
+    let (head, _) = request.split_once("\r\n\r\n").unwrap();
+    let fields = header_fields(head.split("\r\n").skip(1));
+    assert!(head.starts_with(&format!("POST {path} HTTP/1.1\r\n")));
+    assert!(fields.contains(&format!("host: {destination}")));
+    assert!(fields.contains(&format!("x-api-key: {key}")));
+    let basic = if old {
+        "b2xkLXVzZXI6b2xkLXB3"
+    } else {
+        "bmV3LXVzZXI6bmV3LXB3"
+    };
+    assert!(
+        fields.contains(&format!("authorization: Basic {basic}")),
+        "the userinfo credential belongs to this destination"
+    );
+    assert!(!head.contains(if old { "new-key" } else { "old-key" }));
+}
+
 /// W2: the sink judges a delivery on the reply's HEAD (1.5.5 dropped the body unread): a 200 whose
 /// body is past the SDK's reply cap is a delivered line, not a BUSBAR-7072.
 fn a_200_with_a_huge_body_is_still_a_delivered_line() {
     seen();
-    let (p, d, tape) = opened(&serde_json::json!({"url": format!("https://{FAR_END}/big")}));
+    let (p, d, tape) = opened(&serde_json::json!({"url": format!("https://{}/big", far_end())}));
     let answer = deliver(&p, &d, "{\"line\":0}\n{\"line\":1}\n");
     assert!(answer.starts_with("Ready "), "deliver: {answer}");
     assert_eq!(seen().len(), 2, "both lines POSTed");
@@ -378,7 +563,7 @@ fn a_200_with_a_huge_body_is_still_a_delivered_line() {
 /// class) is disabled at boot, and its `deliver` posts nothing and answers READY.
 fn a_disabled_instance_posts_nothing() {
     seen();
-    let (p, d, tape) = opened(&serde_json::json!({"url": format!("http://{FAR_END}/in")}));
+    let (p, d, tape) = opened(&serde_json::json!({"url": format!("http://{}/in", far_end())}));
     let answer = deliver(&p, &d, "{\"line\":0}\n{\"line\":1}\n");
     assert!(answer.starts_with("Ready "), "deliver: {answer}");
     assert!(seen().is_empty(), "a disabled instance posted");
@@ -392,7 +577,7 @@ fn a_disabled_instance_posts_nothing() {
 /// T2: blank lines in a batch are not POSTed (1.5.5 skipped empty lines).
 fn blank_lines_are_not_posted() {
     seen();
-    let (p, d, _tape) = opened(&serde_json::json!({"url": format!("https://{FAR_END}/in")}));
+    let (p, d, _tape) = opened(&serde_json::json!({"url": format!("https://{}/in", far_end())}));
     let answer = deliver(&p, &d, "\n{\"line\":0}\n\n\n{\"line\":1}\n\n");
     assert!(answer.starts_with("Ready "), "deliver: {answer}");
     let got = seen();
@@ -407,7 +592,8 @@ fn blank_lines_are_not_posted() {
 /// status (the head is judged; the body is never read).
 fn a_non_2xx_with_a_huge_body_still_logs_its_status() {
     seen();
-    let (p, d, tape) = opened(&serde_json::json!({"url": format!("https://{FAR_END}/fail-big")}));
+    let (p, d, tape) =
+        opened(&serde_json::json!({"url": format!("https://{}/fail-big", far_end())}));
     let answer = deliver(&p, &d, "{\"line\":0}\n");
     assert!(answer.starts_with("Ready "), "deliver: {answer}");
     assert_eq!(seen().len(), 1);
@@ -432,7 +618,7 @@ fn a_bodiless_204_is_delivered_and_a_redirect_is_not_followed(dropped: bool) {
     for (path, status) in [("/no-content", None), ("/redirect", Some("302"))] {
         seen();
         let (p, d, tape) = opened_door(
-            &serde_json::json!({"url": format!("https://{FAR_END}{path}")}),
+            &serde_json::json!({"url": format!("https://{}{path}", far_end())}),
             dropped,
         );
         let answer = deliver(&p, &d, "{\"line\":0}\n");
