@@ -90,9 +90,12 @@ const RELOAD_CUT: &str = "BUSBAR-7109";
 /// The host pins connector and disk bindings for the entire delivery ticket, including resumes
 /// and new connections for later lines. Older hosts state nothing and keep the reload cut.
 const TICKET_BINDINGS: &str = "busbar.export.ticket-bindings";
+/// Version of the host ticket-custody capability documented by the export lifecycle.
+const TICKET_BINDINGS_VERSION: &[u8] = b"1";
 
 fn pinned_ticket_bindings(extensions: &[u8]) -> bool {
-    busbar_contract::abi::mechanism::extensions::get(extensions, TICKET_BINDINGS) == Some(b"1")
+    busbar_contract::abi::mechanism::extensions::get(extensions, TICKET_BINDINGS)
+        == Some(TICKET_BINDINGS_VERSION)
 }
 
 /// The config path the target comes from: the `url` setting (`settings.<key>`, the path the host's
