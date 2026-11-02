@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 use super::*;
+use crate::tests::admission_host::AdmissionHost;
 use serde_json::json;
 
 #[test]
@@ -48,11 +49,9 @@ fn a_receiver_echoing_only_the_authorization_credential_is_scrubbed() {
 fn an_admission_fault_does_not_permanently_disable_a_valid_target() {
     let broken = AdmissionHost::new(Outcome::Failed);
     let granted = AdmissionHost::new(Outcome::Ready);
-    let bad_tables = broken.lent();
-    let good_tables = granted.lent();
     let hook = Webhook::open(br#"{"url":"https://hooks.example/"}"#, &[], 1).unwrap();
-    assert!(!hook.admitted(Some(&Host::of(bad_tables))));
-    assert!(hook.admitted(Some(&Host::of(good_tables))));
+    assert!(!hook.admitted(Some(&broken.host())));
+    assert!(hook.admitted(Some(&granted.host())));
 }
 
 #[test]

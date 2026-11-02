@@ -5,7 +5,8 @@
 
 use super::*;
 #[path = "tests/admission_host.rs"]
-mod admission_host;
+#[allow(unsafe_code)]
+pub(super) mod admission_host;
 use admission_host::AdmissionHost;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -530,11 +531,9 @@ fn validation_errors_mask_the_targets_userinfo() {
 fn the_lines_naming_a_userinfo_target_read_exactly() {
     use busbar_contract::abi::mechanism::call::Outcome;
     use busbar_contract::abi::mechanism::ticket::Ticket;
-    use busbar_contract::abi::sdk::conn::Host;
     use std::task::Poll;
     let fake_host = AdmissionHost::new(Outcome::Refused);
-    let tables = fake_host.lent();
-    let host = Host::of(tables);
+    let host = fake_host.host();
     for (url, line) in [
         (
             "HTTP://u:s3cret@siem.example/in",
@@ -597,7 +596,7 @@ fn ready_asks_the_verdict_at_boot_and_never_refuses_it() {
     use std::task::Poll;
 
     let fake_host = AdmissionHost::new(Outcome::Refused);
-    let host = busbar_contract::abi::sdk::conn::Host::of(fake_host.lent());
+    let host = fake_host.host();
     let w = Webhook::open(br#"{"url":"http://127.0.0.1:4000/sidecar"}"#, &[], 1).expect("opens");
     let got = logged(|| assert!(matches!(w.ready(&host, Ticket::NONE), Poll::Ready(Ok(())))));
     assert_eq!(got.len(), 1, "{got:?}");
@@ -639,11 +638,9 @@ fn a_refresh_never_shows_new_settings_beside_the_old_verdict() {
 fn ready_reads_the_hosts_refusal_and_names_the_scheme_rule() {
     use busbar_contract::abi::mechanism::call::Outcome;
     use busbar_contract::abi::mechanism::ticket::Ticket;
-    use busbar_contract::abi::sdk::conn::Host;
     use std::task::Poll;
     let fake_host = AdmissionHost::new(Outcome::Refused);
-    let tables = fake_host.lent();
-    let host = Host::of(tables);
+    let host = fake_host.host();
     let w = Webhook::open(br#"{"url":"http://127.0.0.1:4000/sidecar"}"#, &[], 1).expect("opens");
     let got = logged(|| assert!(matches!(w.ready(&host, Ticket::NONE), Poll::Ready(Ok(())))));
     assert_eq!(got.len(), 1, "{got:?}");
@@ -656,6 +653,7 @@ fn ready_reads_the_hosts_refusal_and_names_the_scheme_rule() {
 
 /// THE CHECK SLOT THROUGH THE DOOR: the phase maps to its check (an instance whose
 #[test]
+#[allow(unsafe_code)]
 fn the_check_slot_maps_its_phase_and_leases_the_findings() {
     let probe = crate::wipe_probe::Probe::start();
     use busbar_contract::abi::export::{
