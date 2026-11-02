@@ -91,3 +91,36 @@ pub fn refresh(p: &Plugin<Export>, settings: &[u8]) -> Called {
         &mut Frame::new(i, blank_out::<OutHead>()),
     )
 }
+
+/// Host-observed effects of the concrete export lifecycle, compared between the two doors.
+#[derive(Default)]
+pub struct Observed(std::sync::Mutex<Vec<String>>);
+impl Observed {
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+impl busbar_plugin_loader::dispatch::EnvelopeSink for Observed {
+    fn metric(&self, m: busbar_plugin_loader::dispatch::Metric<'_>) {
+        let labels: Vec<_> = m
+            .labels
+            .iter()
+            .map(|label| String::from_utf8_lossy(label))
+            .collect();
+        self.0.lock().unwrap().push(format!(
+            "metric {} {} {} {labels:?}",
+            m.family, m.kind, m.value
+        ));
+    }
+    fn diag(&self, d: busbar_plugin_loader::dispatch::Diagnostic<'_>) {
+        self.0.lock().unwrap().push(format!(
+            "diag {} {} {}",
+            String::from_utf8_lossy(d.name),
+            d.severity,
+            String::from_utf8_lossy(d.text)
+        ));
+    }
+    fn dropped(&self, why: busbar_plugin_loader::dispatch::Dropped) {
+        self.0.lock().unwrap().push(format!("dropped {why:?}"));
+    }
+}
