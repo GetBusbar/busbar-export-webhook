@@ -36,6 +36,22 @@ fn sent(s: &Settings, want: &[(&str, &str)]) {
     assert!(held.next().is_none(), "every sealed field was framed");
 }
 
+/// Every sealed credential (Basic userinfo, `auth_header` value) of an https target is marked
+/// secure-required, so the host refuses to carry it over an unsecured connection.
+#[test]
+fn sealed_credentials_of_an_https_target_are_secure_required() {
+    let s: Settings = serde_json::from_value(json!({
+        "url": "https://u:p@siem.example/in",
+        "auth_header": {"name": "Authorization", "value": "Bearer x"}
+    }))
+    .expect("settings parse");
+    let p = Prepared::new(s);
+    assert!(p.sealed.len() >= 2, "userinfo and header value are sealed");
+    for (_, name, cred) in &p.sealed {
+        assert!(cred.secure_required(), "{}", String::from_utf8_lossy(name));
+    }
+}
+
 fn refused(settings: serde_json::Value) -> String {
     let r = Webhook::validate(settings.to_string().as_bytes()).expect_err("refused");
     assert_eq!(r.outcome(), Outcome::Failed);
@@ -1149,8 +1165,8 @@ fn auth_header_refused(settings: &serde_json::Value) -> bool {
 /// AN AUTH HEADER 1.5.5 COULD NOT BUILD IS REMOVED BY THE MIGRATION (FLEET "Plugin-side migrate
 /// entries", owner ruling 2026-10-27; export-webhook #33 W1): 1.5.5 left such a header out and sent
 /// every line without it, and 1.6.0 refuses it at validation, so the migration removes exactly the
-/// `auth_header` that refusal names, says so in one line that names neither the header's name nor its
-/// value, and raises nothing against core's keys. The rest of the section is kept as written, and the
+/// `auth_header` that refusal names, says so in one line (a framing report names the header, never its value; the
+/// other report names neither), and raises nothing against core's keys. The rest of the section is kept as written, and the
 /// migrated section validates. RED before: the door stated no migration, so the section was carried
 /// over unchanged and 1.6.0 refused it.
 #[test]
@@ -1184,7 +1200,13 @@ fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
             "{name:?}: {value:?}"
         );
         let want = if is_framing(name) {
-            removed_framing_header(name)
+            let literal = format!(
+                "removed settings.auth_header.name `{name}` is a framing/connection field the \
+                 http framer states itself; 1.6.0 does not send it, which 1.6.0 refuses at \
+                 validation and open"
+            );
+            assert_eq!(removed_framing_header(name), literal);
+            literal
         } else {
             REMOVED_AUTH_HEADER.to_string()
         };
@@ -1379,7 +1401,11 @@ fn a_framing_or_connection_header_is_refused() {
         "keep-alive",
         "proxy-connection",
     ] {
-        let words = framing_words(name);
+        let words = format!(
+            "settings.auth_header.name `{name}` is a framing/connection field the http framer \
+             states itself; 1.6.0 does not send it"
+        );
+        assert_eq!(words, framing_words(name));
         let s = json!({"url": "https://a.example/", "auth_header": {"name": name, "value": "1"}});
         let lines = check(CheckPhase::Instances, &[("w".to_string(), s.clone())]);
         assert_eq!(lines.len(), 1, "{name}: {lines:?}");
