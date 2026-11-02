@@ -10,7 +10,7 @@ fn no_source_file_allows_or_spells_unsafe() {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let root = std::fs::read_to_string(src.join("lib.rs")).expect("lib.rs reads");
     assert!(
-        root.contains("#![forbid(unsafe_code)]"),
+        root.lines().any(|l| l.trim() == "#![forbid(unsafe_code)]"),
         "the crate root must forbid unsafe_code"
     );
     let mut stack = vec![src];
