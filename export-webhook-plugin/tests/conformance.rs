@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! **THE PUBLISHED CONFORMANCE SUITE, RUN BY THIS PLUGIN** (busbar TODO ABI-b4; OWNER 2026-10-03:
+//! Runs the published conformance suite through this plugin's linked and dropped-in doors.
 
 #[path = "support/conformance_host.rs"]
 mod conformance_host;
@@ -36,7 +36,7 @@ busbar_test_kit::conformance_suite! {
     tls: conformance_host::anchors(),
 }
 
-/// The sink's declared secret fields, as the kernel resolves them (busbar #1699; OWNER RULING,
+/// The kernel resolves references at declared secret fields in place and refuses undeclared ones.
 
 mod declared_secrets {
     use std::sync::Arc;

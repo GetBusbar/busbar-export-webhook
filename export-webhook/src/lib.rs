@@ -743,7 +743,7 @@ pub fn removed_framing_header(name: &str) -> String {
     )
 }
 
-/// THE 1.5.5 UPGRADE (`busbar --migrate-config`; owner ruling 2026-10-27): this sink's own
+/// Migrates legacy webhook settings by removing an auth header that validation refuses.
 
 pub struct Migration;
 

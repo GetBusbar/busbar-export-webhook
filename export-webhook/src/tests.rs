@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The webhook sink tests itself (DECISIONS #2): its settings refusals, word for word as the
+//! Exercises webhook settings, delivery and compatibility behavior.
 
 use super::*;
 use serde_json::json;
@@ -222,8 +222,6 @@ fn a_delivery_posts_the_line() {
     assert_eq!(request(&bare, b"{}").timeout_ms, 2000);
 }
 
-/// RED (audit export-webhook #1, ARCHITECT ruling (c)): PARITY WITH 1.5.5. A target URL carrying a
-
 #[test]
 fn a_userinfo_in_the_url_is_sent_as_basic_as_1_5_5_sent_it() {
     for (url, sent) in [
@@ -281,8 +279,6 @@ fn a_userinfo_in_the_url_is_sent_as_basic_as_1_5_5_sent_it() {
     }
 }
 
-/// RED (audit export-webhook #1, ARCHITECT ruling (c)): the userinfo's field rides every POST
-
 #[test]
 fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
     let basic = ("authorization", "Basic dXNlcjpwYXNz");
@@ -301,8 +297,6 @@ fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
     let alone = settings(json!({"url": "https://user:pass@siem.example/in"}));
     sent(&alone, &[basic, json]);
 }
-
-/// RED (audit export-webhook round 1): the contract's field block carries lower-case names, and
 
 #[test]
 fn a_configured_auth_header_name_goes_lower_case_as_1_5_5_sent_it() {
@@ -611,8 +605,6 @@ fn ready_asks_the_verdict_at_boot_and_never_refuses_it() {
     );
 }
 
-/// RED (audit export-webhook round 1): a reload publishes the new settings and clears the cached
-
 #[test]
 fn a_refresh_never_shows_new_settings_beside_the_old_verdict() {
     let w = Webhook::open(br#"{"url":"https://a.example/x"}"#, &[], 1).expect("opens");
@@ -741,8 +733,6 @@ fn the_check_slot_maps_its_phase_and_leases_the_findings() {
         .assert_wiped_on_linux(&["check settings JSON"]);
 }
 
-/// RED (audit export-webhook #4): PARITY WITH 1.5.5, which added the configured auth header only
-
 #[test]
 fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
     let json = ("content-type", "application/json");
@@ -773,8 +763,6 @@ fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
         sent(&s, &[json, (&name.to_ascii_lowercase(), value)]);
     }
 }
-
-/// THE SETTINGS SCHEMA MARKS NO FIELD SECRET BELOW THE ROOT (coordinator ruling (B), 2026-10-19:
 
 #[test]
 fn the_settings_schema_marks_no_nested_secret() {
@@ -822,8 +810,6 @@ fn the_settings_schema_marks_no_nested_secret() {
         .iter()
         .any(|v| v["$ref"] == "#/$defs/reference"));
 }
-
-/// THE AUTH HEADER'S VALUE NEVER RENDERS THROUGH `Debug` (Q128 export-webhook M2: "the secret
 
 #[test]
 fn the_auth_header_value_is_redacted_from_debug() {
@@ -878,8 +864,6 @@ fn all_text(events: &[Event]) -> String {
         .collect()
 }
 
-/// H2: an `auth_header` written as a bare string (`auth_header: "Bearer …"`, where a `{name, value}`
-
 #[test]
 fn a_mistyped_auth_header_never_reaches_the_refusal() {
     let r =
@@ -900,8 +884,6 @@ fn a_mistyped_auth_header_never_reaches_the_refusal() {
         "the refusal carried the credential: {r}"
     );
 }
-
-/// H3: a delivery failure logged the target's path and query (where Slack-style and `?api_key=`
 
 #[test]
 fn a_failed_delivery_never_logs_the_targets_path_query_or_the_hosts_echo_of_them() {
@@ -942,8 +924,6 @@ fn the_log_target_names_only_scheme_host_and_port() {
     assert_eq!(log_target("not a url"), "***");
 }
 
-/// RED before: `open` took settings that do not parse and opened a dead instance whose every
-
 #[test]
 fn open_and_refresh_refuse_settings_that_do_not_parse() {
     let bad = br#"{"url":"https://a.example/","bogus":1}"#;
@@ -958,8 +938,6 @@ fn open_and_refresh_refuse_settings_that_do_not_parse() {
         "a refused refresh keeps the old settings"
     );
 }
-
-/// OWNER RULING 2026-10-24, RED before: a url that parses but reads its credential as host and
 
 #[test]
 fn an_ambiguous_url_is_refused_without_its_credential() {
@@ -985,8 +963,6 @@ fn an_ambiguous_url_is_refused_without_its_credential() {
         assert!(Webhook::validate(settings.as_bytes()).is_ok(), "{url}");
     }
 }
-
-/// RED before: `serve` answered READY `404` for a sink that declares no route, a silent "nothing".
 
 #[test]
 fn serve_is_refused_saying_why_through_the_door() {
@@ -1027,8 +1003,6 @@ fn serve_is_refused_saying_why_through_the_door() {
     );
     assert_eq!(closed.outcome, Outcome::Ready);
 }
-
-/// AN AUTH HEADER 1.5.5 COULD NOT BUILD IS REFUSED AT VALIDATION (owner 2026-10-27), with a message
 
 #[test]
 fn an_auth_header_that_cannot_be_built_is_refused_at_validation() {
@@ -1105,8 +1079,6 @@ fn auth_header_refused(settings: &serde_json::Value) -> bool {
     .iter()
     .any(|l| l.contains("settings.auth_header"))
 }
-
-/// AN AUTH HEADER 1.5.5 COULD NOT BUILD IS REMOVED BY THE MIGRATION (FLEET "Plugin-side migrate
 
 #[test]
 fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
@@ -1228,8 +1200,6 @@ fn no_declared_code_is_one_the_core_catalogue_holds() {
     }
 }
 
-/// W1: a formatted `Prepared` or `Webhook` carries none of the secrets its settings hold: the url's
-
 #[test]
 fn a_formatted_prepared_or_webhook_carries_no_secret() {
     let w = Webhook::open(
@@ -1281,8 +1251,6 @@ fn a_formatted_prepared_or_webhook_carries_no_secret() {
     }
 }
 
-/// W4 (lead-signed): `open` and `refresh` refuse an auth header that cannot be sent as an HTTP
-
 #[test]
 fn open_and_refresh_refuse_an_auth_header_that_cannot_be_sent() {
     let words = "settings: `auth_header` cannot be sent as an HTTP header";
@@ -1306,8 +1274,6 @@ fn open_and_refresh_refuse_an_auth_header_that_cannot_be_sent() {
     );
 }
 
-/// W5 (lead-signed): framing and connection fields are not auth headers: refused at `check` and at
-
 #[test]
 fn a_framing_or_connection_header_is_refused() {
     for name in [
@@ -1330,8 +1296,6 @@ fn a_framing_or_connection_header_is_refused() {
         assert_eq!(r.text(), Some(words.as_str()), "{name}");
     }
 }
-
-/// W6: a reload that changes only the delivery deadline or the in-flight bound does not cut a
 
 #[test]
 fn a_reload_of_only_the_deadline_or_bound_does_not_cut_the_batch() {
@@ -1376,7 +1340,6 @@ fn a_reload_of_only_the_deadline_or_bound_does_not_cut_the_batch() {
     assert!(w.reloaded_since(&mut at), "a credential change cuts it");
 }
 
-/// W7: `#i` is the instance's configured position, even when an earlier instance does not parse.
 #[test]
 fn a_finding_is_numbered_by_the_configured_position() {
     let instances = [
@@ -1390,8 +1353,6 @@ fn a_finding_is_numbered_by_the_configured_position() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains("(#1)"), "{lines:?}");
 }
-
-/// W8: the scheme is read as the URL parser reads it: leading C0 controls and spaces are stripped
 
 #[test]
 fn leading_controls_and_spaces_do_not_hide_the_scheme() {
@@ -1410,8 +1371,6 @@ fn leading_controls_and_spaces_do_not_hide_the_scheme() {
     let words = refusal_words(Some(" http://10.0.0.5/hook"), &refused);
     assert!(words.contains("must be an https:// URL"), "{words}");
 }
-
-/// W9: the connector words EVERY refusal of a target as `ConnError::Refused`, so a refusal of a
 
 #[test]
 fn only_an_undeclared_need_keeps_the_hosts_own_words() {
@@ -1437,8 +1396,6 @@ fn only_an_undeclared_need_keeps_the_hosts_own_words() {
 
     assert!(refusal_words(Some("http://10.0.0.5/in"), &connection).contains("must be an https://"));
 }
-
-/// T1: the BUSBAR-7109 mid-batch cut. A batch is on its first line (the parked exchange); a reload
 
 #[test]
 fn a_reload_of_the_target_mid_batch_drops_the_rest_once() {
@@ -1529,8 +1486,6 @@ fn next_line_skips_blank_lines_and_keeps_the_offset() {
     assert_eq!(next_line(b"", 0), None);
 }
 
-/// T3: a credential-looking extra key inside `auth_header` (serde quotes an unknown field's name)
-
 #[test]
 fn a_credential_looking_key_in_auth_header_never_reaches_the_refusal_or_the_log() {
     let settings = json!({
@@ -1558,8 +1513,6 @@ fn a_credential_looking_key_in_auth_header_never_reaches_the_refusal_or_the_log(
     });
     assert!(!all_text(&got).contains("Bearer tok"), "{got:?}");
 }
-
-/// W11: the schema's bounds are the ones validation enforces (`check`): a deadline of 1 to the
 
 #[test]
 fn the_settings_schema_bounds_are_the_ones_check_enforces() {
@@ -1641,8 +1594,6 @@ fn the_ambiguous_url_refusal_never_echoes_the_path_or_query() {
     }
 }
 
-/// RED before (HX-SLASHLESS): a url written without its slashes, or one the parser rejects, was
-
 #[test]
 fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
     let refused = ConnFailure::Refused("destination refused".into());
@@ -1694,8 +1645,6 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
     }
 }
 
-/// RED before: a framing or connection field named as the auth header was refused as "not a valid
-
 #[test]
 fn a_framing_auth_header_name_is_refused_in_true_words() {
     for name in [
@@ -1741,8 +1690,6 @@ fn a_framing_auth_header_name_is_refused_in_true_words() {
     let m = migrated(bad);
     assert_eq!(m.report, vec![REMOVED_AUTH_HEADER.to_string()]);
 }
-
-/// RED before: an ambiguous or unparseable echo showed whatever precedes the first `:` as the
 
 #[test]
 fn an_ambiguous_echo_shows_only_an_http_or_https_scheme() {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! T4: the Statement's strings asserted by their BYTES, not their lengths. Reading an `AbiStr` is
+//! Checks the Statement strings by their bytes.
 
 use busbar_export_webhook::{ALIAS, NAME, STATEMENT};
 

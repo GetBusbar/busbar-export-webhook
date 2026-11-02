@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE DELIVER SLOT, DRIVEN AS THE KERNEL'S EXPORT FLUSHER DRIVES IT (audit XW1): the linked door
+//! Exercises ticketed delivery through the real loader, host connector and local HTTPS receiver.
 
 use std::net::TcpListener;
 use std::sync::{mpsc, Arc, Mutex, OnceLock, PoisonError};
@@ -380,7 +380,7 @@ fn no_secret(host: &[String]) {
     }
 }
 
-/// LINE 0 AFTER A RELOAD (audit XW2), as the plugin and the loader answer it today: a delivery that
+/// A delivery started after refresh uses the new settings from its first line.
 
 fn the_first_line_after_a_refresh_goes_on_the_new_settings() {
     seen();
@@ -520,7 +520,7 @@ fn assert_binding(request: &str, destination: &str, path: &str, key: &str, old: 
     assert!(!head.contains(if old { "new-key" } else { "old-key" }));
 }
 
-/// W2: the sink judges a delivery on the reply's HEAD (1.5.5 dropped the body unread): a 200 whose
+/// A 200 with a huge body is still a delivered line.
 
 fn a_200_with_a_huge_body_is_still_a_delivered_line() {
     seen();
@@ -535,7 +535,7 @@ fn a_200_with_a_huge_body_is_still_a_delivered_line() {
     );
 }
 
-/// T2: an instance whose target the host refused (an `http://` target, refused by the open-web
+/// A disabled instance posts nothing.
 
 fn a_disabled_instance_posts_nothing() {
     seen();
@@ -550,7 +550,7 @@ fn a_disabled_instance_posts_nothing() {
     assert!(naming(&host, "BUSBAR-7072").is_empty(), "{host:?}");
 }
 
-/// T2: blank lines in a batch are not POSTed (1.5.5 skipped empty lines).
+/// Blank lines are not posted.
 fn blank_lines_are_not_posted() {
     seen();
     let (p, d, _tape) = opened(&serde_json::json!({"url": format!("https://{}/in", far_end())}));
@@ -564,7 +564,7 @@ fn blank_lines_are_not_posted() {
     );
 }
 
-/// W2: a non-2xx reply with a body past the reply cap is still ONE BUSBAR-7071 line naming its
+/// A non 2xx with a huge body still logs its status.
 
 fn a_non_2xx_with_a_huge_body_still_logs_its_status() {
     seen();

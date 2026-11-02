@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! **THE 1.5.5 UPGRADE THROUGH BOTH DOORS** (`busbar --migrate-config`, owner ruling 2026-10-27):
+//! Both doors migrate unsendable legacy auth headers and preserve sections requiring no migration.
 
 use busbar_plugin_loader::dispatch::load::raw;
 use busbar_plugin_loader::dispatch::migrate::{migrate_door, migrate_library};

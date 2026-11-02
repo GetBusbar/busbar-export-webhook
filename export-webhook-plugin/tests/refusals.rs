@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! **A PUSH SINK REFUSES `scrape` AND `serve`, SAYING WHY, THROUGH BOTH DOORS** (sibling review of
+//! Both doors refuse unsupported scrape and serve operations with explanatory errors.
 
 use std::sync::Arc;
 
