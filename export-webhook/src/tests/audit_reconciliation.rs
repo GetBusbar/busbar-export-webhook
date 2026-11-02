@@ -66,18 +66,19 @@ fn an_admission_fault_does_not_permanently_disable_a_valid_target() {
     let bad_tables = broken.lent();
     let good_tables = granted.lent();
     let hook = Webhook::open(br#"{"url":"https://hooks.example/"}"#, &[], 1).unwrap();
-    assert!(!hook.admitted(Some(&Host::of(&bad_tables))));
-    assert!(hook.admitted(Some(&Host::of(&good_tables))));
+    assert!(!hook.admitted(Some(&Host::of(bad_tables))));
+    assert!(hook.admitted(Some(&Host::of(good_tables))));
 }
 
 #[test]
 fn the_https_diagnostic_uses_the_parsers_embedded_whitespace_rules() {
     let line = refusal_words(
-        Some("ht\ttps://hooks.example/private"),
+        Some("ht\ttps://hooks.example/embedded-whitespace-path-canary"),
         &ConnFailure::Refused("destination refused".into()),
     );
     assert!(line.contains("SSRF guard"), "{line}");
-    assert!(!line.contains("/private"), "{line}");
+    assert!(line.contains("https://hooks.example/***"), "{line}");
+    assert!(!line.contains("embedded-whitespace-path-canary"), "{line}");
 }
 
 #[test]

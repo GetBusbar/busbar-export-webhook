@@ -551,7 +551,7 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
     }
     let fake_host = FakeHost::new().serve(fake::host::NEED_ADMIT, Refuses);
     let tables = fake_host.lent();
-    let host = Host::of(&tables);
+    let host = Host::of(tables);
     for (url, line) in [
         (
             "HTTP://u:s3cret@siem.example/in",
@@ -612,18 +612,12 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
 /// the instance stays disabled; the first delivery asks nothing again.
 #[test]
 fn ready_asks_the_verdict_at_boot_and_never_refuses_it() {
-    use busbar_contract::abi::mechanism::ticket::{HostTables, Ticket};
+    use busbar_contract::abi::mechanism::ticket::Ticket;
+    use busbar_test_kit::test_support::fake::FakeHost;
     use std::task::Poll;
-    let tables = HostTables {
-        size: std::mem::size_of::<HostTables>() as u32,
-        _reserved: 0,
-        ctx: busbar_contract::abi::mechanism::ticket::HostCtx::NONE,
-        wake: None,
-        conns: std::ptr::null(),
-        services: std::ptr::null(),
-        io: std::ptr::null(),
-    };
-    let host = busbar_contract::abi::sdk::conn::Host::of(&tables);
+    // The empty fixture proves the host table and serves no connector or admission service.
+    let fake_host = FakeHost::new();
+    let host = busbar_contract::abi::sdk::conn::Host::of(fake_host.lent());
     let w = Webhook::open(br#"{"url":"http://127.0.0.1:4000/sidecar"}"#, &[], 1).expect("opens");
     let got = logged(|| assert!(matches!(w.ready(&host, Ticket::NONE), Poll::Ready(Ok(())))));
     assert_eq!(got.len(), 1, "{got:?}");
@@ -684,7 +678,7 @@ fn ready_reads_the_hosts_refusal_and_names_the_scheme_rule() {
     }
     let fake_host = FakeHost::new().serve(fake::host::NEED_ADMIT, Refuses);
     let tables = fake_host.lent();
-    let host = Host::of(&tables);
+    let host = Host::of(tables);
     let w = Webhook::open(br#"{"url":"http://127.0.0.1:4000/sidecar"}"#, &[], 1).expect("opens");
     let got = logged(|| assert!(matches!(w.ready(&host, Ticket::NONE), Poll::Ready(Ok(())))));
     assert_eq!(got.len(), 1, "{got:?}");
@@ -1585,7 +1579,10 @@ fn only_an_explicit_ticket_binding_capability_preserves_a_reloaded_batch() {
         let pinned = capability == Some(&b"1"[..]);
         assert_eq!(w.cut_by_reload(&mut at, b"{\"line\":2}\n"), !pinned);
         assert_eq!(at.settings.url, "https://a.example/");
-        assert_eq!(at.settings.auth_header.as_ref().unwrap().value, "old");
+        assert_eq!(
+            at.settings.auth_header.as_ref().unwrap().value.as_str(),
+            "old"
+        );
         assert_eq!(w.settings().url, "https://b.example/");
     }
 }
