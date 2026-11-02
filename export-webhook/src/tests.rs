@@ -1140,6 +1140,7 @@ fn a_reload_back_to_the_same_settings_does_not_cut_the_batch() {
         offset: 0,
         issued: 0,
         exchange: None,
+        host: None,
     };
     assert!(!w.reloaded_since(&mut at));
     w.refresh(br#"{"url":"https://b.example/"}"#, &[], 2)
@@ -1442,6 +1443,7 @@ fn a_reload_of_only_the_deadline_or_bound_does_not_cut_the_batch() {
         offset: 0,
         issued: 0,
         exchange: None,
+        host: None,
     };
     w.refresh(
         br#"{"url":"https://a.example/","auth_header":{"name":"K","value":"one"},
@@ -1549,6 +1551,7 @@ fn a_reload_of_the_target_mid_batch_drops_the_rest_once() {
         offset: 0,
         issued: 0,
         exchange: None,
+        host: None,
     };
     // Line 1 parks; the reload lands while it is parked.
     let (first, next) = next_line(batch, at.offset).expect("line 1");

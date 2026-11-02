@@ -45,6 +45,7 @@ use busbar_contract::abi::export::{
 use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
 use busbar_contract::abi::mechanism::call::{AbiStr, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement};
+use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::cred::Cred;
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement};
@@ -910,6 +911,22 @@ struct Posting {
     offset: usize,
     issued: u32,
     exchange: Option<Exchange>,
+    /// The host connector the exchange was started on, to close its stream if the host gives the
+    /// delivery up (the SDK drops a parked continuation on a cancel or a fresh entry).
+    host: Option<Host>,
+}
+
+impl Drop for Posting {
+    /// A parked delivery the host abandoned still holds its exchange's host connection, which the
+    /// host reclaims only on a CLOSE: issue it, as the SDK's own closer does (no ticket). A resumed
+    /// delivery has taken its exchange out, and one that ended holds none, so this closes nothing then.
+    fn drop(&mut self) {
+        if let (Some(host), Some(stream)) =
+            (self.host, self.exchange.as_ref().and_then(Exchange::stream))
+        {
+            let _ = host.connector(Ticket::NONE).close(stream);
+        }
+    }
 }
 
 /// `deliver`: each line of the batch POSTed in order, one exchange after another; fire-and-forget,
@@ -947,6 +964,7 @@ impl SafeSlot for Deliver {
                     offset: 0,
                     issued: 0,
                     exchange: None,
+                    host: None,
                 }
             }
         };
@@ -968,6 +986,7 @@ impl SafeSlot for Deliver {
                         Ok(mut ex) => match exchange(&mut c, &mut ex, NEED, None) {
                             Poll::Pending => {
                                 at.exchange = Some(ex);
+                                at.host = Some(*host);
                                 instance.park(at);
                                 return Outcome::Pending;
                             }
