@@ -179,6 +179,7 @@ fn deliver_through_the_harness() {
     records_in_one_post_per_line_out();
     a_non_2xx_answer_drops_the_line_as_busbar_7071();
     a_transport_error_drops_the_line_as_busbar_7072();
+    a_failed_line_leaves_the_rest_of_the_batch_to_go();
     the_first_line_after_a_refresh_goes_on_the_new_settings();
     a_200_with_a_huge_body_is_still_a_delivered_line();
     a_non_2xx_with_a_huge_body_still_logs_its_status();
@@ -284,6 +285,24 @@ fn a_transport_error_drops_the_line_as_busbar_7072() {
     );
     assert!(naming(&host, "BUSBAR-7071").is_empty(), "{host:?}");
     no_secret(&host);
+}
+
+/// A failed line does not end the batch: a two-line batch against the 503 target POSTs both
+/// lines, drops each as its own BUSBAR-7071, and is still READY.
+fn a_failed_line_leaves_the_rest_of_the_batch_to_go() {
+    seen();
+    let (p, d, tape) = opened(&serde_json::json!({
+        "url": format!("https://{FAR_END}/fail"),
+    }));
+    let answer = deliver(
+        &p,
+        &d,
+        "{\"outcome\":\"ok\",\"ts\":1}\n{\"outcome\":\"ok\",\"ts\":2}\n",
+    );
+    assert!(answer.starts_with("Ready "), "deliver: {answer}");
+    assert_eq!(seen().len(), 2, "both lines were POSTed");
+    let host = tape.take();
+    assert_eq!(naming(&host, "BUSBAR-7071").len(), 2, "{host:?}");
 }
 
 /// No host-observed line carries the url's credential, path or query, or the auth header's value.
