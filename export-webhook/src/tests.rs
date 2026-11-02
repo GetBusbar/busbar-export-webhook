@@ -35,6 +35,22 @@ fn sent(s: &Settings, want: &[(&str, &str)]) {
     assert!(held.next().is_none(), "every sealed field was framed");
 }
 
+/// Every sealed credential (Basic userinfo, `auth_header` value) of an https target is marked
+/// secure-required, so the host refuses to carry it over an unsecured connection.
+#[test]
+fn sealed_credentials_of_an_https_target_are_secure_required() {
+    let s: Settings = serde_json::from_value(json!({
+        "url": "https://u:p@siem.example/in",
+        "auth_header": {"name": "Authorization", "value": "Bearer x"}
+    }))
+    .expect("settings parse");
+    let p = Prepared::new(s);
+    assert!(p.sealed.len() >= 2, "userinfo and header value are sealed");
+    for (_, name, cred) in &p.sealed {
+        assert!(cred.secure_required(), "{}", String::from_utf8_lossy(name));
+    }
+}
+
 fn refused(settings: serde_json::Value) -> String {
     let r = Webhook::validate(settings.to_string().as_bytes()).expect_err("refused");
     assert_eq!(r.outcome(), Outcome::Failed);
@@ -100,7 +116,16 @@ fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
             u64::MAX
         )]
     );
-
+    // The accepted edges of the deadline: 1 second and the 30-year ceiling pass, one past it is refused.
+    assert!(one(json!({"url": "https://a/b", "delivery_timeout_secs": 1})).is_empty());
+    assert!(
+        one(json!({"url": "https://a/b", "delivery_timeout_secs": MAX_DURATION_SECS})).is_empty()
+    );
+    assert_eq!(
+        one(json!({"url": "https://a/b", "delivery_timeout_secs": MAX_DURATION_SECS + 1})).len(),
+        1
+    );
+    // A stingy sibling is not refused beside a generous one: the bound is the largest.
     let two_instances = [
         (
             "a".into(),
@@ -787,6 +812,11 @@ fn the_settings_schema_marks_no_nested_secret() {
     assert!(header_values
         .iter()
         .any(|v| v["$ref"] == "#/$defs/reference"));
+    let description = schema["properties"]["auth_header"]["properties"]["value"]["description"]
+        .as_str()
+        .expect("a description");
+    assert!(!description.contains("${"), "{description}");
+    assert!(description.contains("reference"), "{description}");
 }
 
 #[test]
@@ -885,6 +915,29 @@ fn a_failed_delivery_never_logs_the_targets_path_query_or_the_hosts_echo_of_them
     assert!(text.contains("hooks.example"), "{text}");
 }
 
+/// The scrub also covers the percent-decoded forms: a host that echoes the URL decoded (`p@ss`,
+/// `/hook/T/X`) must not leak what the encoded URL hid.
+#[test]
+fn a_failed_delivery_never_logs_the_percent_decoded_credential_or_path() {
+    let url = format!("https://u:p%40ss-{CANARY}@hooks.example/hook/T%2F{CANARY}");
+    let got = logged(|| {
+        report(
+            &url,
+            None,
+            Err(ConnFailure::Failed(format!(
+                "error sending request for https://u:p@ss-{CANARY}@hooks.example/hook/T/{CANARY}: reset"
+            ))),
+        );
+    });
+    assert_eq!(got.len(), 1, "{got:?}");
+    let text = all_text(&got);
+    assert!(
+        !text.contains(CANARY),
+        "a delivery log carried the decoded credential:\n{text}"
+    );
+    assert!(text.contains("hooks.example"), "{text}");
+}
+
 /// The log target keeps scheme, host and port; everything that can carry a secret is `***`.
 #[test]
 fn the_log_target_names_only_scheme_host_and_port() {
@@ -930,6 +983,12 @@ fn an_ambiguous_url_is_refused_without_its_credential() {
         assert!(text.contains("%2F"), "{text}");
         assert!(!text.contains(secret), "{url}: {text}");
         assert!(Webhook::open(settings.as_bytes(), &[], 1).is_err(), "{url}");
+        // A reload to the ambiguous url is refused the same way, the old settings staying.
+        let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
+        let refusal = w.refresh(settings.as_bytes(), &[], 2).expect_err(url);
+        let text = refusal.text().expect("a refusal says why");
+        assert!(text.contains("is ambiguous"), "{url}: {text}");
+        assert!(!text.contains(secret), "{url}: {text}");
     }
     for url in [
         "https://u:p@siem.example/in",
@@ -1007,6 +1066,7 @@ fn a_reload_back_to_the_same_settings_does_not_cut_the_batch() {
         issued: 0,
         exchange: None,
         bindings_pinned: false,
+        host: None,
     };
     assert!(!w.reloaded_since(&mut at));
     w.refresh(br#"{"url":"https://b.example/"}"#, &[], 2)
@@ -1066,7 +1126,13 @@ fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
             "{name:?}: {value:?}"
         );
         let want = if is_framing(name) {
-            removed_framing_header(name)
+            let literal = format!(
+                "removed settings.auth_header.name `{name}` is a framing/connection field the \
+                 http framer states itself; 1.6.0 does not send it, which 1.6.0 refuses at \
+                 validation and open"
+            );
+            assert_eq!(removed_framing_header(name), literal);
+            literal
         } else {
             REMOVED_AUTH_HEADER.to_string()
         };
@@ -1241,7 +1307,11 @@ fn a_framing_or_connection_header_is_refused() {
         "keep-alive",
         "proxy-connection",
     ] {
-        let words = framing_words(name);
+        let words = format!(
+            "settings.auth_header.name `{name}` is a framing/connection field the http framer \
+             states itself; 1.6.0 does not send it"
+        );
+        assert_eq!(words, framing_words(name));
         let s = json!({"url": "https://a.example/", "auth_header": {"name": name, "value": "1"}});
         let lines = check(CheckPhase::Instances, &[("w".to_string(), s.clone())]);
         assert_eq!(lines.len(), 1, "{name}: {lines:?}");
@@ -1267,6 +1337,7 @@ fn a_reload_of_only_the_deadline_or_bound_does_not_cut_the_batch() {
         issued: 0,
         exchange: None,
         bindings_pinned: false,
+        host: None,
     };
     w.refresh(
         br#"{"url":"https://a.example/","auth_header":{"name":"K","value":"one"},
@@ -1363,6 +1434,7 @@ fn a_reload_of_the_target_mid_batch_drops_the_rest_once() {
         issued: 0,
         exchange: None,
         bindings_pinned: false,
+        host: None,
     };
 
     let (first, next) = next_line(batch, at.offset).expect("line 1");
@@ -1378,9 +1450,13 @@ fn a_reload_of_the_target_mid_batch_drops_the_rest_once() {
     assert_eq!(field(&got[0], "level"), "WARN");
     assert_eq!(field(&got[0], "dropped"), "2");
     assert_eq!(field(&got[0], "webhook_url"), "\"https://a.example\"");
-
-    let (_, end) = next_line(batch, 17).expect("line 3");
-    assert!(!w.cut_by_reload(&mut at, &batch[end..]));
+    // The last line never raises it, reload or not: put the posting back on the pre-reload
+    // generation so the reload is still news to it, and nothing remains to drop.
+    at.generation = generation;
+    let (_, after_two) = next_line(batch, next).expect("line 2");
+    let (_, end) = next_line(batch, after_two).expect("line 3");
+    let got = logged(|| assert!(!w.cut_by_reload(&mut at, &batch[end..])));
+    assert_eq!(got.len(), 0, "{got:?}");
 }
 
 #[test]
@@ -1411,6 +1487,7 @@ fn only_an_explicit_ticket_binding_capability_preserves_a_reloaded_batch() {
             issued: 0,
             exchange: None,
             bindings_pinned: pinned_ticket_bindings(&encoded),
+            host: None,
         };
         w.refresh(
             br#"{"url":"https://b.example/","auth_header":{"name":"X-Api-Key","value":"new"}}"#,
@@ -1555,6 +1632,10 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
         ),
         ("https:svc-token/abc@host/x", &["svc-token", "abc"][..]),
         ("https:svc:pa/ss@host/x", &["svc:", "pa/ss"][..]),
+        (
+            "https:svc:hunter2@siem.example/hook?next=https://x",
+            &["hunter2"][..],
+        ),
         (
             "https://h/hook?to=ops@corp.com&key=SECRET",
             &["ops", "corp", "SECRET"][..],

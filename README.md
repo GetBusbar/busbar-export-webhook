@@ -31,7 +31,7 @@ Security notes:
 - A `user:pass@` in the url is not sent in the url: it becomes an `Authorization: Basic` header.
 - An ambiguous url is refused: an `@` after the host (a credential holding an unescaped `/`, `?` or `#`) would be dialled as a host. Percent-encode the credential.
 - An `auth_header` that cannot be sent (an invalid name or value) is refused, as is one named for a framing or connection field (`content-length`, `transfer-encoding`, `host`, `connection`, `te`, `upgrade`, `trailer`, `keep-alive`, `proxy-connection`); `validate` and `open` refuse alike.
-- Log lines name the target by scheme and host only, and cut the url's parts and the request's credentials from the host's failure text.
+- Log lines name the target by scheme, a masked userinfo marker (`***@`), host and port, with a path shown as `/***` and a query as `?***`, and cut the url's parts and the request's credentials from the host's failure text.
 
 ## Build
 

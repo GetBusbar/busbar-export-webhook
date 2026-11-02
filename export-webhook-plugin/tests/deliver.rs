@@ -4,11 +4,18 @@
 //! Exercises ticketed delivery through the real loader, host connector and local HTTPS receiver.
 
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use busbar_contract::abi::export::{self, DeliverIn};
 use busbar_contract::abi::mechanism::call::{Blob, DeadlineClass, OutHead, BLOB_JSONL};
+use busbar_contract::abi::mechanism::rendering::ReadNeed;
+use busbar_contract::conn::{
+    ConnAuth, ConnCause, ConnError, ConnId, Conns, DeclaredConns, HeadDefaults, InstanceId, NeedId,
+    OpenDesc, Piece, Program, Ticket as ConnTicket,
+};
+use busbar_contract::transport::ConnFacts;
 use busbar_plugin_loader::dispatch::kinds::export::Export;
 use busbar_plugin_loader::dispatch::{
     load_dropped, load_linked, Bind, ConnTable, Diagnostic, Dispatcher, Dropped, EnvelopeSink,
@@ -96,7 +103,7 @@ fn answer(seen: &[u8]) -> Option<Vec<u8>> {
         .find_map(|l| l.strip_prefix("content-length:"))
         .and_then(|n| n.trim().parse::<usize>().ok())
         .unwrap_or(0);
-    if seen.len() < end + body {
+    if seen.len() < end + body || head.starts_with("post /hang") {
         return None;
     }
     SEEN.lock()
@@ -174,12 +181,27 @@ fn opened_door(
     settings: &serde_json::Value,
     dropped: bool,
 ) -> (Plugin<Export>, Arc<Dispatcher>, Arc<Tape>) {
+    opened_door_on(settings, dropped, |conns| conns)
+}
+
+fn opened_on(
+    settings: &serde_json::Value,
+    wrap: impl FnOnce(Arc<dyn DeclaredConns>) -> Arc<dyn DeclaredConns>,
+) -> (Plugin<Export>, Arc<Dispatcher>, Arc<Tape>) {
+    opened_door_on(settings, false, wrap)
+}
+
+fn opened_door_on(
+    settings: &serde_json::Value,
+    dropped: bool,
+    wrap: impl FnOnce(Arc<dyn DeclaredConns>) -> Arc<dyn DeclaredConns>,
+) -> (Plugin<Export>, Arc<Dispatcher>, Arc<Tape>) {
     let _ = targets();
     let d = dispatcher();
     let tape = Arc::new(Tape::default());
     let b = Bind {
         sink: tape.clone(),
-        conns: ConnTable::Host(host(d.conn_waker(), Some(anchors()))),
+        conns: ConnTable::Host(wrap(host(d.conn_waker(), Some(anchors())))),
         ..bind(&d, "deliver")
     };
     let row = LinkedRow::of(busbar_export_webhook::door).expect("the linked door renders");
@@ -201,6 +223,20 @@ fn opened_door(
 
 /// ONE `deliver` of `batch` on the logs stream, as the kernel's export flusher offers it: on a
 fn deliver(p: &Plugin<Export>, d: &Dispatcher, batch: &str) -> String {
+    let (f, batch) = deliver_frame(batch);
+    called(&on_ticket(
+        p,
+        d,
+        export::slot::DELIVER,
+        f,
+        DeadlineClass::WriteBehind,
+        0,
+        batch,
+    ))
+}
+
+/// The `deliver` frame for `batch`, and the memory it lends the op.
+fn deliver_frame(batch: &str) -> (Frame<DeliverIn, OutHead>, Arc<Vec<u8>>) {
     let batch: Arc<Vec<u8>> = Arc::new(batch.as_bytes().to_vec());
     let mut f: Frame<DeliverIn, OutHead> = Frame::new(input(), calls::output());
     f.input.op_id = [1; 16];
@@ -211,15 +247,7 @@ fn deliver(p: &Plugin<Export>, d: &Dispatcher, batch: &str) -> String {
         fmt: BLOB_JSONL,
         flags: 0,
     };
-    called(&on_ticket(
-        p,
-        d,
-        export::slot::DELIVER,
-        f,
-        DeadlineClass::WriteBehind,
-        0,
-        batch,
-    ))
+    (f, batch)
 }
 
 /// The requests the far end read since the last call.
@@ -245,6 +273,8 @@ fn deliver_through_the_harness() {
     }
     a_non_2xx_answer_drops_the_line_as_busbar_7071();
     a_transport_error_drops_the_line_as_busbar_7072();
+    a_failed_line_leaves_the_rest_of_the_batch_to_go();
+    an_abandoned_delivery_closes_its_host_connection();
     the_first_line_after_a_refresh_goes_on_the_new_settings();
     a_200_with_a_huge_body_is_still_a_delivered_line();
     a_non_2xx_with_a_huge_body_still_logs_its_status();
@@ -365,6 +395,230 @@ fn a_transport_error_drops_the_line_as_busbar_7072() {
     );
     assert!(naming(&host, "BUSBAR-7071").is_empty(), "{host:?}");
     no_secret(&host);
+}
+
+/// A failed line does not end the batch: a two-line batch against the 503 target POSTs both
+/// lines, drops each as its own BUSBAR-7071, and is still READY.
+fn a_failed_line_leaves_the_rest_of_the_batch_to_go() {
+    seen();
+    let (p, d, tape) = opened(&serde_json::json!({
+        "url": format!("https://{}/fail", far_end()),
+    }));
+    let answer = deliver(
+        &p,
+        &d,
+        "{\"outcome\":\"ok\",\"ts\":1}\n{\"outcome\":\"ok\",\"ts\":2}\n",
+    );
+    assert!(answer.starts_with("Ready "), "deliver: {answer}");
+    assert_eq!(seen().len(), 2, "both lines were POSTed");
+    let host = tape.take();
+    assert_eq!(naming(&host, "BUSBAR-7071").len(), 2, "{host:?}");
+}
+
+/// THE HOST'S CONNECTION TABLE, watched: every call passes to `inner`, and each `close` is counted.
+struct Watched {
+    inner: Arc<dyn DeclaredConns>,
+    closes: AtomicUsize,
+}
+
+impl Conns for Watched {
+    fn open(&self, c: InstanceId, n: NeedId, d: &OpenDesc<'_>) -> Result<ConnId, ConnError> {
+        self.inner.open(c, n, d)
+    }
+    fn open_with_security(
+        &self,
+        c: InstanceId,
+        n: NeedId,
+        d: &OpenDesc<'_>,
+        require_secure: bool,
+    ) -> Result<ConnId, ConnError> {
+        self.inner.open_with_security(c, n, d, require_secure)
+    }
+    fn write(
+        &self,
+        c: InstanceId,
+        conn: ConnId,
+        b: &[u8],
+        end: bool,
+        text: bool,
+    ) -> Result<usize, ConnError> {
+        self.inner.write(c, conn, b, end, text)
+    }
+    fn read(
+        &self,
+        c: InstanceId,
+        conn: ConnId,
+        t: ConnTicket,
+        buf: &mut [u8],
+    ) -> Result<Piece, ConnError> {
+        self.inner.read(c, conn, t, buf)
+    }
+    fn wait(&self, c: InstanceId, set: &[ConnId], t: ConnTicket) -> Result<usize, ConnError> {
+        self.inner.wait(c, set, t)
+    }
+    fn facts(&self, c: InstanceId, conn: ConnId) -> Result<ConnFacts, ConnError> {
+        self.inner.facts(c, conn)
+    }
+    fn close(&self, c: InstanceId, conn: ConnId) -> Result<(), ConnError> {
+        self.closes.fetch_add(1, Ordering::SeqCst);
+        self.inner.close(c, conn)
+    }
+}
+
+impl DeclaredConns for Watched {
+    fn open_request(
+        &self,
+        c: InstanceId,
+        n: NeedId,
+        d: &OpenDesc<'_>,
+        require_secure: bool,
+        dial_timeout_ms: u64,
+    ) -> Result<ConnId, ConnError> {
+        self.inner
+            .open_request(c, n, d, require_secure, dial_timeout_ms)
+    }
+    fn declare(
+        &self,
+        owner: InstanceId,
+        need: NeedId,
+        spec: &ReadNeed,
+        target: Option<&str>,
+        trust: Option<&str>,
+    ) -> Result<(), ConnError> {
+        self.inner.declare(owner, need, spec, target, trust)
+    }
+    fn declared(&self, owner: InstanceId, need: NeedId) -> Option<Result<(), ConnError>> {
+        self.inner.declared(owner, need)
+    }
+    fn upgrade_secure(
+        &self,
+        c: InstanceId,
+        conn: ConnId,
+        name: Option<&str>,
+        trust: Option<&str>,
+        verify_off: bool,
+        t: ConnTicket,
+    ) -> Result<(), ConnError> {
+        self.inner
+            .upgrade_secure(c, conn, name, trust, verify_off, t)
+    }
+    fn landed(&self, c: InstanceId, conn: ConnId, t: ConnTicket) -> Result<(), ConnError> {
+        self.inner.landed(c, conn, t)
+    }
+    fn framed(&self, owner: InstanceId, need: NeedId) -> bool {
+        self.inner.framed(owner, need)
+    }
+    fn serves_scheme(&self, transport: &str) -> bool {
+        self.inner.serves_scheme(transport)
+    }
+    fn declare_program(
+        &self,
+        owner: InstanceId,
+        need: NeedId,
+        spec: &ReadNeed,
+        program: &Program,
+    ) -> Result<(), ConnError> {
+        self.inner.declare_program(owner, need, spec, program)
+    }
+    fn cause(&self, owner: InstanceId, conn: ConnId) -> Option<ConnCause> {
+        self.inner.cause(owner, conn)
+    }
+    fn hold_authority(&self, owner: InstanceId) {
+        self.inner.hold_authority(owner);
+    }
+    fn request_head(&self, owner: InstanceId, need: NeedId, target: &str) -> HeadDefaults {
+        self.inner.request_head(owner, need, target)
+    }
+    fn bind_auth(&self, owner: InstanceId, need: NeedId, member: &str, origin: &str, b: ConnAuth) {
+        self.inner.bind_auth(owner, need, member, origin, b);
+    }
+    fn auth_of(
+        &self,
+        owner: InstanceId,
+        need: NeedId,
+        member: &str,
+        target: &str,
+    ) -> Option<ConnAuth> {
+        self.inner.auth_of(owner, need, member, target)
+    }
+    fn declare_member_programs(
+        &self,
+        owner: InstanceId,
+        need: NeedId,
+        spec: &ReadNeed,
+        programs: &[(String, Program)],
+    ) -> Result<(), ConnError> {
+        self.inner
+            .declare_member_programs(owner, need, spec, programs)
+    }
+    fn forget(&self, owner: InstanceId) {
+        self.inner.forget(owner);
+    }
+}
+
+/// AN ABANDONED DELIVERY CLOSES ITS HOST CONNECTION (audit r2-prod0-1): the far end reads the
+/// request and never answers, so the line's exchange is PENDING; the dispatcher cancels the op at
+/// its deadline and drops what the delivery parked. The host reclaims a connection only on a
+/// CLOSE, so the parked delivery must issue one as it is dropped, or the connection leaks.
+fn an_abandoned_delivery_closes_its_host_connection() {
+    seen();
+    let watched: Arc<Mutex<Option<Arc<Watched>>>> = Arc::default();
+    let hold = watched.clone();
+    let (p, d, _tape) = opened_on(
+        &serde_json::json!({"url": format!("https://{}/hang", far_end())}),
+        move |inner| {
+            let w = Arc::new(Watched {
+                inner,
+                closes: AtomicUsize::new(0),
+            });
+            *hold.lock().unwrap() = Some(w.clone());
+            w
+        },
+    );
+    let w = watched
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the table was wrapped");
+    let before = w.closes.load(Ordering::SeqCst);
+    // A request-class op (the host may give it up), submitted on a ticket; the far end holds the
+    // request, so it stays PENDING.
+    let ticket = d.mint(0).expect("a ticket");
+    let (f, batch) = deliver_frame("{\"outcome\":\"ok\"}\n");
+    let reply = d.submit_lent(
+        &p,
+        ticket,
+        export::slot::DELIVER,
+        f,
+        DeadlineClass::Call,
+        0,
+        batch,
+    );
+    assert!(
+        reply.wait(Duration::from_millis(700)).is_none(),
+        "the delivery is still pending"
+    );
+    assert_eq!(
+        w.closes.load(Ordering::SeqCst),
+        before,
+        "nothing closed yet"
+    );
+    // The host gives the delivery up: the client went away, so the op is cancelled.
+    d.drop_client(ticket);
+    let done = reply.wait_done();
+    assert_ne!(
+        done.outcome,
+        busbar_contract::abi::mechanism::call::Outcome::Ready
+    );
+    d.recycle(ticket);
+    let until = Instant::now() + Duration::from_secs(5);
+    while w.closes.load(Ordering::SeqCst) == before && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        w.closes.load(Ordering::SeqCst) > before,
+        "the abandoned delivery's host connection was never closed"
+    );
 }
 
 /// No host-observed line carries the url's credential, path or query, or the auth header's value.

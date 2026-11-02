@@ -26,6 +26,7 @@ use busbar_contract::abi::export::{
 use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
 use busbar_contract::abi::mechanism::call::{AbiStr, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement};
+use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::cred::Cred;
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement};
@@ -653,7 +654,7 @@ pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Ve
     errors
 }
 
-/// Each instance's delivery deadline, numbered by its configured position.
+/// Each instance's auth header and delivery deadline, numbered by configured position.
 fn instance_checks(parsed: &[(usize, &str, Settings)], errors: &mut Vec<String>) {
     for (i, name, w) in parsed {
         if let Some(h) = w.auth_header.as_ref().filter(|h| is_framing(&h.name)) {
@@ -786,7 +787,7 @@ pub const NO_INSTANCE: &str = "no opened request-log-webhook instance";
 /// `check` at a phase this sink does not know.
 pub const UNKNOWN_PHASE: &str = "not a check phase this sink knows (limits or instances)";
 
-/// What a delivery parks across PENDING: the settings it started under and their generation (a
+/// A parked delivery keeps its admitted settings, binding capability and host connection.
 struct Posting {
     settings: Arc<Prepared>,
     generation: u64,
@@ -795,6 +796,22 @@ struct Posting {
     exchange: Option<Exchange>,
     /// Captured at admission, never upgraded on resume: an old host can finish the already-open
     bindings_pinned: bool,
+    /// The host connector the exchange was started on, to close its stream if the host gives the
+    /// delivery up (the SDK drops a parked continuation on a cancel or a fresh entry).
+    host: Option<Host>,
+}
+
+impl Drop for Posting {
+    /// A parked delivery the host abandoned still holds its exchange's host connection, which the
+    /// host reclaims only on a CLOSE: issue it, as the SDK's own closer does (no ticket). A resumed
+    /// delivery has taken its exchange out, and one that ended holds none, so this closes nothing then.
+    fn drop(&mut self) {
+        if let (Some(host), Some(stream)) =
+            (self.host, self.exchange.as_ref().and_then(Exchange::stream))
+        {
+            let _ = host.connector(Ticket::NONE).close(stream);
+        }
+    }
 }
 
 /// `deliver`: each line of the batch POSTed in order, one exchange after another; fire-and-forget,
@@ -830,6 +847,7 @@ impl SafeSlot for Deliver {
                     bindings_pinned: pinned_ticket_bindings(
                         input.field(|i| &i.head.extensions).bytes(),
                     ),
+                    host: None,
                 }
             }
         };
@@ -851,6 +869,7 @@ impl SafeSlot for Deliver {
                         Ok(mut ex) => match exchange(&mut c, &mut ex, NEED, None) {
                             Poll::Pending => {
                                 at.exchange = Some(ex);
+                                at.host = Some(*host);
                                 instance.park(at);
                                 return Outcome::Pending;
                             }
