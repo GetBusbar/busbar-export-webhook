@@ -66,8 +66,8 @@ fn an_admission_fault_does_not_permanently_disable_a_valid_target() {
     let bad_tables = broken.lent();
     let good_tables = granted.lent();
     let hook = Webhook::open(br#"{"url":"https://hooks.example/"}"#, &[], 1).unwrap();
-    assert!(!hook.admitted(Some(&Host::of(&bad_tables))));
-    assert!(hook.admitted(Some(&Host::of(&good_tables))));
+    assert!(!hook.admitted(Some(&Host::of(bad_tables))));
+    assert!(hook.admitted(Some(&Host::of(good_tables))));
 }
 
 #[test]
