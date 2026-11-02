@@ -35,9 +35,13 @@ busbar-export-webhook-plugin = { path = ".", features = ["dropped-in"] }
 # The conformance test loads the built cdylib and the linked door over the REAL loader — dev-only,
 # never in the shipped artifact. Same pinned rev, so one busbar source resolves.
 busbar-plugin-loader = { workspace = true }
-busbar-test-kit = { workspace = true }
-# THE SUITE'S HOST CONNECTOR (tests/support/conformance_host.rs, busbar-test-kit's
-# `conformance_host!`): the transport framers this plugin's needs name. Dev-only.
+busbar-core-connector = { workspace = true }
+busbar-kernel = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "time"] }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+rcgen = { workspace = true }
+# The real host connector serves these pinned transport doors in integration tests.
 busbar-transport-tcp = { workspace = true }
 busbar-transport-http = { workspace = true }
 # The declared-secrets test reads the settings the kernel resolves.

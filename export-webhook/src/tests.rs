@@ -4,6 +4,9 @@
 //! Exercises webhook settings, delivery and compatibility behavior.
 
 use super::*;
+#[path = "tests/admission_host.rs"]
+mod admission_host;
+use admission_host::AdmissionHost;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -503,17 +506,8 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
     use busbar_contract::abi::mechanism::call::Outcome;
     use busbar_contract::abi::mechanism::ticket::Ticket;
     use busbar_contract::abi::sdk::conn::Host;
-    use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
     use std::task::Poll;
-    struct Refuses;
-    impl FakeService for Refuses {
-        type In = busbar_contract::abi::host::service::NeedAdmitIn;
-        fn serve(call: &mut ServiceCall<Self::In>) -> Outcome {
-            call.set_error("destination refused");
-            Outcome::Refused
-        }
-    }
-    let fake_host = FakeHost::new().serve(fake::host::NEED_ADMIT, Refuses);
+    let fake_host = AdmissionHost::new(Outcome::Refused);
     let tables = fake_host.lent();
     let host = Host::of(tables);
     for (url, line) in [
@@ -575,10 +569,9 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
 #[test]
 fn ready_asks_the_verdict_at_boot_and_never_refuses_it() {
     use busbar_contract::abi::mechanism::ticket::Ticket;
-    use busbar_test_kit::test_support::fake::FakeHost;
     use std::task::Poll;
 
-    let fake_host = FakeHost::new();
+    let fake_host = AdmissionHost::new(Outcome::Refused);
     let host = busbar_contract::abi::sdk::conn::Host::of(fake_host.lent());
     let w = Webhook::open(br#"{"url":"http://127.0.0.1:4000/sidecar"}"#, &[], 1).expect("opens");
     let got = logged(|| assert!(matches!(w.ready(&host, Ticket::NONE), Poll::Ready(Ok(())))));
@@ -622,17 +615,8 @@ fn ready_reads_the_hosts_refusal_and_names_the_scheme_rule() {
     use busbar_contract::abi::mechanism::call::Outcome;
     use busbar_contract::abi::mechanism::ticket::Ticket;
     use busbar_contract::abi::sdk::conn::Host;
-    use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
     use std::task::Poll;
-    struct Refuses;
-    impl FakeService for Refuses {
-        type In = busbar_contract::abi::host::service::NeedAdmitIn;
-        fn serve(call: &mut ServiceCall<Self::In>) -> Outcome {
-            call.set_error("destination refused");
-            Outcome::Refused
-        }
-    }
-    let fake_host = FakeHost::new().serve(fake::host::NEED_ADMIT, Refuses);
+    let fake_host = AdmissionHost::new(Outcome::Refused);
     let tables = fake_host.lent();
     let host = Host::of(tables);
     let w = Webhook::open(br#"{"url":"http://127.0.0.1:4000/sidecar"}"#, &[], 1).expect("opens");
@@ -650,69 +634,78 @@ fn ready_reads_the_hosts_refusal_and_names_the_scheme_rule() {
 fn the_check_slot_maps_its_phase_and_leases_the_findings() {
     let probe = crate::wipe_probe::Probe::start();
     use busbar_contract::abi::export::{
-        CheckIn, CheckInstance, CheckOut, Ops, CHECK_PHASE_INSTANCES, CHECK_PHASE_LIMITS,
+        CheckIn, CheckInstance, CheckOut, CHECK_PHASE_INSTANCES, CHECK_PHASE_LIMITS,
     };
     use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome};
-    use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut};
-    use busbar_test_kit::test_support::reply::{call_in, close_in};
-    use busbar_test_kit::test_support::test_in::TestIn;
-    use busbar_test_kit::test_support::{zeroed, DoorView};
-
+    use busbar_contract::abi::mechanism::lifecycle::slot;
+    use busbar_contract::abi::sdk::door::{blank_in, blank_out};
+    use busbar_plugin_loader::dispatch::Frame;
     let settings = br#"{"url":"https://a.example/x","delivery_timeout_secs":0}"#;
-    let view = DoorView::of(crate::table::MACRO_DOOR);
-    let open = view.op::<Ops>(|t| &t.head.open).expect("open");
-    let close = view.op::<Ops>(|t| &t.head.close).expect("close");
-    let check_op = view.op::<Ops>(|t| &t.check).expect("check");
-    let mut opened = call_in(
-        open,
-        None,
-        &TestIn::<OpenIn>::new()
-            .set(|i| &i.head.op, slot::OPEN)
-            .settings(settings),
-        zeroed::<OpenOut>(),
-    );
-    assert_eq!(opened.outcome, Outcome::Ready);
-    let instance = opened.take_instance().expect("an instance");
-
+    let (_dispatcher, plugin) = loaded_for_test(settings);
     let rows = [CheckInstance {
         name: AbiStr::of("w"),
         settings: Blob::json(settings),
     }];
-    let check = |phase: u32| {
-        call_in(
-            check_op,
-            Some(&instance),
-            &TestIn::<CheckIn>::new()
-                .set(|i| &i.head.op, check_op.index())
-                .set(|i| &i.phase, phase)
-                .list(|i| &i.instances, |i| &i.instances_len, &rows),
-            zeroed::<CheckOut>(),
-        )
+    let check = |phase| {
+        let mut input: CheckIn = blank_in();
+        input.phase = phase;
+        input.instances = rows.as_ptr();
+        input.instances_len = rows.len();
+        let mut frame = Frame::new(input, blank_out::<CheckOut>());
+        let called = plugin.call(busbar_contract::abi::export::slot::CHECK, &mut frame);
+        let owned = if frame.out.findings.len == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: the actual loader judged these findings and the result lease is live.
+            unsafe { std::slice::from_raw_parts(frame.out.findings.ptr, frame.out.findings.len) }
+                .to_vec()
+        };
+        if called.lease != 0 {
+            let mut release: busbar_contract::abi::mechanism::lifecycle::ReleaseIn = blank_in();
+            release.lease = called.lease;
+            assert_eq!(
+                plugin
+                    .call(
+                        slot::RELEASE,
+                        &mut Frame::new(
+                            release,
+                            blank_out::<busbar_contract::abi::mechanism::call::OutHead>()
+                        )
+                    )
+                    .outcome,
+                Outcome::Ready
+            );
+        }
+        (called, owned)
     };
     let expected = crate::check(
         CheckPhase::Instances,
         &[("w".to_string(), serde_json::from_slice(settings).unwrap())],
     );
     assert!(!expected.is_empty(), "a 0-second deadline is a finding");
-    let found = check(CHECK_PHASE_INSTANCES);
+    let (found, owned) = check(CHECK_PHASE_INSTANCES);
     assert_eq!(found.outcome, Outcome::Ready);
-    let lines: Vec<String> = serde_json::from_slice(&found.owned).expect("a JSON array");
+    let lines: Vec<String> = serde_json::from_slice(&owned).expect("a JSON array");
     assert_eq!(lines, expected);
-    let limits = check(CHECK_PHASE_LIMITS);
+    let (limits, owned) = check(CHECK_PHASE_LIMITS);
     assert_eq!(limits.outcome, Outcome::Ready);
-    assert!(limits.owned.is_empty(), "{:?}", limits.owned);
-    let unknown = check(7);
+    assert!(owned.is_empty(), "{owned:?}");
+    let (unknown, _) = check(7);
     assert_eq!(unknown.outcome, Outcome::Refused);
-    assert_eq!(unknown.error.as_deref(), Some(crate::UNKNOWN_PHASE));
-
-    let closed = close_in(
-        close,
-        instance,
-        &TestIn::<busbar_contract::abi::mechanism::call::InHead>::new().set(|i| &i.op, slot::CLOSE),
-        zeroed::<busbar_contract::abi::mechanism::call::OutHead>(),
+    assert_eq!(
+        unknown.error.as_deref(),
+        Some(crate::UNKNOWN_PHASE.as_bytes())
+    );
+    let closed = plugin.call(
+        slot::CLOSE,
+        &mut Frame::new(
+            blank_in::<busbar_contract::abi::mechanism::call::InHead>(),
+            blank_out::<busbar_contract::abi::mechanism::call::OutHead>(),
+        ),
     );
     assert_eq!(closed.outcome, Outcome::Ready);
-
+    drop(plugin);
+    drop(_dispatcher);
     probe
         .finish()
         .assert_wiped_on_linux(&["check settings JSON"]);
@@ -950,40 +943,21 @@ fn an_ambiguous_url_is_refused_without_its_credential() {
 
 #[test]
 fn serve_is_refused_saying_why_through_the_door() {
-    use busbar_contract::abi::export::{Ops, ServeIn, ServeOut};
+    use busbar_contract::abi::export::{ServeIn, ServeOut};
     use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
-    use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut};
-    use busbar_test_kit::test_support::reply::{call_in, close_in};
-    use busbar_test_kit::test_support::test_in::TestIn;
-    use busbar_test_kit::test_support::{zeroed, DoorView};
-
-    let view = DoorView::of(crate::table::MACRO_DOOR);
-    let open = view.op::<Ops>(|t| &t.head.open).expect("open");
-    let close = view.op::<Ops>(|t| &t.head.close).expect("close");
-    let serve = view.op::<Ops>(|t| &t.serve).expect("serve");
-    let mut opened = call_in(
-        open,
-        None,
-        &TestIn::<OpenIn>::new()
-            .set(|i| &i.head.op, slot::OPEN)
-            .settings(br#"{"url":"https://a.example/x"}"#),
-        zeroed::<OpenOut>(),
-    );
-    assert_eq!(opened.outcome, Outcome::Ready);
-    let instance = opened.take_instance().expect("an instance");
-    let c = call_in(
-        serve,
-        Some(&instance),
-        &TestIn::<ServeIn>::new().set(|i| &i.head.op, busbar_contract::abi::export::slot::SERVE),
-        zeroed::<ServeOut>(),
+    use busbar_contract::abi::mechanism::lifecycle::slot;
+    use busbar_contract::abi::sdk::door::{blank_in, blank_out};
+    use busbar_plugin_loader::dispatch::Frame;
+    let (_dispatcher, plugin) = loaded_for_test(br#"{"url":"https://a.example/x"}"#);
+    let c = plugin.call(
+        busbar_contract::abi::export::slot::SERVE,
+        &mut Frame::new(blank_in::<ServeIn>(), blank_out::<ServeOut>()),
     );
     assert_eq!(c.outcome, Outcome::Refused);
-    assert_eq!(c.error.as_deref(), Some(crate::NO_ROUTE));
-    let closed = close_in(
-        close,
-        instance,
-        &TestIn::<InHead>::new().set(|i| &i.op, slot::CLOSE),
-        zeroed::<OutHead>(),
+    assert_eq!(c.error.as_deref(), Some(crate::NO_ROUTE.as_bytes()));
+    let closed = plugin.call(
+        slot::CLOSE,
+        &mut Frame::new(blank_in::<InHead>(), blank_out::<OutHead>()),
     );
     assert_eq!(closed.outcome, Outcome::Ready);
 }
@@ -1685,4 +1659,48 @@ fn an_ambiguous_echo_shows_only_an_http_or_https_scheme() {
     assert!(ambiguous_url("HTTP:tok/en@host/x")
         .expect("ambiguous")
         .contains("url `HTTP:***` is ambiguous"));
+}
+
+/// Load the actual webhook through the production dispatcher for ABI operation tests.
+fn loaded_for_test(
+    settings: &[u8],
+) -> (
+    Arc<busbar_plugin_loader::dispatch::Dispatcher>,
+    busbar_plugin_loader::dispatch::Plugin<busbar_plugin_loader::dispatch::kinds::export::Export>,
+) {
+    use busbar_contract::abi::{
+        mechanism::{
+            call::Blob,
+            lifecycle::{self, OpenIn, OpenOut},
+        },
+        sdk::door::{blank_in, blank_out},
+    };
+    use busbar_plugin_loader::dispatch::{
+        self, Bind, ConnTable, DispatchConfig, Dispatcher, Frame, LinkedRow, NoSink,
+    };
+    let d = Arc::new(Dispatcher::new(DispatchConfig::default()));
+    let row = LinkedRow::of(crate::door).expect("actual webhook statement");
+    let p = dispatch::load_linked(
+        &row,
+        Bind {
+            instance: Arc::from("unit-door"),
+            max_inflight_cap: 64,
+            sink: Arc::new(NoSink),
+            dispatcher: d.adopter(),
+            conns: ConnTable::Probe,
+        },
+    )
+    .expect("load webhook");
+    let mut input: OpenIn = blank_in();
+    input.settings = Blob::json(settings);
+    input.generation = 1;
+    assert_eq!(
+        p.call(
+            lifecycle::slot::OPEN,
+            &mut Frame::new(input, blank_out::<OpenOut>())
+        )
+        .outcome,
+        Outcome::Ready
+    );
+    (d, p)
 }

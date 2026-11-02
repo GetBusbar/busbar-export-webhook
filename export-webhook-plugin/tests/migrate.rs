@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! Both doors migrate unsendable legacy auth headers and preserve sections requiring no migration.
+#[path = "support/artifact.rs"]
+mod artifact;
+
+// Both doors migrate unsendable legacy auth headers and preserve sections requiring no migration.
 
 use busbar_plugin_loader::dispatch::load::raw;
 use busbar_plugin_loader::dispatch::migrate::{migrate_door, migrate_library};
@@ -9,10 +12,8 @@ use serde_json::json;
 
 #[test]
 fn the_door_migrates_an_auth_header_1_5_5_never_sent_both_ways() {
-    let bytes = std::fs::read(busbar_test_kit::conformance::cdylib_of(
-        "busbar_export_webhook_plugin",
-    ))
-    .expect("the cdylib reads");
+    let bytes = std::fs::read(artifact::cdylib_of("busbar_export_webhook_plugin"))
+        .expect("the cdylib reads");
     let bad = json!({
         "url": "https://siem.example/in",
         "auth_header": {"name": "Authorization", "value": "Bearer s3cret\r\nX-Injected: 1"}

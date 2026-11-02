@@ -3,13 +3,16 @@
 
 //! The webhook `url` accepts references resolved in place and literal URLs as non-secret settings.
 
+#[path = "support/settings.rs"]
+mod settings;
+
 use std::sync::Arc;
 
 use busbar_plugin_loader::dispatch::kinds::export::Export;
 use busbar_plugin_loader::dispatch::{
     load_linked, Bind, ConnTable, DispatchConfig, Dispatcher, LinkedRow, NoSink, Plugin,
 };
-use busbar_test_kit::conformance::settings_as_the_kernel_resolves;
+use settings::settings_as_the_kernel_resolves;
 
 const URL: &str = "https://siem.example/in";
 

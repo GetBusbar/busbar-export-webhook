@@ -14,16 +14,18 @@ use busbar_plugin_loader::dispatch::{
     load_dropped, load_linked, Bind, ConnTable, Diagnostic, Dispatcher, Dropped, EnvelopeSink,
     Frame, LinkedRow, Metric, Plugin,
 };
-use busbar_test_kit::conformance::{
-    bind, called, cdylib_of, dispatcher, input, on_ticket, open_resumed, refresh,
-};
-use busbar_test_kit::conformance_host::{anchors, far_end_on, host, Doors};
-
-/// The transport doors the host serves, as `tests/support/conformance_host.rs` names them.
-const DOORS: Doors = &[
-    ("tcp", busbar_transport_tcp::linked::MACRO_DOOR),
-    ("http", busbar_transport_http::door::MACRO_DOOR),
-];
+#[path = "support/artifact.rs"]
+mod artifact;
+#[path = "support/calls.rs"]
+mod calls;
+use artifact::cdylib_of;
+use calls::{bind, called, dispatcher, input, on_ticket, open_resumed, refresh};
+#[path = "support/connector.rs"]
+mod connector;
+#[path = "support/receiver.rs"]
+mod receiver;
+use connector::host;
+use receiver::{anchors, far_end_on};
 
 struct Targets {
     first: String,
@@ -176,7 +178,7 @@ fn opened_door(
     let tape = Arc::new(Tape::default());
     let b = Bind {
         sink: tape.clone(),
-        conns: ConnTable::Host(host(DOORS, d.conn_waker(), Some(anchors()))),
+        conns: ConnTable::Host(host(d.conn_waker(), Some(anchors()))),
         ..bind(&d, "deliver")
     };
     let row = LinkedRow::of(busbar_export_webhook::door).expect("the linked door renders");
@@ -199,8 +201,7 @@ fn opened_door(
 /// ONE `deliver` of `batch` on the logs stream, as the kernel's export flusher offers it: on a
 fn deliver(p: &Plugin<Export>, d: &Dispatcher, batch: &str) -> String {
     let batch: Arc<Vec<u8>> = Arc::new(batch.as_bytes().to_vec());
-    let mut f: Frame<DeliverIn, OutHead> =
-        Frame::new(input(), busbar_test_kit::conformance::output());
+    let mut f: Frame<DeliverIn, OutHead> = Frame::new(input(), calls::output());
     f.input.op_id = [1; 16];
     f.input.stream = export::ExportStream::Logs as u8;
     f.input.batch = Blob {

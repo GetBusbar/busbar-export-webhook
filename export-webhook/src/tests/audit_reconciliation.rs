@@ -46,23 +46,8 @@ fn a_receiver_echoing_only_the_authorization_credential_is_scrubbed() {
 
 #[test]
 fn an_admission_fault_does_not_permanently_disable_a_valid_target() {
-    use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
-    struct Broken;
-    impl FakeService for Broken {
-        type In = busbar_contract::abi::host::service::NeedAdmitIn;
-        fn serve(_: &mut ServiceCall<Self::In>) -> Outcome {
-            Outcome::Failed
-        }
-    }
-    struct Granted;
-    impl FakeService for Granted {
-        type In = busbar_contract::abi::host::service::NeedAdmitIn;
-        fn serve(_: &mut ServiceCall<Self::In>) -> Outcome {
-            Outcome::Ready
-        }
-    }
-    let broken = FakeHost::new().serve(fake::host::NEED_ADMIT, Broken);
-    let granted = FakeHost::new().serve(fake::host::NEED_ADMIT, Granted);
+    let broken = AdmissionHost::new(Outcome::Failed);
+    let granted = AdmissionHost::new(Outcome::Ready);
     let bad_tables = broken.lent();
     let good_tables = granted.lent();
     let hook = Webhook::open(br#"{"url":"https://hooks.example/"}"#, &[], 1).unwrap();

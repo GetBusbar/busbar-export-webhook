@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! Both doors refuse unsupported scrape and serve operations with explanatory errors.
+#[path = "support/artifact.rs"]
+mod artifact;
+
+// Both doors refuse unsupported scrape and serve operations with explanatory errors.
 
 use std::sync::Arc;
 
@@ -33,7 +36,7 @@ fn opened(dropped: bool) -> (Arc<Dispatcher>, Plugin<Export>) {
     };
     let p = if dropped {
         load_dropped::<Export>(
-            &busbar_test_kit::conformance::cdylib_of("busbar_export_webhook_plugin"),
+            &artifact::cdylib_of("busbar_export_webhook_plugin"),
             &row().statement,
             bind,
         )
