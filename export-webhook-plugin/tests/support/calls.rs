@@ -22,9 +22,11 @@ pub fn bind(d: &Dispatcher, name: &str) -> Bind {
         conns: ConnTable::Probe,
     }
 }
+#[allow(dead_code)] // Used by the separate delivery test binary.
 pub fn input<I: InFrame + busbar_contract::abi::sdk::door::AbiIn>() -> I {
     blank_in()
 }
+#[allow(dead_code)] // Used by the separate delivery test binary.
 pub fn output<O: OutFrame + busbar_contract::abi::sdk::door::AbiOut>() -> O {
     blank_out()
 }

@@ -172,12 +172,6 @@ fn the_linked_and_freshly_built_dropped_webhook_obey_the_export_contract() {
         p.ready(&d, std::time::Duration::from_secs(10))
             .expect("webhook ready");
         pin("ready", u64::from(p.has_ready()));
-        let mut tick = Frame::new(blank_in::<TickIn>(), blank_out::<TickOut>());
-        assert_eq!(
-            p.call(lifecycle::slot::TICK, &mut tick).outcome,
-            Outcome::Ready
-        );
-        pin("tick", 1);
         let c = deliver();
         assert_eq!(c.outcome, Outcome::Ready);
         assert_eq!(c.lease, 0);
@@ -256,6 +250,12 @@ fn the_linked_and_freshly_built_dropped_webhook_obey_the_export_contract() {
             assert_eq!(release(lease).outcome, Outcome::Refused);
             pin("release again", 1);
         }
+        let mut tick = Frame::new(blank_in::<TickIn>(), blank_out::<TickOut>());
+        assert_eq!(
+            p.call(lifecycle::slot::TICK, &mut tick).outcome,
+            Outcome::Ready
+        );
+        pin("tick", 1);
         let bad = inputs["export"]["bad_settings"][0]["settings"].to_string();
         assert_eq!(calls::refresh(&p, bad.as_bytes()).outcome, Outcome::Failed);
         pin("refresh bad", 1);

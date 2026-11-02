@@ -17,6 +17,7 @@ use busbar_plugin_loader::dispatch::{
 #[path = "support/artifact.rs"]
 mod artifact;
 #[path = "support/calls.rs"]
+#[allow(dead_code)] // This binary uses delivery calls; the lifecycle binary records envelopes.
 mod calls;
 use artifact::cdylib_of;
 use calls::{bind, called, dispatcher, input, on_ticket, open_resumed, refresh};
