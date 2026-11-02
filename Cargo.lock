@@ -279,7 +279,7 @@ version = "1.6.0"
 dependencies = [
  "base64 0.22.1",
  "busbar-contract",
- "busbar-test-kit",
+ "busbar-plugin-loader",
  "serde",
  "serde_json",
  "tracing",
@@ -292,13 +292,18 @@ name = "busbar-export-webhook-plugin"
 version = "1.6.0"
 dependencies = [
  "busbar-contract",
+ "busbar-core-connector",
  "busbar-export-webhook",
  "busbar-export-webhook-plugin",
+ "busbar-kernel",
  "busbar-plugin-loader",
- "busbar-test-kit",
  "busbar-transport-http",
  "busbar-transport-tcp",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -434,27 +439,6 @@ dependencies = [
  "tar",
  "tokio",
  "tracing",
- "zeroize",
-]
-
-[[package]]
-name = "busbar-test-kit"
-version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=a35493a5e74cc935ff7dcc15c1af869290da91cb#a35493a5e74cc935ff7dcc15c1af869290da91cb"
-dependencies = [
- "base64 0.22.1",
- "busbar-contract",
- "busbar-core-connector",
- "busbar-kernel",
- "busbar-plugin-loader",
- "hex",
- "libc",
- "ring",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "windows-sys 0.61.2",
  "zeroize",
 ]
 
