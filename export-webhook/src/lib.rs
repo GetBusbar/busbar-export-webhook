@@ -48,7 +48,6 @@ pub const ALIAS: &str = "request-log-webhook";
 pub const DECLARES: &str = include_str!("../declares.json");
 
 /// The in-flight ceiling `check` holds the largest instance's bound to
-
 const MAX_PERMITS: usize = usize::MAX >> 3;
 /// The ceiling every duration in a busbar configuration is bounded by (30 years, in seconds).
 const MAX_DURATION_SECS: u64 = 30 * 365 * 86_400;
@@ -59,7 +58,6 @@ const TRANSPORT_ERROR: &str = "BUSBAR-7072";
 const RELOAD_CUT: &str = "BUSBAR-7109";
 
 /// The host pins connector and disk bindings for the entire delivery ticket, including resumes
-
 const TICKET_BINDINGS: &str = "busbar.export.ticket-bindings";
 /// Version of the host ticket-custody capability documented by the export lifecycle.
 const TICKET_BINDINGS_VERSION: &[u8] = b"1";
@@ -70,11 +68,9 @@ fn pinned_ticket_bindings(extensions: &[u8]) -> bool {
 }
 
 /// The config path the target comes from: the `url` setting (`settings.<key>`, the path the host's
-
 const TARGET_FROM: &str = "settings.url";
 
 /// The in-flight ceiling this sink declares: no bound of its own. The bound is the operator's
-
 pub const MAX_INFLIGHT: u32 = u32::MAX;
 /// The one need's index in the Statement.
 pub const NEED: u32 = 0;
@@ -97,7 +93,6 @@ pub use redact::{log_target, scrub};
 pub type Settings = WebhookSettings;
 
 /// The one need: outbound over a secure connection to the `url` setting's target, public
-
 const NEEDS: &[Need] = &[Need {
     direction: DIRECTION_OUTBOUND,
     egress_class: EGRESS_OPEN_WEB,
@@ -118,7 +113,6 @@ const TAIL: Tail = tail(STREAMS, &[]);
 const REWRITES: &[Rewrite] = &[alias(ALIAS)];
 
 /// The settings field that is SECRET, declared so the kernel resolves a `{env:}`/`{file:}`/
-
 const SECRET_REFS: &[AbiStr] = &[abi_str("auth_header.value")];
 
 busbar_contract::statement_extensions!(EXTENSIONS: [
@@ -139,7 +133,6 @@ pub const STATEMENT: Statement = Statement {
 };
 
 /// The settings, parsed as the configuration grammar parses them (empty is `{}`); a `url` whose
-
 fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
     let value = owners::SettingsValue(settings_value(settings)?);
     #[cfg(test)]
@@ -162,7 +155,6 @@ fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
 }
 
 /// The settings an instance runs on: [`parse`]d, and an `auth_header` that cannot be sent is
-
 fn parse_to_run(settings: &[u8]) -> Result<Settings, Refusal> {
     let parsed = parse(settings)?;
     if let Some(h) = parsed.auth_header.as_ref().filter(|h| is_framing(&h.name)) {
@@ -181,7 +173,6 @@ fn parse_to_run(settings: &[u8]) -> Result<Settings, Refusal> {
 }
 
 /// The ambiguous-URL refusal: `Some(the refusal)` when `url` parses but
-
 pub fn ambiguous_url(url: &str) -> Option<String> {
     let from_path = zeroize::Zeroizing::new(match parsed_url(url) {
         Ok(parsed) => parsed[url::Position::BeforePath..].to_string(),
@@ -202,7 +193,6 @@ pub struct Webhook {
 }
 
 /// `Debug` names the settings through [`Prepared`]'s redacting `Debug`, and the counters; the
-
 impl std::fmt::Debug for Webhook {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Webhook")
@@ -225,7 +215,6 @@ impl Life for Webhook {
     }
 
     /// Refuses settings that do not parse, in the same words as [`Life::validate`]: an instance
-
     fn open(settings: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
         Ok(Self {
             settings: RwLock::new(Arc::new(Prepared::new(parse_to_run(settings)?))),
@@ -235,7 +224,6 @@ impl Life for Webhook {
     }
 
     /// Discovery at boot (the mechanism's `ready`, awaited after `open` before the instance serves):
-
     fn ready(
         &self,
         host: &Host,
@@ -246,7 +234,6 @@ impl Life for Webhook {
     }
 
     /// A reload's settings replace the instance's, and its target is asked about afresh; settings
-
     fn refresh(&self, settings: &[u8], _: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
         let parsed = parse_to_run(settings)?;
 
@@ -276,7 +263,6 @@ impl Webhook {
     }
 
     /// Whether the target or the credentials now differ from those `at` started under. The generation
-
     fn reloaded_since(&self, at: &mut Posting) -> bool {
         if self.generation.load(Ordering::Acquire) == at.generation {
             return false;
@@ -296,13 +282,11 @@ impl Webhook {
     }
 
     /// Whether the host admitted the target, asked once: a refusal (or no host to ask) raises
-
     pub fn admitted(&self, host: Option<&Host>) -> bool {
         self.admitted_settings(host).is_some()
     }
 
     /// The settings (and their generation) a fresh delivery runs on, when the host admitted the
-
     fn admitted_settings(&self, host: Option<&Host>) -> Option<(Arc<Prepared>, u64)> {
         let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
         let ok = match *live {
@@ -332,7 +316,6 @@ impl Webhook {
     }
 
     /// Whether a reload cut the batch whose rest is `rest` (the bytes after the line just done): when
-
     fn cut_by_reload(&self, at: &mut Posting, rest: &[u8]) -> bool {
         if at.bindings_pinned || next_line(rest, 0).is_none() || !self.reloaded_since(at) {
             return false;
@@ -369,7 +352,6 @@ fn next_line(batch: &[u8], from: usize) -> Option<(&[u8], usize)> {
 }
 
 /// The settings of one opened instance with the request every line of theirs is POSTed as, built
-
 pub struct Prepared {
     settings: Settings,
     target: Vec<u8>,
@@ -386,7 +368,6 @@ impl Drop for Prepared {
 }
 
 /// `Debug` prints the settings through the sink's own redaction: the url as the logs name it
-
 impl std::fmt::Debug for Prepared {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let names: Vec<std::borrow::Cow<'_, str>> = self
@@ -467,7 +448,6 @@ impl Prepared {
     }
 
     /// The request that POSTs `line` and the sealed fields it carries beside it
-
     fn parts(&self, line: &[u8]) -> (Request, Vec<SealedField>) {
         let request = Request {
             method: b"POST".to_vec(),
@@ -485,7 +465,6 @@ impl Prepared {
     }
 
     /// Whether `other` sends lines where these do and with the same credentials: the url and the
-
     fn routes_as(&self, other: &Settings) -> bool {
         self.settings.url == other.url && self.settings.auth_header == other.auth_header
     }
@@ -498,7 +477,6 @@ enum Field {
 }
 
 /// A credential-bearing field value held as a `Cred` for the target `url` (it has no getter, no
-
 fn cred(value: Vec<u8>, url: &str) -> Cred {
     let mut v = serde_json::Value::String(String::from_utf8(value).unwrap_or_else(|e| {
         let bytes = zeroize::Zeroizing::new(e.into_bytes());
@@ -511,13 +489,11 @@ fn cred(value: Vec<u8>, url: &str) -> Cred {
 }
 
 /// Whether the auth header can be sent: it is an HTTP header ([`header_is_http`]) and not one of
-
 fn header_builds(h: &ExportAuthHeader) -> bool {
     header_is_http(h) && !is_framing(&h.name)
 }
 
 /// Whether `name` is one of the framing or connection fields, which the sink's own request states
-
 fn is_framing(name: &str) -> bool {
     const OWNED: [&str; 9] = [
         "content-length",
@@ -534,7 +510,6 @@ fn is_framing(name: &str) -> bool {
 }
 
 /// The truth about a framing or connection field named as the auth header: the name is a valid
-
 fn framing_words(name: &str) -> String {
     format!(
         "settings.auth_header.name `{name}` is a framing/connection field the http framer states \
@@ -543,7 +518,6 @@ fn framing_words(name: &str) -> String {
 }
 
 /// Whether the auth header is a header 1.5.5 could build: `HeaderName::from_bytes` takes a name of 1
-
 fn header_is_http(h: &ExportAuthHeader) -> bool {
     let token = |b: &u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b);
     let name = h.name.as_bytes();
@@ -555,7 +529,6 @@ fn header_is_http(h: &ExportAuthHeader) -> bool {
 }
 
 /// One field appended as an `http::HeaderMap` appends it: after the last field of the same name
-
 fn append(fields: &mut Vec<(Vec<u8>, Field)>, name: &[u8], value: Field) {
     let field = (name.to_vec(), value);
     match fields
@@ -568,7 +541,6 @@ fn append(fields: &mut Vec<(Vec<u8>, Field)>, name: &[u8], value: Field) {
 }
 
 /// The `authorization` value a target URL's userinfo becomes, `None` when it carries none. The
-
 pub fn basic_authorization(url: &str) -> Option<Vec<u8>> {
     let u = parsed_url(url).ok()?;
     if !u.has_authority() {
@@ -584,7 +556,6 @@ pub fn basic_authorization(url: &str) -> Option<Vec<u8>> {
 }
 
 /// BUSBAR-7070's words for a refused target, 1.5.5's: a target whose raw text is not an `https://`
-
 pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
     match (url, refused) {
         (Some(u), ConnFailure::Refused(_)) if !undeclared(refused) && !is_https(u) => format!(
@@ -610,13 +581,11 @@ fn shown_target(url: &str) -> String {
 }
 
 /// Whether `refused` is the host's refusal of a need the plugin never declared
-
 fn undeclared(refused: &ConnFailure) -> bool {
     matches!(refused, ConnFailure::Refused(t) if t.starts_with(busbar_contract::conn::ConnError::UndeclaredNeed.text()))
 }
 
 /// `url` names the `https` scheme, read without case and judged on the raw text before any parse, as
-
 fn is_https(url: &str) -> bool {
     url.trim_start_matches(|c: char| c <= ' ')
         .chars()
@@ -627,7 +596,6 @@ fn is_https(url: &str) -> bool {
 }
 
 /// What became of one line: nothing to say for a 2xx; BUSBAR-7071 for any other status,
-
 pub fn report(
     url: &str,
     header_value: Option<&str>,
@@ -651,7 +619,6 @@ pub fn report(
 }
 
 /// The checks the configuration's validation runs across every webhook instance: AMONG the
-
 pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
     let parsed: Vec<(usize, &str, Settings)> = instances
         .iter()
@@ -735,7 +702,6 @@ pub const REMOVED_AUTH_HEADER: &str =
      refuses at validation and open";
 
 /// The migration's report line when it removes an `auth_header` named for a framing or connection
-
 pub fn removed_framing_header(name: &str) -> String {
     format!(
         "removed {}, which 1.6.0 refuses at validation and open",
@@ -744,7 +710,6 @@ pub fn removed_framing_header(name: &str) -> String {
 }
 
 /// Migrates legacy webhook settings by removing an auth header that validation refuses.
-
 pub struct Migration;
 
 impl Migrate for Migration {
@@ -774,7 +739,6 @@ impl Migrate for Migration {
 }
 
 /// Whether `settings` are refused at validation for their auth header ([`instance_checks`]), a
-
 fn auth_header_unbuildable(settings: &serde_json::Value) -> bool {
     let mut probe = owners::SettingsValue(settings.clone());
     #[cfg(test)]
@@ -795,7 +759,6 @@ fn auth_header_unbuildable(settings: &serde_json::Value) -> bool {
 }
 
 /// `check`'s instances, `(name, settings)` in configuration order (settings that are not JSON read
-
 fn instances(input: Lent<'_, CheckIn>) -> owners::SettingsInstances {
     owners::SettingsInstances(
         input
@@ -819,13 +782,11 @@ fn instances(input: Lent<'_, CheckIn>) -> owners::SettingsInstances {
 type State = Held<Webhook>;
 
 /// The error texts of the door's REFUSED answers: one per cause, so the host's line names why
-
 pub const NO_INSTANCE: &str = "no opened request-log-webhook instance";
 /// `check` at a phase this sink does not know.
 pub const UNKNOWN_PHASE: &str = "not a check phase this sink knows (limits or instances)";
 
 /// What a delivery parks across PENDING: the settings it started under and their generation (a
-
 struct Posting {
     settings: Arc<Prepared>,
     generation: u64,
@@ -837,7 +798,6 @@ struct Posting {
 }
 
 /// `deliver`: each line of the batch POSTed in order, one exchange after another; fire-and-forget,
-
 pub struct Deliver;
 
 impl SafeSlot for Deliver {

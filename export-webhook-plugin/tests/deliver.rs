@@ -85,7 +85,6 @@ struct Pause {
 static PAUSE: Mutex<Option<Pause>> = Mutex::new(None);
 
 /// The far end's answer once a whole request (its head, then the `content-length` body it states)
-
 fn answer(seen: &[u8]) -> Option<Vec<u8>> {
     let end = seen.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
     let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
@@ -198,7 +197,6 @@ fn opened_door(
 }
 
 /// ONE `deliver` of `batch` on the logs stream, as the kernel's export flusher offers it: on a
-
 fn deliver(p: &Plugin<Export>, d: &Dispatcher, batch: &str) -> String {
     let batch: Arc<Vec<u8>> = Arc::new(batch.as_bytes().to_vec());
     let mut f: Frame<DeliverIn, OutHead> =
@@ -269,7 +267,6 @@ fn a_refused_refresh_keeps_both_the_pending_batch_and_the_next_batch_on_the_old_
 }
 
 /// Records in -> one HTTPS POST per line out, in order: the target's path and query, the
-
 fn records_in_one_post_per_line_out(dropped: bool) {
     seen();
     let (p, d, tape) = opened_door(
@@ -326,7 +323,6 @@ fn records_in_one_post_per_line_out(dropped: bool) {
 }
 
 /// A non-2xx answer drops the line: ONE BUSBAR-7071 line, at WARN, naming the status and only the
-
 fn a_non_2xx_answer_drops_the_line_as_busbar_7071() {
     seen();
     let (p, d, tape) = opened(&serde_json::json!({
@@ -350,7 +346,6 @@ fn a_non_2xx_answer_drops_the_line_as_busbar_7071() {
 }
 
 /// A transport error (the target closes before TLS completes) drops the line: ONE BUSBAR-7072 line, the
-
 fn a_transport_error_drops_the_line_as_busbar_7072() {
     let (p, d, tape) = opened(&serde_json::json!({
         "url": format!("https://u53r:s3cr3t-pw@{}/T0KEN-PATH?api_key=s3cr3t-q", failing_peer()),
@@ -381,7 +376,6 @@ fn no_secret(host: &[String]) {
 }
 
 /// A delivery started after refresh uses the new settings from its first line.
-
 fn the_first_line_after_a_refresh_goes_on_the_new_settings() {
     seen();
     let (p, d, tape) = opened(&serde_json::json!({
@@ -415,7 +409,6 @@ fn the_first_line_after_a_refresh_goes_on_the_new_settings() {
 }
 
 /// The first POST has reached A while DELIVER waits for its response. A successful REFRESH moves
-
 fn a_pending_batch_keeps_its_original_destination_and_credentials(refuse: bool, dropped: bool) {
     seen();
     assert_ne!(
@@ -521,7 +514,6 @@ fn assert_binding(request: &str, destination: &str, path: &str, key: &str, old: 
 }
 
 /// A 200 with a huge body is still a delivered line.
-
 fn a_200_with_a_huge_body_is_still_a_delivered_line() {
     seen();
     let (p, d, tape) = opened(&serde_json::json!({"url": format!("https://{}/big", far_end())}));
@@ -536,7 +528,6 @@ fn a_200_with_a_huge_body_is_still_a_delivered_line() {
 }
 
 /// A disabled instance posts nothing.
-
 fn a_disabled_instance_posts_nothing() {
     seen();
     let (p, d, tape) = opened(&serde_json::json!({"url": format!("http://{}/in", far_end())}));
@@ -565,7 +556,6 @@ fn blank_lines_are_not_posted() {
 }
 
 /// A non 2xx with a huge body still logs its status.
-
 fn a_non_2xx_with_a_huge_body_still_logs_its_status() {
     seen();
     let (p, d, tape) =

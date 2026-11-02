@@ -7,7 +7,6 @@
 mod conformance_host;
 
 /// The far end's answer: an HTTP/1.1 `200` once a whole request (its head, then the
-
 fn accepted(seen: &[u8]) -> Option<Vec<u8>> {
     let end = seen.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
     let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
@@ -37,7 +36,6 @@ busbar_test_kit::conformance_suite! {
 }
 
 /// The kernel resolves references at declared secret fields in place and refuses undeclared ones.
-
 mod declared_secrets {
     use std::sync::Arc;
 

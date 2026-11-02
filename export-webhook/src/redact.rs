@@ -10,7 +10,6 @@ use zeroize::Zeroizing;
 const REDACTED: &str = "***";
 
 /// `url` as a delivery log line names it: scheme, a masked userinfo, host and port. A path other
-
 pub fn log_target(url: &str) -> String {
     let Ok(u) = crate::parsed_url(url) else {
         return unparsed_target(url);
@@ -40,7 +39,6 @@ pub fn log_target(url: &str) -> String {
 }
 
 /// What a line shows of url text that does not parse: `<scheme>:***` when it opens with `http` or
-
 pub(crate) fn unparsed_target(url: &str) -> String {
     let scheme = url
         .split_once(':')
@@ -50,7 +48,6 @@ pub(crate) fn unparsed_target(url: &str) -> String {
 }
 
 /// `text` (a host's failure words, say) with every part of `url` that can carry a credential
-
 pub fn scrub(text: &str, url: &str, header_value: Option<&str>) -> String {
     let mut parts = Zeroizing::new(vec![url.to_string(), crate::mask_url(url)]);
     if let Ok(u) = crate::parsed_url(url) {
@@ -93,7 +90,6 @@ pub fn scrub(text: &str, url: &str, header_value: Option<&str>) -> String {
 }
 
 /// Every credential-bearing string the settings JSON holds: every string (and map key) under
-
 pub fn settings_credentials(settings: &serde_json::Value) -> Vec<String> {
     fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
         match v {
