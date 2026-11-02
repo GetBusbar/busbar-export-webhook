@@ -9,8 +9,9 @@
 //! codes it raises).
 //!
 //! Each request-log line of a delivered batch is POSTed, as the compact JSON line it is, with
-//! `content-type: application/json`, the instance's optional `auth_header` (left out when it is not
-//! a header that can be built), and the `authorization: Basic …` a userinfo in the URL becomes, to
+//! `content-type: application/json`, the instance's optional `auth_header` (one that cannot be sent
+//! as an HTTP header, or names a framing field, is refused at validate/open/refresh and check), and
+//! the `authorization: Basic …` a userinfo in the URL becomes, to
 //! the instance's `https://` target — through the HOST's connector: the Statement declares ONE outbound
 //! need whose target is the `url` setting (the host drops its userinfo), under the open-web egress
 //! class (public destinations over a secure connection only), and the request rides the SDK's
