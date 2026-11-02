@@ -46,7 +46,7 @@ fn a_receiver_echoing_only_the_authorization_credential_is_scrubbed() {
 
 #[test]
 fn an_admission_fault_does_not_permanently_disable_a_valid_target() {
-    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
     struct Broken;
     impl FakeService for Broken {
         type In = busbar_contract::abi::host::service::NeedAdmitIn;

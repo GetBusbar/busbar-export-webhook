@@ -539,7 +539,7 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
     use busbar_contract::abi::mechanism::call::Outcome;
     use busbar_contract::abi::mechanism::ticket::Ticket;
     use busbar_contract::abi::sdk::conn::Host;
-    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
     use std::task::Poll;
     struct Refuses;
     impl FakeService for Refuses {
@@ -672,7 +672,7 @@ fn ready_reads_the_hosts_refusal_and_names_the_scheme_rule() {
     use busbar_contract::abi::mechanism::call::Outcome;
     use busbar_contract::abi::mechanism::ticket::Ticket;
     use busbar_contract::abi::sdk::conn::Host;
-    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
     use std::task::Poll;
     struct Refuses;
     impl FakeService for Refuses {
@@ -707,9 +707,9 @@ fn the_check_slot_maps_its_phase_and_leases_the_findings() {
     };
     use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome};
     use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut};
-    use busbar_contract::abi::sdk::test_support::reply::{call_in, close_in};
-    use busbar_contract::abi::sdk::test_support::test_in::TestIn;
-    use busbar_contract::abi::sdk::test_support::{zeroed, DoorView};
+    use busbar_test_kit::test_support::reply::{call_in, close_in};
+    use busbar_test_kit::test_support::test_in::TestIn;
+    use busbar_test_kit::test_support::{zeroed, DoorView};
 
     let settings = br#"{"url":"https://a.example/x","delivery_timeout_secs":0}"#;
     let view = DoorView::of(crate::table::MACRO_DOOR);
@@ -1042,9 +1042,9 @@ fn serve_is_refused_saying_why_through_the_door() {
     use busbar_contract::abi::export::{Ops, ServeIn, ServeOut};
     use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
     use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut};
-    use busbar_contract::abi::sdk::test_support::reply::{call_in, close_in};
-    use busbar_contract::abi::sdk::test_support::test_in::TestIn;
-    use busbar_contract::abi::sdk::test_support::{zeroed, DoorView};
+    use busbar_test_kit::test_support::reply::{call_in, close_in};
+    use busbar_test_kit::test_support::test_in::TestIn;
+    use busbar_test_kit::test_support::{zeroed, DoorView};
 
     let view = DoorView::of(crate::table::MACRO_DOOR);
     let open = view.op::<Ops>(|t| &t.head.open).expect("open");
