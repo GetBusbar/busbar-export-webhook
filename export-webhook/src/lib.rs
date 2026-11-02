@@ -702,9 +702,10 @@ fn is_https(url: &str) -> bool {
 }
 
 /// What became of one line: nothing to say for a 2xx; BUSBAR-7071 for any other status,
-/// BUSBAR-7072 for a transport failure — each at WARN. The target is named by scheme and host only ([`log_target`]:
-/// its userinfo, path and query can each carry the webhook's secret) and the host's failure text is
-/// scrubbed of the target's parts ([`scrub`]).
+/// BUSBAR-7072 for a transport failure — each at WARN. The target is named as [`log_target`] names
+/// it: scheme, a masked userinfo marker, host and port, a path other than `/` shown as `/***` and
+/// a query as `?***` (the userinfo, path and query can each carry the webhook's secret); the host's
+/// failure text is scrubbed of the target's parts ([`scrub`]).
 pub fn report(
     url: &str,
     header_value: Option<&str>,
