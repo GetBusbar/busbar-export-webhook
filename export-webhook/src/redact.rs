@@ -5,12 +5,13 @@
 //!
 //! A webhook target carries its secret in more places than the userinfo: Slack-style targets put it
 //! in the path (`/services/T…/B…/X…`), others in the query (`?api_key=…`). And the host's failure
-//! text may quote the target. So a delivery LOG line names only the target's scheme and host
-//! ([`log_target`]), and any text that came from elsewhere is scrubbed of the target's parts
-//! ([`scrub`]) and of the settings' credential strings ([`settings_credentials`]).
+//! text may quote the target. So a delivery LOG line names the target as [`log_target`] does (the
+//! scheme, a masked userinfo marker, host and port, with the path and query as `***`), and any text
+//! that came from elsewhere is scrubbed of the target's parts ([`scrub`]) and of the settings'
+//! credential strings ([`settings_credentials`]).
 //!
-//! The refusal lines that name the target (BUSBAR-7070, the checks, the ambiguous-url refusal) name
-//! it as the log lines do ([`log_target`], built from the parsed url).
+//! The refusal lines that name the target (BUSBAR-7070, the checks) name a url 1.5.5 accepted as
+//! 1.5.5's `mask_url` did (`shown_target`), and any other url as [`log_target`] does.
 
 use busbar_contract::abi::sdk::url as sdk_url;
 
