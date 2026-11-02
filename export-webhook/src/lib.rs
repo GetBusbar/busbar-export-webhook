@@ -729,8 +729,8 @@ pub fn report(
 /// The checks the configuration's validation runs across every webhook instance: AMONG the
 /// operational limits' checks ([`CheckPhase::Limits`]) the in-flight bound — one bound over the
 /// instances, the largest configured (64 with none), so a generous instance is never refused for a
-/// stingy sibling; AFTER them ([`CheckPhase::Instances`]) each instance's delivery deadline,
-/// numbered by its position.
+/// stingy sibling; AFTER them ([`CheckPhase::Instances`]) each instance's auth
+/// header (framing, or not a valid HTTP header) and delivery deadline, numbered by its position.
 ///
 /// Only the largest instance's bound is validated (the shared bound must accommodate the most
 /// permissive sink), and the host's export axis clamps each instance's bound to at least one. An
@@ -770,7 +770,8 @@ pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Ve
     errors
 }
 
-/// Each instance's delivery deadline, numbered by its configured position.
+/// Each instance's auth header (framing or not a valid HTTP header) and delivery deadline, numbered
+/// by its configured position.
 fn instance_checks(parsed: &[(usize, Settings)], errors: &mut Vec<String>) {
     for (i, w) in parsed {
         if let Some(h) = w.auth_header.as_ref().filter(|h| is_framing(&h.name)) {
