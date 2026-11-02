@@ -32,7 +32,7 @@ use busbar_test_kit::conformance_host::{anchors, far_end_on, host, Doors};
 
 /// The transport doors the host serves, as `tests/support/conformance_host.rs` names them.
 const DOORS: Doors = &[
-    ("tcp", busbar_transport_tcp::door::MACRO_DOOR),
+    ("tcp", busbar_transport_tcp::linked::MACRO_DOOR),
     ("http", busbar_transport_http::door::MACRO_DOOR),
 ];
 
