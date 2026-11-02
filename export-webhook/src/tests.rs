@@ -1042,6 +1042,12 @@ fn an_ambiguous_url_is_refused_without_its_credential() {
         assert!(text.contains("%2F"), "{text}");
         assert!(!text.contains(secret), "{url}: {text}");
         assert!(Webhook::open(settings.as_bytes(), &[], 1).is_err(), "{url}");
+        // A reload to the ambiguous url is refused the same way, the old settings staying.
+        let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
+        let refusal = w.refresh(settings.as_bytes(), &[], 2).expect_err(url);
+        let text = refusal.text().expect("a refusal says why");
+        assert!(text.contains("is ambiguous"), "{url}: {text}");
+        assert!(!text.contains(secret), "{url}: {text}");
     }
     for url in [
         "https://u:p@siem.example/in",
