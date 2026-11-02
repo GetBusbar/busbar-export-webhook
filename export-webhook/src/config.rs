@@ -21,8 +21,9 @@ pub struct WebhookSettings {
     /// targets an internal host.
     pub url: String,
     /// An optional auth header applied to every delivery from THIS instance (e.g.
-    /// `{ name: Authorization, value: "Bearer ${WEBHOOK_TOKEN}" }`). The `value` rides the config's
-    /// `${VAR}` env interpolation, so a secret is never stored literally.
+    /// `{ name: Authorization, value: {env: WEBHOOK_TOKEN} }`). The `value` is a secret reference
+    /// (`{env:}` / `{file:}` / `{module:}`) the kernel resolves in place; a literal is refused. The
+    /// referenced secret holds the full header value (e.g. `Bearer …`).
     #[serde(default)]
     pub auth_header: Option<ExportAuthHeader>,
     /// Max concurrent deliveries (default 64) — relocated from `max_inflight_webhook_deliveries`.
