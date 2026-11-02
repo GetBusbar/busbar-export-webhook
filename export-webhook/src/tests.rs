@@ -997,6 +997,29 @@ fn a_failed_delivery_never_logs_the_targets_path_query_or_the_hosts_echo_of_them
     assert!(text.contains("hooks.example"), "{text}");
 }
 
+/// The scrub also covers the percent-decoded forms: a host that echoes the URL decoded (`p@ss`,
+/// `/hook/T/X`) must not leak what the encoded URL hid.
+#[test]
+fn a_failed_delivery_never_logs_the_percent_decoded_credential_or_path() {
+    let url = format!("https://u:p%40ss-{CANARY}@hooks.example/hook/T%2F{CANARY}");
+    let got = logged(|| {
+        report(
+            &url,
+            None,
+            Err(ConnFailure::Failed(format!(
+                "error sending request for https://u:p@ss-{CANARY}@hooks.example/hook/T/{CANARY}: reset"
+            ))),
+        );
+    });
+    assert_eq!(got.len(), 1, "{got:?}");
+    let text = all_text(&got);
+    assert!(
+        !text.contains(CANARY),
+        "a delivery log carried the decoded credential:\n{text}"
+    );
+    assert!(text.contains("hooks.example"), "{text}");
+}
+
 /// The log target keeps scheme, host and port; everything that can carry a secret is `***`.
 #[test]
 fn the_log_target_names_only_scheme_host_and_port() {
