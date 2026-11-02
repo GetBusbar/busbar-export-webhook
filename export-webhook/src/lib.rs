@@ -836,7 +836,8 @@ pub fn removed_framing_header(name: &str) -> String {
 /// 1.5.5 left an `auth_header` it could not build out of every delivery and sent the line without
 /// it (export-webhook #33 W1), and sent one named for a framing or connection field as written;
 /// 1.6.0 refuses both at validation ([`check`]) and at `open`. The migration removes exactly the
-/// header those refusals name ([`header_builds`], the one rule), reporting [`REMOVED_AUTH_HEADER`]:
+/// header those refusals name ([`header_builds`], the one rule), reporting [`REMOVED_AUTH_HEADER`]
+/// (or [`removed_framing_header`] when the name is a framing or connection field):
 /// settings that parse as [`Settings`] and carry an `auth_header` that cannot be sent. A value
 /// written as a reference the kernel resolves (`auth_header.value` is a declared secret field) is
 /// unknown here, so only the header's name is judged. Anything else, a section the grammar refuses
@@ -903,9 +904,10 @@ pub const NO_INSTANCE: &str = "no opened request-log-webhook instance";
 /// `check` at a phase this sink does not know.
 pub const UNKNOWN_PHASE: &str = "not a check phase this sink knows (limits or instances)";
 
-/// What a delivery parks across PENDING: the settings it started under and their generation (a
-/// reload mid-batch changes nothing for it: its lines go, and are reported, to the target it began
-/// with), the byte offset of the line it is on (so a resume does not re-split the batch), the handles issued before that line's exchange, and the exchange.
+/// What a delivery parks across PENDING: the settings it started under and their generation (the
+/// parked exchange finishes on the settings it began with; if a reload mid-batch changed the target
+/// or credentials, the generation differs and the batch's remaining lines are dropped, BUSBAR-7109,
+/// `cut_by_reload`), the byte offset of the line it is on (so a resume does not re-split the batch), the handles issued before that line's exchange, and the exchange.
 struct Posting {
     settings: Arc<Prepared>,
     generation: u64,
