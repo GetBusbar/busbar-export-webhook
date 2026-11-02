@@ -1528,9 +1528,13 @@ fn a_reload_of_the_target_mid_batch_drops_the_rest_once() {
     assert_eq!(field(&got[0], "level"), "WARN");
     assert_eq!(field(&got[0], "dropped"), "2");
     assert_eq!(field(&got[0], "webhook_url"), "\"https://a.example\"");
-    // The last line never raises it, reload or not.
-    let (_, end) = next_line(batch, 17).expect("line 3");
-    assert!(!w.cut_by_reload(&mut at, &batch[end..]));
+    // The last line never raises it, reload or not: put the posting back on the pre-reload
+    // generation so the reload is still news to it, and nothing remains to drop.
+    at.generation = generation;
+    let (_, after_two) = next_line(batch, next).expect("line 2");
+    let (_, end) = next_line(batch, after_two).expect("line 3");
+    let got = logged(|| assert!(!w.cut_by_reload(&mut at, &batch[end..])));
+    assert_eq!(got.len(), 0, "{got:?}");
 }
 
 /// `next_line` skips blank lines and answers the offset past the line it returns.
