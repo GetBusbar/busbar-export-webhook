@@ -21,7 +21,7 @@
         },
         "value": {
           "type": "string",
-          "description": "The header's value (the credential), as written: a ${VAR} in it is filled from the environment when the config loads, so the secret is never stored literally."
+          "description": "The header's full value (e.g. 'Bearer ...'), written as a secret reference ({env:}, {file:} or {module:}) that the kernel resolves; a literal is refused."
         }
       }
     },

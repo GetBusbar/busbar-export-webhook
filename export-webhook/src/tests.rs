@@ -820,9 +820,9 @@ fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
 
 /// THE SETTINGS SCHEMA MARKS NO FIELD SECRET BELOW THE ROOT (coordinator ruling (B), 2026-10-19:
 /// pack keeps 1.5.5's refusal of a nested `x-busbar-secret` marker, v1.5.5
-/// `crates/plugin-pack/src/main.rs:298-304`). `auth_header.value` is a plain string, as 1.5.5's
-/// `ExportAuthHeader { name, value: String }` read it (v1.5.5 `crates/busbar/src/config/mod.rs`),
-/// its `${VAR}` filled by the config's env interpolation. The schema names exactly the settings
+/// `crates/plugin-pack/src/main.rs:298-304`). `auth_header.value` is a plain string in the schema
+/// (the plugin declares it a secret field itself, `SECRET_REFS`, and the kernel resolves a
+/// `{env:}`/`{file:}`/`{module:}` reference there and refuses a literal). The schema names exactly the settings
 /// grammar's keys. RED before the fix: `auth_header.value` carried a nested marker the packer
 /// refuses.
 #[test]
@@ -866,6 +866,16 @@ fn the_settings_schema_marks_no_nested_secret() {
     assert_eq!(
         schema["properties"]["auth_header"]["properties"]["value"]["type"],
         "string"
+    );
+    // Its description names the real grammar (a secret reference the kernel resolves; a literal is
+    // refused), not an environment `${VAR}` fill.
+    let said = schema["properties"]["auth_header"]["properties"]["value"]["description"]
+        .as_str()
+        .expect("a description");
+    assert!(!said.contains("${"), "{said}");
+    assert!(
+        said.contains("{env:}") && said.contains("refused"),
+        "{said}"
     );
 }
 
