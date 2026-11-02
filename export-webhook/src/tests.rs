@@ -1676,6 +1676,10 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
         ("https:svc-token/abc@host/x", &["svc-token", "abc"][..]),
         ("https:svc:pa/ss@host/x", &["svc:", "pa/ss"][..]),
         (
+            "https:svc:hunter2@siem.example/hook?next=https://x",
+            &["hunter2"][..],
+        ),
+        (
             "https://h/hook?to=ops@corp.com&key=SECRET",
             &["ops", "corp", "SECRET"][..],
         ),

@@ -660,12 +660,19 @@ pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
 }
 
 /// How a refusal or check line names the target `url`: a url 1.5.5 accepted, one that parses with no
-/// `@` after its host and is written with `://`, is echoed as 1.5.5's `mask_url` did (userinfo
-/// masked, the rest as written). Any other (ambiguous, unparseable with an `@`, or written without
+/// `@` after its host and is written with `://` right after its scheme, is echoed as 1.5.5's
+/// `mask_url` did (userinfo masked,
+/// the rest as written). Any other (ambiguous, unparseable with an `@`, or written without
 /// its slashes, which `mask_url` cannot read) takes the masked forms of [`log_target`].
 fn shown_target(url: &str) -> String {
     match url::Url::parse(url) {
-        Ok(u) if !u[url::Position::BeforePath..].contains('@') && url.contains("://") => {
+        Ok(u)
+            if !u[url::Position::BeforePath..].contains('@')
+                && url
+                    .trim_start_matches(|c: char| c <= ' ')
+                    .get(u.scheme().len()..)
+                    .is_some_and(|r| r.starts_with("://")) =>
+        {
             mask_url(url)
         }
         _ => log_target(url),
