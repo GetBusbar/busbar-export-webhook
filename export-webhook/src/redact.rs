@@ -2,15 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Keeping credentials out of the sink's own words.
-//!
-//! A webhook target carries its secret in more places than the userinfo: Slack-style targets put it
-//! in the path (`/services/T…/B…/X…`), others in the query (`?api_key=…`). And the host's failure
-//! text may quote the target. So a delivery LOG line names only the target's scheme and host
-//! ([`log_target`]), and any text that came from elsewhere is scrubbed of the target's parts
-//! ([`scrub`]) and of the settings' credential strings ([`settings_credentials`]).
-//!
-//! The refusal lines that name the target (BUSBAR-7070, the checks, the ambiguous-url refusal) name
-//! it as the log lines do ([`log_target`], built from the parsed url).
 
 use busbar_contract::abi::sdk::url as sdk_url;
 use zeroize::Zeroizing;
@@ -19,14 +10,12 @@ use zeroize::Zeroizing;
 const REDACTED: &str = "***";
 
 /// `url` as a delivery log line names it: scheme, a masked userinfo, host and port. A path other
-/// than `/` becomes `/***` and a query `?***`; a fragment is dropped. A string that is not a URL
-/// keeps only its scheme ([`unparsed_target`]).
+
 pub fn log_target(url: &str) -> String {
     let Ok(u) = crate::parsed_url(url) else {
         return unparsed_target(url);
     };
-    // An ambiguous url (an `@` after its host) is refused at the door; were one to get here, its
-    // parsed host is the front of a credential, so it shows as an unparsed one does.
+
     if u[url::Position::BeforePath..].contains('@') {
         return unparsed_target(url);
     }
@@ -51,8 +40,7 @@ pub fn log_target(url: &str) -> String {
 }
 
 /// What a line shows of url text that does not parse: `<scheme>:***` when it opens with `http` or
-/// `https`, else `***` (any other word before a `:` may be a credential). Nothing after the scheme is shown: without a parse there is no telling credential
-/// from host.
+
 pub(crate) fn unparsed_target(url: &str) -> String {
     let scheme = url
         .split_once(':')
@@ -62,11 +50,7 @@ pub(crate) fn unparsed_target(url: &str) -> String {
 }
 
 /// `text` (a host's failure words, say) with every part of `url` that can carry a credential
-/// replaced by `***`: the URL itself (as written and masked, `mask_url`), its path, query, userinfo,
-/// each also percent-decoded; the decoding and the cut (as written and as serde quotes it, longest
-/// first) are the SDK's (`sdk::url::and_decoded`, `sdk::url::scrub`). The request's own credentials
-/// are cut too, for a receiver may echo its request back: the `Authorization: Basic` value the
-/// userinfo became, its base64 token, and the `auth_header` value (`header_value`).
+
 pub fn scrub(text: &str, url: &str, header_value: Option<&str>) -> String {
     let mut parts = Zeroizing::new(vec![url.to_string(), crate::mask_url(url)]);
     if let Ok(u) = crate::parsed_url(url) {
@@ -109,7 +93,7 @@ pub fn scrub(text: &str, url: &str, header_value: Option<&str>) -> String {
 }
 
 /// Every credential-bearing string the settings JSON holds: every string (and map key) under
-/// `auth_header` except the header's `name`. These are what serde may quote back in a shape refusal.
+
 pub fn settings_credentials(settings: &serde_json::Value) -> Vec<String> {
     fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
         match v {

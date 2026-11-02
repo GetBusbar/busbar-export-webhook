@@ -2,12 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! **A PUSH SINK REFUSES `scrape` AND `serve`, SAYING WHY, THROUGH BOTH DOORS** (sibling review of
-//! the export kind): the sink carries no `metrics` stream and declares no route, so each answer is
-//! REFUSED with its cause in the error text, the same words in every export sibling — never a silent
-//! empty exposition or a bare outcome. Driven over the real loader, LINKED and DROPPED IN.
-//!
-//! RED before: `scrape` answered READY with nothing written (or a bare REFUSED), and `serve` a bare
-//! answer with no cause.
 
 use std::sync::Arc;
 

@@ -2,21 +2,19 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The webhook sink tests itself (DECISIONS #2): its settings refusals, word for word as the
-//! compiled-in sink's (1.5.5); what it asks the host to carry; and what it reports.
 
 use super::*;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
 /// The request one line is POSTed as, under `s`: its plain part (the credential-bearing fields ride
-/// sealed beside it, see [`sent`]).
+
 fn request(s: &Settings, line: &[u8]) -> Request {
     Prepared::new(s.clone()).parts(line).0
 }
 
 /// Asserts the fields one POST under `s` sends, in order: `want` is `(name, value)` as the far end
-/// reads them. The framed head shows a sealed field as `<sealed>`; its value is checked against the
-/// credential the instance holds (`Cred::verify_eq`), the only reading a `Cred` allows.
+
 fn sent(s: &Settings, want: &[(&str, &str)]) {
     let p = Prepared::new(s.clone());
     let (request, sealed) = p.parts(b"{}");
@@ -43,7 +41,7 @@ fn refused(settings: serde_json::Value) -> String {
 }
 
 /// The shape refusals are serde's, under the `settings:` prefix — the same derive, field order and
-/// `deny_unknown_fields` the compiled-in `WebhookSettings` had.
+
 #[test]
 fn a_settings_shape_refusal_is_the_compiled_in_sinks_line() {
     assert_eq!(
@@ -60,7 +58,7 @@ fn a_settings_shape_refusal_is_the_compiled_in_sinks_line() {
 }
 
 /// BOOT-083a / BOOT-083b / BOOT-089f: the validation-phase lines, one in-flight bound over the
-/// instances (the largest), then each instance's deadline by its position.
+
 #[test]
 fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
     let one = |v: serde_json::Value| {
@@ -103,7 +101,7 @@ fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
             u64::MAX
         )]
     );
-    // A stingy sibling is not refused beside a generous one: the bound is the largest.
+
     let two_instances = [
         (
             "a".into(),
@@ -119,8 +117,7 @@ fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
     assert_eq!(two.len(), 1, "{two:?}");
     assert!(two[0].contains("'https://b' (#1)"), "{two:?}");
     assert!(check(CheckPhase::Limits, &[]).is_empty());
-    // Each phase answers only its own lines: the deadline is not a limit, the bound not an
-    // instance's own.
+
     let both = [(
         "w".to_string(),
         json!({"url": "https://a/", "max_inflight_deliveries": 0, "delivery_timeout_secs": 0}),
@@ -193,7 +190,7 @@ fn reply(status: u16) -> Result<ExchangeResponse, ConnFailure> {
 }
 
 /// A delivery POSTs the compact JSON line to the target's path and query with
-/// `content-type: application/json` then the auth header, under the instance's deadline.
+
 #[test]
 fn a_delivery_posts_the_line() {
     let s = settings(json!({
@@ -226,11 +223,7 @@ fn a_delivery_posts_the_line() {
 }
 
 /// RED (audit export-webhook #1, ARCHITECT ruling (c)): PARITY WITH 1.5.5. A target URL carrying a
-/// userinfo is sent as 1.5.5's reqwest 0.12 sent it (`RequestBuilder::new` -> `extract_authority`
-/// -> `basic_auth`; reqwest-0.12.28 src/async_impl/request.rs:169-183, :581-605, src/util.rs:4-25):
-/// `authorization: Basic` and the padded standard base64 of `{user}:{password}`, each half
-/// percent-decoded; a user alone as `{user}:`, a password alone as `:{password}`; a username that
-/// does not decode to UTF-8 sends no field, and a password that does not is left out.
+
 #[test]
 fn a_userinfo_in_the_url_is_sent_as_basic_as_1_5_5_sent_it() {
     for (url, sent) in [
@@ -269,7 +262,7 @@ fn a_userinfo_in_the_url_is_sent_as_basic_as_1_5_5_sent_it() {
             "{url}"
         );
     }
-    // Exercise the production userinfo encoder: all padding lengths and the standard +/ alphabet.
+
     for (userinfo, encoded) in [
         ("f", "Basic Zjo="),
         ("fo", "Basic Zm86"),
@@ -289,10 +282,7 @@ fn a_userinfo_in_the_url_is_sent_as_basic_as_1_5_5_sent_it() {
 }
 
 /// RED (audit export-webhook #1, ARCHITECT ruling (c)): the userinfo's field rides every POST
-/// first, then `content-type`, then a configured auth header, as 1.5.5's `HeaderMap` held them —
-/// a configured header ALSO named `Authorization` (any case) is sent too, right after the
-/// userinfo's, so the receiver reads both, the userinfo's first, as it did from 1.5.5. The target
-/// is the path and query, never the userinfo.
+
 #[test]
 fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
     let basic = ("authorization", "Basic dXNlcjpwYXNz");
@@ -313,8 +303,7 @@ fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
 }
 
 /// RED (audit export-webhook round 1): the contract's field block carries lower-case names, and
-/// 1.5.5's `HeaderName::from_bytes` lower-cased the configured name, so 1.5.5 sent
-/// `authorization` / `x-api-key` whatever the operator's spelling.
+
 #[test]
 fn a_configured_auth_header_name_goes_lower_case_as_1_5_5_sent_it() {
     for (name, lowered) in [
@@ -330,8 +319,7 @@ fn a_configured_auth_header_name_goes_lower_case_as_1_5_5_sent_it() {
 }
 
 /// A non-2xx answer and a transport failure each drop the line and raise their code at WARN (1.5.5's
-/// `warn_webhook_delivery_failed`), with the fields in the compiled-in site's order, the target
-/// named by scheme and host only.
+
 #[test]
 fn a_failed_delivery_raises_its_code_once() {
     let url = "https://user:pw@siem.example/in";
@@ -349,7 +337,7 @@ fn a_failed_delivery_raises_its_code_once() {
     assert_eq!(got.len(), 2, "{got:?}");
     assert_eq!(names(&got[0]), ["diag", "webhook_url", "status"]);
     assert_eq!(field(&got[0], "diag"), "BUSBAR-7071");
-    // The target by scheme and host: its userinfo, path and query can each carry the secret (H3).
+
     assert_eq!(
         field(&got[0], "webhook_url"),
         "\"https://***@siem.example/***\""
@@ -376,9 +364,7 @@ fn the_success_boundary_is_200_to_299() {
 }
 
 /// A target the host refused is named in 1.5.5's words, as 1.5.5's `validate_webhook_url` named it:
-/// the `https://` scheme rule (the scheme read without case), a URL that does not parse, or the
-/// destination guard; a host that gave no verdict is named as such. The target is masked by the
-/// log target: userinfo, path and query credentials are hidden.
+
 #[test]
 fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
     let refused = ConnFailure::Refused("destination refused".into());
@@ -390,9 +376,7 @@ fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
         refusal_words(Some("HTTP://u:p@siem.example/in"), &refused),
         "observability.request_log_webhook_url must be an https:// URL (got 'http://***@siem.example/***')"
     );
-    // RED (Q128 export-webhook LOW, src/lib.rs:391-403): 1.5.5 named the other two refusals on this
-    // path in its own words too (v1.5.5 observability.rs validate_webhook_url): a URL that does not
-    // parse, and a parseable https target the destination guard refused.
+
     assert_eq!(
         refusal_words(Some("https://u:p@/x"), &refused),
         "observability.request_log_webhook_url is not a valid URL: empty host"
@@ -410,7 +394,7 @@ fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
 }
 
 /// With no verdict to be had, the instance is disabled once, in BUSBAR-7070's words, and stays so
-/// until a reload asks again.
+
 #[test]
 fn an_unadmitted_target_disables_the_instance_once() {
     let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
@@ -432,8 +416,7 @@ fn an_unadmitted_target_disables_the_instance_once() {
 }
 
 /// The Statement: name, NO in-flight ceiling of its own (`u32::MAX`: the operator's
-/// `max_inflight_deliveries` is the bound), the module alias, the `logs` stream, no route, and ONE
-/// outbound open-web need targeted by the `url` setting.
+
 #[test]
 fn the_statement_states_the_sink() {
     assert_eq!(STATEMENT.name.len, NAME.len());
@@ -471,7 +454,7 @@ fn the_declaration_states_the_shed_counter_and_the_codes() {
 }
 
 /// Every metric a catalogue action cites (a backticked `*_total` token) is a series the declaration
-/// states, not a Rust constant's name (EHOOK-14).
+
 #[test]
 fn a_catalogue_action_cites_only_declared_metrics() {
     let d: serde_json::Value = serde_json::from_str(DECLARES).unwrap();
@@ -496,7 +479,7 @@ fn a_catalogue_action_cites_only_declared_metrics() {
 }
 
 /// A validation error names the target, never its userinfo (EHOOK-3): the deadline refusals echo
-/// the URL through the one mask the diagnostics use.
+
 #[test]
 fn validation_errors_mask_the_targets_userinfo() {
     for (url, shown) in [
@@ -532,8 +515,7 @@ fn validation_errors_mask_the_targets_userinfo() {
 }
 
 /// The lines naming a userinfo target hide its path and normalize its scheme: the BUSBAR-7070
-/// boot error (over a host that refuses the target), the auth-header refusal and the two
-/// delivery-deadline refusals.
+
 #[test]
 fn the_lines_naming_a_userinfo_target_read_exactly() {
     use busbar_contract::abi::mechanism::call::Outcome;
@@ -608,14 +590,13 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
 }
 
 /// DISCOVERY AT BOOT: `ready` asks the host's verdict once and never refuses the boot. Over host
-/// tables with no connector the target is unadmitted, so BUSBAR-7070 is raised there, at ERROR, and
-/// the instance stays disabled; the first delivery asks nothing again.
+
 #[test]
 fn ready_asks_the_verdict_at_boot_and_never_refuses_it() {
     use busbar_contract::abi::mechanism::ticket::Ticket;
     use busbar_test_kit::test_support::fake::FakeHost;
     use std::task::Poll;
-    // The empty fixture proves the host table and serves no connector or admission service.
+
     let fake_host = FakeHost::new();
     let host = busbar_contract::abi::sdk::conn::Host::of(fake_host.lent());
     let w = Webhook::open(br#"{"url":"http://127.0.0.1:4000/sidecar"}"#, &[], 1).expect("opens");
@@ -631,8 +612,7 @@ fn ready_asks_the_verdict_at_boot_and_never_refuses_it() {
 }
 
 /// RED (audit export-webhook round 1): a reload publishes the new settings and clears the cached
-/// verdict as ONE step, so a delivery never reads the new target's settings paired with the old
-/// target's verdict. While the verdict is held, the settings still name the old target.
+
 #[test]
 fn a_refresh_never_shows_new_settings_beside_the_old_verdict() {
     let w = Webhook::open(br#"{"url":"https://a.example/x"}"#, &[], 1).expect("opens");
@@ -658,9 +638,7 @@ fn a_refresh_never_shows_new_settings_beside_the_old_verdict() {
 }
 
 /// `ready` reads the HOST's verdict, not "no host": over a fake host whose `need.admit` refuses, an
-/// `http://` target is named in the scheme rule's 1.5.5 words, which only a Refused verdict from
-/// the host yields (no host to ask says its own words). Mutation proof: with `ready` calling
-/// `self.admitted(None)` this test fails on the message.
+
 #[test]
 fn ready_reads_the_hosts_refusal_and_names_the_scheme_rule() {
     use busbar_contract::abi::mechanism::call::Outcome;
@@ -690,9 +668,7 @@ fn ready_reads_the_hosts_refusal_and_names_the_scheme_rule() {
 }
 
 /// THE CHECK SLOT THROUGH THE DOOR: the phase maps to its check (an instance whose
-/// `delivery_timeout_secs` is 0 is found at `CHECK_PHASE_INSTANCES` and not at
-/// `CHECK_PHASE_LIMITS`), the findings are leased as a JSON array, and a phase the sink does not
-/// know is refused. Mutation proof: swapping the two phase arms turns it red.
+
 #[test]
 fn the_check_slot_maps_its_phase_and_leases_the_findings() {
     let probe = crate::wipe_probe::Probe::start();
@@ -766,10 +742,7 @@ fn the_check_slot_maps_its_phase_and_leases_the_findings() {
 }
 
 /// RED (audit export-webhook #4): PARITY WITH 1.5.5, which added the configured auth header only
-/// when `HeaderName::from_bytes` and `HeaderValue::from_str` both took it and otherwise POSTed the
-/// line without it (v1.5.5 `crates/busbar/src/export/webhook.rs` `deliver_logs`). A name that is not
-/// an RFC 9110 token, or a value with a control byte, leaves the header out, and the line is still
-/// sent; a value with a tab or a non-ASCII byte is kept, as `HeaderValue::from_str` kept it.
+
 #[test]
 fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
     let json = ("content-type", "application/json");
@@ -802,11 +775,7 @@ fn an_auth_header_1_5_5_could_not_build_is_left_out_and_the_line_still_sent() {
 }
 
 /// THE SETTINGS SCHEMA MARKS NO FIELD SECRET BELOW THE ROOT (coordinator ruling (B), 2026-10-19:
-/// pack keeps 1.5.5's refusal of a nested `x-busbar-secret` marker, v1.5.5
-/// `crates/plugin-pack/src/main.rs:298-304`). `auth_header.value` names a reference the host
-/// resolves before opening the sink. The schema names exactly the settings
-/// grammar's keys. RED before the fix: `auth_header.value` carried a nested marker the packer
-/// refuses.
+
 #[test]
 fn the_settings_schema_marks_no_nested_secret() {
     let schema: serde_json::Value = serde_json::from_str(include_str!("../settings.schema.json"))
@@ -855,9 +824,7 @@ fn the_settings_schema_marks_no_nested_secret() {
 }
 
 /// THE AUTH HEADER'S VALUE NEVER RENDERS THROUGH `Debug` (Q128 export-webhook M2: "the secret
-/// handled as a secret ... never shown through Debug"): formatting the settings, the header or an
-/// instance holding them names the header and redacts its value. RED before the fix: `Debug` was
-/// derived over `ExportAuthHeader::value`.
+
 #[test]
 fn the_auth_header_value_is_redacted_from_debug() {
     let header = ExportAuthHeader {
@@ -886,8 +853,7 @@ fn the_auth_header_value_is_redacted_from_debug() {
 }
 
 /// THE TARGET URL'S USERINFO NEVER RENDERS THROUGH `Debug` (§11.13): a `user:password@` in the url is
-/// sent as Basic credentials, so formatting the settings masks it as every line this sink writes
-/// does ([`mask_url`]). RED before the fix: `Debug` was derived over `WebhookSettings::url`.
+
 #[test]
 fn the_url_userinfo_is_masked_in_debug() {
     let settings = WebhookSettings {
@@ -902,8 +868,6 @@ fn the_url_userinfo_is_masked_in_debug() {
     }
 }
 
-// ── Credential-echo canaries (CREDENTIAL-LOCKDOWN H2, H3) ────────────────────────────────────────
-
 const CANARY: &str = "CANARY7f2a9e";
 
 /// Every string any captured event carries, flattened, for a canary search.
@@ -915,7 +879,7 @@ fn all_text(events: &[Event]) -> String {
 }
 
 /// H2: an `auth_header` written as a bare string (`auth_header: "Bearer …"`, where a `{name, value}`
-/// map is expected) used to be quoted back by serde into the refusal and so into the log.
+
 #[test]
 fn a_mistyped_auth_header_never_reaches_the_refusal() {
     let r =
@@ -924,11 +888,10 @@ fn a_mistyped_auth_header_never_reaches_the_refusal() {
         !r.contains(CANARY),
         "the refusal carried the credential: {r}"
     );
-    // The words are serde's otherwise: only the credential bytes are gone.
+
     assert!(r.starts_with("settings: invalid type: string "), "{r}");
     assert!(r.contains("expected struct ExportAuthHeader"), "{r}");
 
-    // The same through `value` given the wrong type alongside a credential-bearing sibling.
     let r = refused(
         json!({"url": "https://a.example/", "auth_header": {"name": "Authorization", "value": [format!("Bearer {CANARY}")]}}),
     );
@@ -939,7 +902,7 @@ fn a_mistyped_auth_header_never_reaches_the_refusal() {
 }
 
 /// H3: a delivery failure logged the target's path and query (where Slack-style and `?api_key=`
-/// webhooks carry their secret) and the host's failure text verbatim (which may quote the URL).
+
 #[test]
 fn a_failed_delivery_never_logs_the_targets_path_query_or_the_hosts_echo_of_them() {
     let url = format!("https://hooks.example/services/T000/B000/{CANARY}?api_key={CANARY}x");
@@ -959,7 +922,7 @@ fn a_failed_delivery_never_logs_the_targets_path_query_or_the_hosts_echo_of_them
         !text.contains(CANARY),
         "a delivery log carried the credential:\n{text}"
     );
-    // The host stays named, so the operator can still tell which target failed.
+
     assert!(text.contains("hooks.example"), "{text}");
 }
 
@@ -979,12 +942,8 @@ fn the_log_target_names_only_scheme_host_and_port() {
     assert_eq!(log_target("not a url"), "***");
 }
 
-// ── SIBLING ALIGNMENT (export kind) ─────────────────────────────────────────────────────────────
-
 /// RED before: `open` took settings that do not parse and opened a dead instance whose every
-/// delivery returned READY without a word; `refresh` replaced good settings with none the same way.
-/// Both now refuse in `validate`'s words, and a refused refresh keeps the old settings — as every
-/// export sibling does.
+
 #[test]
 fn open_and_refresh_refuse_settings_that_do_not_parse() {
     let bad = br#"{"url":"https://a.example/","bogus":1}"#;
@@ -1001,8 +960,7 @@ fn open_and_refresh_refuse_settings_that_do_not_parse() {
 }
 
 /// OWNER RULING 2026-10-24, RED before: a url that parses but reads its credential as host and
-/// path (`https://tok/en@host`, `https://u:123/x@host`) was taken. It is refused at validate, open
-/// and refresh, naming the problem, the credential cut from the url it shows.
+
 #[test]
 fn an_ambiguous_url_is_refused_without_its_credential() {
     for (url, secret) in [
@@ -1029,8 +987,7 @@ fn an_ambiguous_url_is_refused_without_its_credential() {
 }
 
 /// RED before: `serve` answered READY `404` for a sink that declares no route, a silent "nothing".
-/// It is now REFUSED, saying why, in the words every export sibling uses (`scrape`: the plugin
-/// crate's `tests/refusals.rs`, as the test kit copies no `ScrapeOut`).
+
 #[test]
 fn serve_is_refused_saying_why_through_the_door() {
     use busbar_contract::abi::export::{Ops, ServeIn, ServeOut};
@@ -1072,8 +1029,7 @@ fn serve_is_refused_saying_why_through_the_door() {
 }
 
 /// AN AUTH HEADER 1.5.5 COULD NOT BUILD IS REFUSED AT VALIDATION (owner 2026-10-27), with a message
-/// that names the instance and the header's name but never its value: the delivery still leaves the
-/// header out, so the refusal is the operator's early notice.
+
 #[test]
 fn an_auth_header_that_cannot_be_built_is_refused_at_validation() {
     for (name, value) in [
@@ -1108,7 +1064,7 @@ fn an_auth_header_that_cannot_be_built_is_refused_at_validation() {
 }
 
 /// A reload that lands back on the settings a batch started under (A -> B -> A) is no reload for
-/// that batch: it continues. A reload to different settings cuts it.
+
 #[test]
 fn a_reload_back_to_the_same_settings_does_not_cut_the_batch() {
     let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
@@ -1135,8 +1091,6 @@ fn a_reload_back_to_the_same_settings_does_not_cut_the_batch() {
     assert!(w.reloaded_since(&mut at), "a different target cuts it");
 }
 
-// ── The 1.5.5 upgrade (`busbar --migrate-config`) ────────────────────────────────────────────────
-
 /// The section `Migration` answers for `settings`, from 1.5.5.
 fn migrated(settings: serde_json::Value) -> Migrated {
     Migration::migrate(settings, "1.5.5")
@@ -1153,12 +1107,7 @@ fn auth_header_refused(settings: &serde_json::Value) -> bool {
 }
 
 /// AN AUTH HEADER 1.5.5 COULD NOT BUILD IS REMOVED BY THE MIGRATION (FLEET "Plugin-side migrate
-/// entries", owner ruling 2026-10-27; export-webhook #33 W1): 1.5.5 left such a header out and sent
-/// every line without it, and 1.6.0 refuses it at validation, so the migration removes exactly the
-/// `auth_header` that refusal names, says so in one line that names neither the header's name nor its
-/// value, and raises nothing against core's keys. The rest of the section is kept as written, and the
-/// migrated section validates. RED before: the door stated no migration, so the section was carried
-/// over unchanged and 1.6.0 refused it.
+
 #[test]
 fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
     for (name, value) in [
@@ -1171,8 +1120,6 @@ fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
         ("Authorization", "Bearer s3cret\n"),
         ("Authorization", "Bearer \u{7f}"),
         ("Authorization", "Bearer \u{0}"),
-        // Framing and connection fields: check and open refuse them, so the migration is one rule
-        // with them (a Host override is no longer supported).
         ("Host", "other.example"),
         ("content-length", "0"),
         ("Connection", "close"),
@@ -1205,8 +1152,7 @@ fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
 }
 
 /// The header's value may be a reference the kernel resolves (`auth_header.value` is a declared
-/// secret field): a name that is not a token is refused whatever the value resolves to, so it is
-/// removed; a valid name beside a reference is not the migration's to judge, and stays.
+
 #[test]
 fn a_referenced_value_is_judged_by_the_headers_name_alone() {
     let m = migrated(json!({
@@ -1223,9 +1169,7 @@ fn a_referenced_value_is_judged_by_the_headers_name_alone() {
 }
 
 /// Everything 1.6.0 does not refuse for its auth header passes through unchanged, with nothing to
-/// report: a header that builds (a tab, a non-ASCII byte and an empty value included, as 1.5.5 sent
-/// them), no header, no section, and a section the configuration grammar refuses for its shape
-/// (that refusal is the operator's to read; the migration does not guess what was meant).
+
 #[test]
 fn a_section_1_6_0_does_not_refuse_for_its_header_is_unchanged() {
     for settings in [
@@ -1251,10 +1195,7 @@ fn a_section_1_6_0_does_not_refuse_for_its_header_is_unchanged() {
 }
 
 /// NO DECLARED CODE IS ONE THE CORE'S CATALOGUE HOLDS: the core at `.busbar-ref` (`BUSBAR_CHECKOUT`,
-/// `crates/busbar-kernel/src/diagnostics/catalog.toml`) refuses a plugin that declares a code its
-/// catalogue already holds ("plugin '<name>' declares BUSBAR-NNNN: the catalogue already holds that
-/// code"), identical or not, so a collision is a busbar that does not boot. An unset variable is a
-/// failure, never a skip.
+
 #[test]
 fn no_declared_code_is_one_the_core_catalogue_holds() {
     let busbar = std::env::var_os("BUSBAR_CHECKOUT").expect(
@@ -1287,10 +1228,8 @@ fn no_declared_code_is_one_the_core_catalogue_holds() {
     }
 }
 
-// ── Audit round 1 (codeaudit-r1) ─────────────────────────────────────────────────────────────────
-
 /// W1: a formatted `Prepared` or `Webhook` carries none of the secrets its settings hold: the url's
-/// userinfo (and the Basic value it became), its secret path and query, the auth header's value.
+
 #[test]
 fn a_formatted_prepared_or_webhook_carries_no_secret() {
     let w = Webhook::open(
@@ -1305,7 +1244,7 @@ fn a_formatted_prepared_or_webhook_carries_no_secret() {
     )
     .expect("opens");
     let p = w.settings();
-    // `ops:hunter2`, padded standard base64.
+
     let basic = "b3BzOmh1bnRlcjI=";
     for text in [
         format!("{p:?}"),
@@ -1328,9 +1267,7 @@ fn a_formatted_prepared_or_webhook_carries_no_secret() {
             "the header name is kept: {text}"
         );
     }
-    // The settings alone carry none of them. The request one line is built as holds the
-    // credential-bearing fields sealed beside it, so it carries neither the userinfo (nor the Basic
-    // value) nor the header value.
+
     let settings: &Settings = &p;
     for text in [format!("{settings:?}"), format!("{settings:#?}")] {
         for secret in ["hunter2", "PATHSECRET", "QUERYSECRET", "HEADERSECRET"] {
@@ -1345,8 +1282,7 @@ fn a_formatted_prepared_or_webhook_carries_no_secret() {
 }
 
 /// W4 (lead-signed): `open` and `refresh` refuse an auth header that cannot be sent as an HTTP
-/// header, in fixed words that never echo the value; `validate` refuses the same (KIND 1), except
-/// for an unresolved reference, which it cannot judge.
+
 #[test]
 fn open_and_refresh_refuse_an_auth_header_that_cannot_be_sent() {
     let words = "settings: `auth_header` cannot be sent as an HTTP header";
@@ -1361,7 +1297,7 @@ fn open_and_refresh_refuse_an_auth_header_that_cannot_be_sent() {
         .expect_err("refresh refuses");
     assert_eq!(r.text(), Some(words));
     assert_eq!(w.settings().auth_header, None, "the old settings stay");
-    // `validate` refuses what `open` refuses.
+
     assert_eq!(
         Webhook::validate(bytes.as_bytes())
             .expect_err("refused")
@@ -1371,7 +1307,7 @@ fn open_and_refresh_refuse_an_auth_header_that_cannot_be_sent() {
 }
 
 /// W5 (lead-signed): framing and connection fields are not auth headers: refused at `check` and at
-/// `open`, whatever their case.
+
 #[test]
 fn a_framing_or_connection_header_is_refused() {
     for name in [
@@ -1396,7 +1332,7 @@ fn a_framing_or_connection_header_is_refused() {
 }
 
 /// W6: a reload that changes only the delivery deadline or the in-flight bound does not cut a
-/// batch (new deliveries use the new deadline); one that changes the target or the credential does.
+
 #[test]
 fn a_reload_of_only_the_deadline_or_bound_does_not_cut_the_batch() {
     let w = Webhook::open(
@@ -1456,7 +1392,7 @@ fn a_finding_is_numbered_by_the_configured_position() {
 }
 
 /// W8: the scheme is read as the URL parser reads it: leading C0 controls and spaces are stripped
-/// first, so a padded `https://` private target is the destination guard's, not the scheme rule's.
+
 #[test]
 fn leading_controls_and_spaces_do_not_hide_the_scheme() {
     let refused = ConnFailure::Refused("destination refused".into());
@@ -1476,9 +1412,7 @@ fn leading_controls_and_spaces_do_not_hide_the_scheme() {
 }
 
 /// W9: the connector words EVERY refusal of a target as `ConnError::Refused`, so a refusal of a
-/// parseable `https://` target is the 1.5.5 destination-guard words (a distinct guard reason needs
-/// core); the one other reason it can give, a need the plugin never declared, is said in the host's
-/// own words, scrubbed of the target's parts. Both texts are core's own constants.
+
 #[test]
 fn only_an_undeclared_need_keeps_the_hosts_own_words() {
     use busbar_contract::conn::ConnError;
@@ -1497,18 +1431,15 @@ fn only_an_undeclared_need_keeps_the_hosts_own_words() {
             assert!(!words.contains(secret), "`{secret}` leaked: {words}");
         }
     }
-    // The connector's one refusal text is the guard's words for an `https://` target ...
+
     let connection = ConnFailure::Refused(ConnError::Refused.text().to_string());
     assert!(refusal_words(Some("https://10.0.0.5/in"), &connection).contains("(SSRF guard)"));
-    // ... and the scheme rule's for any other.
+
     assert!(refusal_words(Some("http://10.0.0.5/in"), &connection).contains("must be an https://"));
 }
 
 /// T1: the BUSBAR-7109 mid-batch cut. A batch is on its first line (the parked exchange); a reload
-/// changes the url; the resumed delivery finishes that line and the decision after it drops the
-/// rest, once, counting only the non-empty lines left. Tested at the smallest unit that holds the
-/// decision (`Webhook::cut_by_reload`, which `Deliver` calls after each line): the parked exchange
-/// itself is the SDK's, and a refresh cannot be injected between the door's PENDING and its resume.
+
 #[test]
 fn a_reload_of_the_target_mid_batch_drops_the_rest_once() {
     let batch = b"{\"n\":1}\n{\"n\":2}\n\n{\"n\":3}\n";
@@ -1522,21 +1453,21 @@ fn a_reload_of_the_target_mid_batch_drops_the_rest_once() {
         exchange: None,
         bindings_pinned: false,
     };
-    // Line 1 parks; the reload lands while it is parked.
+
     let (first, next) = next_line(batch, at.offset).expect("line 1");
     assert_eq!(first, b"{\"n\":1}");
     w.refresh(br#"{"url":"https://b.example/"}"#, &[], 2)
         .expect("the reload");
-    // The parked line finishes on the settings it started under (the Posting keeps them) ...
+
     assert_eq!(at.settings.url, "https://a.example/");
-    // ... and the rest of the batch is dropped, with ONE 7109 line.
+
     let got = logged(|| assert!(w.cut_by_reload(&mut at, &batch[next..])));
     assert_eq!(got.len(), 1, "{got:?}");
     assert_eq!(field(&got[0], "diag"), "BUSBAR-7109");
     assert_eq!(field(&got[0], "level"), "WARN");
     assert_eq!(field(&got[0], "dropped"), "2");
     assert_eq!(field(&got[0], "webhook_url"), "\"https://a.example\"");
-    // The last line never raises it, reload or not.
+
     let (_, end) = next_line(batch, 17).expect("line 3");
     assert!(!w.cut_by_reload(&mut at, &batch[end..]));
 }
@@ -1599,7 +1530,7 @@ fn next_line_skips_blank_lines_and_keeps_the_offset() {
 }
 
 /// T3: a credential-looking extra key inside `auth_header` (serde quotes an unknown field's name)
-/// reaches neither the refusal nor the log.
+
 #[test]
 fn a_credential_looking_key_in_auth_header_never_reaches_the_refusal_or_the_log() {
     let settings = json!({
@@ -1629,8 +1560,7 @@ fn a_credential_looking_key_in_auth_header_never_reaches_the_refusal_or_the_log(
 }
 
 /// W11: the schema's bounds are the ones validation enforces (`check`): a deadline of 1 to the
-/// 30-year ceiling, an in-flight bound up to the semaphore's permit ceiling (an instance stating 0
-/// beside a larger sibling validates, so the schema admits 0).
+
 #[test]
 fn the_settings_schema_bounds_are_the_ones_check_enforces() {
     let schema: serde_json::Value =
@@ -1643,7 +1573,7 @@ fn the_settings_schema_bounds_are_the_ones_check_enforces() {
 }
 
 /// KIND 1: `validate` refuses exactly what `open` refuses: an `auth_header` that cannot be sent as
-/// an HTTP header (a literal value with a newline), in the words `open` uses.
+
 #[test]
 fn validate_refuses_an_auth_header_that_open_refuses() {
     let settings =
@@ -1656,7 +1586,7 @@ fn validate_refuses_an_auth_header_that_open_refuses() {
 }
 
 /// KIND 2: a host failure text echoing the request's credentials (the Basic value, its token, the
-/// `auth_header` value) logs none of them.
+
 #[test]
 fn a_failure_echoing_the_requests_credentials_logs_none_of_them() {
     let url = "https://alice:s3cret@hooks.example/in";
@@ -1692,7 +1622,7 @@ fn an_unparsable_url_with_an_at_after_its_host_is_ambiguous() {
 }
 
 /// The ambiguous-url refusal shows only `<scheme>:***`: the parser's host of an ambiguous url is the
-/// front of its credential, and a webhook's path and query are often its secret.
+
 #[test]
 fn the_ambiguous_url_refusal_never_echoes_the_path_or_query() {
     for url in [
@@ -1712,9 +1642,7 @@ fn the_ambiguous_url_refusal_never_echoes_the_path_or_query() {
 }
 
 /// RED before (HX-SLASHLESS): a url written without its slashes, or one the parser rejects, was
-/// echoed by helpers that need `://` (`mask_url`, the by-hand ambiguity read). Any url text that
-/// does not parse and holds an `@` is refused as ambiguous, and no refusal, 7070 line, check line or
-/// shown target holds a part of any of these.
+
 #[test]
 fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
     let refused = ConnFailure::Refused("destination refused".into());
@@ -1767,8 +1695,7 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
 }
 
 /// RED before: a framing or connection field named as the auth header was refused as "not a valid
-/// HTTP header" (open, validate, check) and the migration said the same of it, though the name is a
-/// valid header: the http framer states these fields itself. Each says so.
+
 #[test]
 fn a_framing_auth_header_name_is_refused_in_true_words() {
     for name in [
@@ -1808,7 +1735,7 @@ fn a_framing_auth_header_name_is_refused_in_true_words() {
             m.report[0]
         );
     }
-    // A name that is no token keeps the generic words.
+
     let bad =
         json!({"url": "https://a.example/", "auth_header": {"name": "Bad Name", "value": "1"}});
     let m = migrated(bad);
@@ -1816,8 +1743,7 @@ fn a_framing_auth_header_name_is_refused_in_true_words() {
 }
 
 /// RED before: an ambiguous or unparseable echo showed whatever precedes the first `:` as the
-/// scheme, so a schemeless `admin:secret@host/x` (which the parser reads as scheme `admin`) echoed
-/// `admin`. Only `http` and `https` are shown; any other is `***`.
+
 #[test]
 fn an_ambiguous_echo_shows_only_an_http_or_https_scheme() {
     for url in ["admin:secret@host/x", "ftp:svc/tok@host/x?k=SECRET"] {

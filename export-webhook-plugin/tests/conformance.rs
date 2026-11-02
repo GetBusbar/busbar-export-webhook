@@ -2,24 +2,12 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! **THE PUBLISHED CONFORMANCE SUITE, RUN BY THIS PLUGIN** (busbar TODO ABI-b4; OWNER 2026-10-03:
-//! plugins test themselves against busbar). busbar's suite, at the commit this repo pins
-//! (`.busbar-ref`), drives the request-log WEBHOOK sink two ways through the one loader: LINKED (the
-//! logic crate's `door`) and DROPPED IN (this crate's built cdylib), over the export kind's script
-//! with the inputs in `conformance.json` (refused settings in the grammar's words, a delivery with no
-//! connection table lent, status and check, a route-less `serve` REFUSED); every step's crossings exactly at the script's pin, the two folds equal, and the
-//! suite's RED arms kept. `plugin-ci.yml` runs it under `--release`.
-
-//!
-//! THE HOST (ARCHITECT Q-P4-9): the sink's `http` need is served by busbar's own connector, composed
-//! as the root composes it ([`conformance_host`], rendered by the fleet template), and every delivery
-//! reaches a REAL local HTTPS endpoint (the suite's far end, its certificate chained to the suite's
-//! test anchors, which only the host trusts): the target in `conformance.json`'s settings.
 
 #[path = "support/conformance_host.rs"]
 mod conformance_host;
 
 /// The far end's answer: an HTTP/1.1 `200` once a whole request (its head, then the
-/// `content-length` body it states) has been read.
+
 fn accepted(seen: &[u8]) -> Option<Vec<u8>> {
     let end = seen.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
     let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
@@ -49,9 +37,7 @@ busbar_test_kit::conformance_suite! {
 }
 
 /// The sink's declared secret fields, as the kernel resolves them (busbar #1699; OWNER RULING,
-/// CHIP-REVIEW-v4 change 2): a `{env: …}` reference at a declared field resolves in place, and
-/// one at any other field is refused. The export host lends nothing; the sink receives the
-/// resolved string.
+
 mod declared_secrets {
     use std::sync::Arc;
 

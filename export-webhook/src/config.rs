@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The `settings:` grammar of an `export.<name>.module: request-log-webhook` instance — config
-//! grammar, described by `settings.schema.json` beside the sink that reads it.
 
 use serde::{Deserialize, Deserializer};
 use zeroize::{Zeroize, Zeroizing};

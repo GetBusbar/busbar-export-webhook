@@ -55,8 +55,6 @@ fn a_settings_refusal_wipes_its_redaction_copies() {
         .assert_wiped_on_linux(&["settings credential copy", "settings JSON"]);
 }
 
-// Observe only the initialized payloads owned by this settings value, before serde consumes or
-// borrows them. Map keys can also carry a secret in a malformed auth_header setting.
 pub(super) fn watch_settings_value(value: &serde_json::Value) {
     watch_value_as("settings JSON", value);
 }

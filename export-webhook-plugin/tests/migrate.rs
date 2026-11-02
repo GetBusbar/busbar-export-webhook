@@ -2,11 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! **THE 1.5.5 UPGRADE THROUGH BOTH DOORS** (`busbar --migrate-config`, owner ruling 2026-10-27):
-//! the host calls the door's `migrate` with the section as the operator wrote it, LINKED and DROPPED
-//! IN, over busbar's real loader. An `auth_header` 1.5.5 could not build (and so never sent) is
-//! removed, in one report line; a section with nothing to migrate comes back as it went in.
-//!
-//! RED before: the door stated no `migrate`, so the host passed the section through unchanged.
 
 use busbar_plugin_loader::dispatch::load::raw;
 use busbar_plugin_loader::dispatch::migrate::{migrate_door, migrate_library};

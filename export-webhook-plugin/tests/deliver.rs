@@ -2,17 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE DELIVER SLOT, DRIVEN AS THE KERNEL'S EXPORT FLUSHER DRIVES IT (audit XW1): the linked door
-//! loaded over the real loader, opened and delivered to on a dispatcher ticket in the write-behind
-//! class (busbar-test-kit's `conformance::{open_resumed, on_ticket}`), its `http` need served by
-//! busbar's own connector over the transport doors this plugin names (the test kit's
-//! `conformance_host::host`), every POST reaching a REAL local HTTPS far end (the kit's
-//! `conformance_host::far_end`, its certificate chained to the suite's test anchors).
-//!
-//! What the far end receives is asserted byte for byte where the sink owns the bytes (the request
-//! line, its fields, the body), and what the HOST observes (the envelope the reply carried, the
-//! sink's own log lines among it) is asserted for the two drop paths: a non-2xx answer is ONE
-//! BUSBAR-7071 line, a transport error ONE BUSBAR-7072 line, neither naming the url's userinfo,
-//! path or query, nor the auth header's value.
 
 use std::net::TcpListener;
 use std::sync::{mpsc, Arc, Mutex, OnceLock, PoisonError};
@@ -57,8 +46,7 @@ fn targets() -> &'static Targets {
         std::thread::spawn(move || {
             for peer in failed.incoming() {
                 let Ok(peer) = peer else { break };
-                // Own the address continuously and close each connection before TLS completes.
-                // This is a real transport error, without assuming any unbound port stays free.
+
                 drop(peer);
             }
         });
@@ -97,7 +85,7 @@ struct Pause {
 static PAUSE: Mutex<Option<Pause>> = Mutex::new(None);
 
 /// The far end's answer once a whole request (its head, then the `content-length` body it states)
-/// has been read: `503` to a request for `/fail…`, else `200`. Each request is recorded.
+
 fn answer(seen: &[u8]) -> Option<Vec<u8>> {
     let end = seen.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
     let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
@@ -118,16 +106,14 @@ fn answer(seen: &[u8]) -> Option<Vec<u8>> {
         .flatten();
     if let Some(pause) = pause {
         let _ = pause.reached.send(());
-        // Always release the server thread even if the test fails to reach REFRESH.
+
         let _ = pause.release.recv_timeout(Duration::from_secs(10));
     }
     Some(if head.starts_with("post /big") {
-        // A 200 whose body is past the SDK's 16 MiB reply cap: the sink judges the head alone.
         let mut r = format!("HTTP/1.1 200 OK\r\ncontent-length: {BIG}\r\n\r\n").into_bytes();
         r.resize(r.len() + BIG, b'x');
         r
     } else if head.starts_with("post /fail-big") {
-        // A 503 with a body past the cap: the status is still what the sink reports.
         let mut r = format!("HTTP/1.1 503 Service Unavailable\r\ncontent-length: {BIG}\r\n\r\n")
             .into_bytes();
         r.resize(r.len() + BIG, b'x');
@@ -212,7 +198,7 @@ fn opened_door(
 }
 
 /// ONE `deliver` of `batch` on the logs stream, as the kernel's export flusher offers it: on a
-/// ticket, write-behind, resumed on its wake until it answers.
+
 fn deliver(p: &Plugin<Export>, d: &Dispatcher, batch: &str) -> String {
     let batch: Arc<Vec<u8>> = Arc::new(batch.as_bytes().to_vec());
     let mut f: Frame<DeliverIn, OutHead> =
@@ -283,8 +269,7 @@ fn a_refused_refresh_keeps_both_the_pending_batch_and_the_next_batch_on_the_old_
 }
 
 /// Records in -> one HTTPS POST per line out, in order: the target's path and query, the
-/// userinfo's Basic `authorization` first, then `content-type: application/json`, then the
-/// configured auth header (lower-cased), and the line as the body; READY, and nothing dropped.
+
 fn records_in_one_post_per_line_out(dropped: bool) {
     seen();
     let (p, d, tape) = opened_door(
@@ -313,7 +298,7 @@ fn records_in_one_post_per_line_out(dropped: bool) {
                 .position(|f| f.starts_with(&format!("{name}:")))
                 .unwrap_or_else(|| panic!("no `{name}` field in {fields:?}"))
         };
-        // `us@er:p4ss`, padded standard base64.
+
         assert!(
             fields.contains(&"authorization: Basic dXNAZXI6cDRzcw==".to_string()),
             "{fields:?}"
@@ -341,7 +326,7 @@ fn records_in_one_post_per_line_out(dropped: bool) {
 }
 
 /// A non-2xx answer drops the line: ONE BUSBAR-7071 line, at WARN, naming the status and only the
-/// target's scheme, masked userinfo, host and port; the delivery is still READY (fire-and-forget).
+
 fn a_non_2xx_answer_drops_the_line_as_busbar_7071() {
     seen();
     let (p, d, tape) = opened(&serde_json::json!({
@@ -365,7 +350,7 @@ fn a_non_2xx_answer_drops_the_line_as_busbar_7071() {
 }
 
 /// A transport error (the target closes before TLS completes) drops the line: ONE BUSBAR-7072 line, the
-/// host's error scrubbed of the target's parts; READY.
+
 fn a_transport_error_drops_the_line_as_busbar_7072() {
     let (p, d, tape) = opened(&serde_json::json!({
         "url": format!("https://u53r:s3cr3t-pw@{}/T0KEN-PATH?api_key=s3cr3t-q", failing_peer()),
@@ -396,13 +381,7 @@ fn no_secret(host: &[String]) {
 }
 
 /// LINE 0 AFTER A RELOAD (audit XW2), as the plugin and the loader answer it today: a delivery that
-/// STARTS after a `refresh` reads the instance's settings at its start, so its first line (and
-/// every other) is POSTed on the NEW settings: the new path and query, the new userinfo's Basic
-/// value, the new auth header; nothing of the old settings rides it, and nothing is dropped (no
-/// BUSBAR-7109: that cut is only for a batch a reload overtook mid-delivery). The host re-declares
-/// the need from the refreshed settings before the plugin sees them, so the pin and the request
-/// agree. NOTE: the kernel at this pin never refreshes an export instance (it opens each once, at
-/// boot); this pins the plugin's side for when it does.
+
 fn the_first_line_after_a_refresh_goes_on_the_new_settings() {
     seen();
     let (p, d, tape) = opened(&serde_json::json!({
@@ -423,7 +402,7 @@ fn the_first_line_after_a_refresh_goes_on_the_new_settings() {
         assert!(req.starts_with("POST /new?n=2 HTTP/1.1\r\n"), "{req}");
         let (head, _) = req.split_once("\r\n\r\n").expect("a whole request");
         let fields = header_fields(head.split("\r\n").skip(1));
-        // `new-user:new-pw`, padded standard base64.
+
         assert!(
             fields.contains(&"authorization: Basic bmV3LXVzZXI6bmV3LXB3".to_string()),
             "{req}"
@@ -436,9 +415,7 @@ fn the_first_line_after_a_refresh_goes_on_the_new_settings() {
 }
 
 /// The first POST has reached A while DELIVER waits for its response. A successful REFRESH moves
-/// new tickets to B; the rest of this multi-line ticket must still reach A with only A's
-/// credentials. A refused REFRESH changes neither the old ticket nor the next one. This uses the
-/// existing loader/test-kit API so the old host reaches the actual behavior assertion.
+
 fn a_pending_batch_keeps_its_original_destination_and_credentials(refuse: bool, dropped: bool) {
     seen();
     assert_ne!(
@@ -471,8 +448,7 @@ fn a_pending_batch_keeps_its_original_destination_and_credentials(refuse: bool, 
         let delivery = scope.spawn(|| deliver(&p, &d, old_batch));
         let reached = waiting.recv_timeout(Duration::from_secs(5));
         let refreshed = called(&refresh(&p, new.to_string().as_bytes()));
-        // Release and join before any assertion, including a missing initial POST or a refused
-        // refresh that unexpectedly succeeded, so no far-end thread remains blocked on failure.
+
         let _ = release.send(());
         let delivered = delivery.join();
         (reached, refreshed, delivered)
@@ -545,7 +521,7 @@ fn assert_binding(request: &str, destination: &str, path: &str, key: &str, old: 
 }
 
 /// W2: the sink judges a delivery on the reply's HEAD (1.5.5 dropped the body unread): a 200 whose
-/// body is past the SDK's reply cap is a delivered line, not a BUSBAR-7072.
+
 fn a_200_with_a_huge_body_is_still_a_delivered_line() {
     seen();
     let (p, d, tape) = opened(&serde_json::json!({"url": format!("https://{}/big", far_end())}));
@@ -560,7 +536,7 @@ fn a_200_with_a_huge_body_is_still_a_delivered_line() {
 }
 
 /// T2: an instance whose target the host refused (an `http://` target, refused by the open-web
-/// class) is disabled at boot, and its `deliver` posts nothing and answers READY.
+
 fn a_disabled_instance_posts_nothing() {
     seen();
     let (p, d, tape) = opened(&serde_json::json!({"url": format!("http://{}/in", far_end())}));
@@ -568,7 +544,7 @@ fn a_disabled_instance_posts_nothing() {
     assert!(answer.starts_with("Ready "), "deliver: {answer}");
     assert!(seen().is_empty(), "a disabled instance posted");
     let host = tape.take();
-    // The refusal is raised once, at the first ask; nothing was attempted, so nothing was dropped.
+
     assert_eq!(naming(&host, "BUSBAR-7070").len(), 1, "{host:?}");
     assert!(naming(&host, "BUSBAR-7071").is_empty(), "{host:?}");
     assert!(naming(&host, "BUSBAR-7072").is_empty(), "{host:?}");
@@ -589,7 +565,7 @@ fn blank_lines_are_not_posted() {
 }
 
 /// W2: a non-2xx reply with a body past the reply cap is still ONE BUSBAR-7071 line naming its
-/// status (the head is judged; the body is never read).
+
 fn a_non_2xx_with_a_huge_body_still_logs_its_status() {
     seen();
     let (p, d, tape) =

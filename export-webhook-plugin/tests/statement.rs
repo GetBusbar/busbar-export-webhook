@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! T4: the Statement's strings asserted by their BYTES, not their lengths. Reading an `AbiStr` is
-//! `unsafe` and the logic crate forbids `unsafe`, so the byte read lives in this test crate.
 
 use busbar_export_webhook::{ALIAS, NAME, STATEMENT};
 
