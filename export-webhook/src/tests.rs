@@ -120,6 +120,15 @@ fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
             u64::MAX
         )]
     );
+    // The accepted edges of the deadline: 1 second and the 30-year ceiling pass, one past it is refused.
+    assert!(one(json!({"url": "https://a/b", "delivery_timeout_secs": 1})).is_empty());
+    assert!(
+        one(json!({"url": "https://a/b", "delivery_timeout_secs": MAX_DURATION_SECS})).is_empty()
+    );
+    assert_eq!(
+        one(json!({"url": "https://a/b", "delivery_timeout_secs": MAX_DURATION_SECS + 1})).len(),
+        1
+    );
     // A stingy sibling is not refused beside a generous one: the bound is the largest.
     let two_instances = [
         (
