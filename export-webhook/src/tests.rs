@@ -1692,7 +1692,12 @@ fn loaded_for_test(
     )
     .expect("load webhook");
     let mut input: OpenIn = blank_in();
-    input.settings = Blob::json(settings);
+    input.settings = Blob {
+        ptr: settings.as_ptr(),
+        len: settings.len(),
+        fmt: busbar_contract::abi::mechanism::call::BLOB_JSON,
+        flags: 0,
+    };
     input.generation = 1;
     assert_eq!(
         p.call(

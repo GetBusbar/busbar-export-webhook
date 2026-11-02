@@ -107,7 +107,7 @@ fn the_linked_and_freshly_built_dropped_webhook_obey_the_export_contract() {
         for case in inputs["export"]["bad_settings"].as_array().unwrap() {
             let bytes = case["settings"].to_string().into_bytes();
             let mut i: ValidateIn = blank_in();
-            i.settings = Blob::json(&bytes);
+            i.settings = calls::json(&bytes);
             let mut error = [0u8; 1024];
             i.err_buf = error.as_mut_ptr();
             i.err_cap = error.len();
@@ -135,7 +135,7 @@ fn the_linked_and_freshly_built_dropped_webhook_obey_the_export_contract() {
             i.op_id = [1; 16];
             i.batch = Blob {
                 fmt: BLOB_JSONL,
-                ..Blob::json(&batch)
+                ..calls::json(&batch)
             };
             calls::on_ticket(
                 &p,
@@ -154,7 +154,7 @@ fn the_linked_and_freshly_built_dropped_webhook_obey_the_export_contract() {
         );
         pin("deliver unopened", 0);
         let mut i: ValidateIn = blank_in();
-        i.settings = Blob::json(&settings);
+        i.settings = calls::json(&settings);
         assert_eq!(
             p.call(
                 lifecycle::slot::VALIDATE,
@@ -195,7 +195,7 @@ fn the_linked_and_freshly_built_dropped_webhook_obey_the_export_contract() {
         }
         let rows = [CheckInstance {
             name: AbiStr::of("conformance"),
-            settings: Blob::json(&settings),
+            settings: calls::json(&settings),
         }];
         for phase in [export::CHECK_PHASE_LIMITS, export::CHECK_PHASE_INSTANCES] {
             let mut i: CheckIn = blank_in();

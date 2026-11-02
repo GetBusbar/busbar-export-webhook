@@ -40,7 +40,7 @@ busbar-kernel = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "time"] }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
-rcgen = { workspace = true }
+rcgen = { workspace = true, features = ["pem"] }
 # The real host connector serves these pinned transport doors in integration tests.
 busbar-transport-tcp = { workspace = true }
 busbar-transport-http = { workspace = true }

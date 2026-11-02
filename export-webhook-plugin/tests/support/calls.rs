@@ -10,6 +10,14 @@ use busbar_plugin_loader::dispatch::{
 };
 use std::sync::Arc;
 
+pub fn json(bytes: &[u8]) -> Blob {
+    Blob {
+        ptr: bytes.as_ptr(),
+        len: bytes.len(),
+        fmt: busbar_contract::abi::mechanism::call::BLOB_JSON,
+        flags: 0,
+    }
+}
 pub fn dispatcher() -> Arc<Dispatcher> {
     Arc::new(Dispatcher::new(DispatchConfig::default()))
 }
@@ -71,7 +79,7 @@ pub fn on_ticket<I: InFrame, O: OutFrame>(
 pub fn open_resumed(p: &Plugin<Export>, d: &Dispatcher, settings: &[u8]) -> Called {
     let bytes = Arc::new(settings.to_vec());
     let mut i: OpenIn = blank_in();
-    i.settings = Blob::json(&bytes);
+    i.settings = json(&bytes);
     i.generation = 1;
     let deadline = busbar_plugin_loader::dispatch::now_ns().saturating_add(30_000_000_000);
     on_ticket(
@@ -86,7 +94,7 @@ pub fn open_resumed(p: &Plugin<Export>, d: &Dispatcher, settings: &[u8]) -> Call
 }
 pub fn refresh(p: &Plugin<Export>, settings: &[u8]) -> Called {
     let mut i: RefreshIn = blank_in();
-    i.settings = Blob::json(settings);
+    i.settings = json(settings);
     i.generation = 2;
     p.call(
         lifecycle::slot::REFRESH,
