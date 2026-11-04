@@ -582,7 +582,10 @@ fn cred(value: Vec<u8>, url: &str) -> Cred {
 
     Cred::take(&mut v)
         .unwrap_or_else(Cred::empty)
-        .secure_for(url)
+        .require_secure_if(
+            url.split_once("://")
+                .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https")),
+        )
 }
 
 /// Whether the auth header can be sent: it is an HTTP header ([`header_is_http`]) and not one of
