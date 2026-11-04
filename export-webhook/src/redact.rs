@@ -10,6 +10,8 @@ use zeroize::Zeroizing;
 const REDACTED: &str = "***";
 
 /// `url` as a delivery log line names it: scheme, a masked userinfo, host and port. A path other
+/// than `/` becomes `/***` and a query `?***`; a fragment is dropped. A string that is not a URL
+/// keeps only its scheme ([`unparsed_target`]).
 pub fn log_target(url: &str) -> String {
     let Ok(u) = crate::parsed_url(url) else {
         return unparsed_target(url);
@@ -39,6 +41,8 @@ pub fn log_target(url: &str) -> String {
 }
 
 /// What a line shows of url text that does not parse: `<scheme>:***` when it opens with `http` or
+/// `https`, else `***` (any other word before a `:` may be a credential). Nothing after the
+/// scheme is shown: without a parse there is no telling credential from host.
 pub(crate) fn unparsed_target(url: &str) -> String {
     let scheme = url
         .split_once(':')
@@ -48,6 +52,11 @@ pub(crate) fn unparsed_target(url: &str) -> String {
 }
 
 /// `text` (a host's failure words, say) with every part of `url` that can carry a credential
+/// replaced by `***`: the URL itself (as written and masked, `mask_url`), its path, query, userinfo,
+/// each also percent-decoded; the decoding and the cut (as written and as serde quotes it, longest
+/// first) are the SDK's (`sdk::url::and_decoded`, `sdk::url::scrub`). The request's own credentials
+/// are cut too, for a receiver may echo its request back: the `Authorization: Basic` value the
+/// userinfo became, its base64 token, and the `auth_header` value (`header_value`).
 pub fn scrub(text: &str, url: &str, header_value: Option<&str>) -> String {
     let mut parts = Zeroizing::new(vec![url.to_string(), crate::mask_url(url)]);
     if let Ok(u) = crate::parsed_url(url) {
@@ -78,7 +87,6 @@ pub fn scrub(text: &str, url: &str, header_value: Option<&str>) -> String {
             }
         }
     }
-    #[cfg(test)]
     for part in parts.iter() {
         crate::wipe_probe::watch("redaction part", part.as_bytes());
     }
@@ -90,6 +98,7 @@ pub fn scrub(text: &str, url: &str, header_value: Option<&str>) -> String {
 }
 
 /// Every credential-bearing string the settings JSON holds: every string (and map key) under
+/// `auth_header` except the header's `name`. These are what serde may quote back in a shape refusal.
 pub fn settings_credentials(settings: &serde_json::Value) -> Vec<String> {
     fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
         match v {
@@ -113,7 +122,6 @@ pub fn settings_credentials(settings: &serde_json::Value) -> Vec<String> {
     if let Some(h) = settings.get("auth_header") {
         walk(h, &mut out);
     }
-    #[cfg(test)]
     for credential in &out {
         crate::wipe_probe::watch("settings credential copy", credential.as_bytes());
     }

@@ -5,6 +5,8 @@ use std::ops::Deref;
 use zeroize::Zeroize;
 
 /// The URL parser owns a serialization separate from the operator's setting. Consume it through
+/// [`Deref`]: when it drops, that serialization is taken out and wiped, so no parsed copy of a
+/// credential-bearing url outlives its use.
 pub(crate) struct ParsedUrl(Option<url::Url>);
 
 impl ParsedUrl {
@@ -29,6 +31,7 @@ impl Drop for ParsedUrl {
 }
 
 /// Borrow-deserialize from the parse tree so every owned source string is still present to wipe
+/// when the tree drops: its `Drop` zeroizes every string and map key in it.
 pub(crate) struct SettingsValue(pub(crate) serde_json::Value);
 impl Deref for SettingsValue {
     type Target = serde_json::Value;

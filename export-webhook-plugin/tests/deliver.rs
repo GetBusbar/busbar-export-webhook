@@ -39,6 +39,7 @@ struct Targets {
     first: String,
     next: String,
     failed: String,
+    stalled: String,
 }
 
 fn targets() -> &'static Targets {
@@ -60,10 +61,21 @@ fn targets() -> &'static Targets {
                 drop(peer);
             }
         });
+        // A peer that accepts the connection and never answers: the TLS handshake stalls.
+        let stalled = TcpListener::bind("localhost:0").expect("bind a private stalling peer");
+        let stalled_address = stalled.local_addr().expect("the stalling peer's address");
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for peer in stalled.incoming() {
+                let Ok(peer) = peer else { break };
+                held.push(peer);
+            }
+        });
         Targets {
             first,
             next,
             failed: format!("localhost:{}", failed_address.port()),
+            stalled: format!("localhost:{}", stalled_address.port()),
         }
     })
 }
@@ -78,6 +90,10 @@ fn next_far_end() -> &'static str {
 
 fn failing_peer() -> &'static str {
     &targets().failed
+}
+
+fn stalling_peer() -> &'static str {
+    &targets().stalled
 }
 
 /// The body the far end answers `/big` with: past the SDK's 16 MiB reply cap.
@@ -273,6 +289,7 @@ fn deliver_through_the_harness() {
     }
     a_non_2xx_answer_drops_the_line_as_busbar_7071();
     a_transport_error_drops_the_line_as_busbar_7072();
+    a_stalled_handshake_is_cut_at_the_delivery_deadline();
     a_failed_line_leaves_the_rest_of_the_batch_to_go();
     an_abandoned_delivery_closes_its_host_connection();
     the_first_line_after_a_refresh_goes_on_the_new_settings();
@@ -395,6 +412,28 @@ fn a_transport_error_drops_the_line_as_busbar_7072() {
     );
     assert!(naming(&host, "BUSBAR-7071").is_empty(), "{host:?}");
     no_secret(&host);
+}
+
+/// THE DELIVERY DEADLINE BOUNDS THE WHOLE EXCHANGE, as 1.5.5's client timeout did: a target that
+/// accepts the connection and never completes the TLS handshake is given up at
+/// `delivery_timeout_secs` (here 1s), not at the host's own 10s open timeout, and the line is dropped
+/// as one BUSBAR-7072.
+fn a_stalled_handshake_is_cut_at_the_delivery_deadline() {
+    let (p, d, tape) = opened(&serde_json::json!({
+        "url": format!("https://{}/in", stalling_peer()),
+        "delivery_timeout_secs": 1,
+    }));
+    let started = Instant::now();
+    let answer = deliver(&p, &d, "{\"outcome\":\"ok\"}\n");
+    let took = started.elapsed();
+    assert!(answer.starts_with("Ready "), "deliver: {answer}");
+    assert!(
+        took < Duration::from_secs(6),
+        "the 1s delivery deadline did not bound the dial: {took:?}"
+    );
+    let host = tape.take();
+    assert_eq!(naming(&host, "BUSBAR-7072").len(), 1, "{host:?}");
+    assert!(naming(&host, "BUSBAR-7071").is_empty(), "{host:?}");
 }
 
 /// A failed line does not end the batch: a two-line batch against the 503 target POSTs both
@@ -618,6 +657,13 @@ fn an_abandoned_delivery_closes_its_host_connection() {
     assert!(
         w.closes.load(Ordering::SeqCst) > before,
         "the abandoned delivery's host connection was never closed"
+    );
+    // Both CLOSEs of a doubled close cross in the one drop; give a second time to land.
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        w.closes.load(Ordering::SeqCst),
+        before + 1,
+        "the abandoned delivery's host connection is closed exactly once"
     );
 }
 

@@ -53,7 +53,10 @@ fn the_linked_and_freshly_built_dropped_webhook_obey_the_export_contract() {
     use busbar_plugin_loader::dispatch::kinds::export::Export;
     use busbar_plugin_loader::dispatch::{load_dropped, load_linked, ConnTable, Frame, LinkedRow};
     use std::sync::Arc;
-    let inputs: serde_json::Value = serde_json::from_str(include_str!("conformance.json")).unwrap();
+    let mut inputs: serde_json::Value =
+        serde_json::from_str(include_str!("conformance.json")).unwrap();
+    let port = conformance_host::far_end(accepted);
+    inputs["settings"]["url"] = format!("https://localhost:{port}/busbar").into();
     let settings = inputs["settings"].to_string().into_bytes();
     let row = LinkedRow::of(busbar_export_webhook::door).expect("actual linked statement");
     let mut answers = Vec::new();

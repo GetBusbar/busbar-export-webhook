@@ -55,28 +55,6 @@ fn a_settings_refusal_wipes_its_redaction_copies() {
         .assert_wiped_on_linux(&["settings credential copy", "settings JSON"]);
 }
 
-pub(super) fn watch_settings_value(value: &serde_json::Value) {
-    watch_value_as("settings JSON", value);
-}
-
-pub(super) fn watch_value_as(label: &'static str, value: &serde_json::Value) {
-    match value {
-        serde_json::Value::String(text) => watch(label, text.as_bytes()),
-        serde_json::Value::Array(values) => {
-            for value in values {
-                watch_value_as(label, value);
-            }
-        }
-        serde_json::Value::Object(values) => {
-            for (key, value) in values {
-                watch(label, key.as_bytes());
-                watch_value_as(label, value);
-            }
-        }
-        _ => {}
-    }
-}
-
 #[test]
 fn migration_probes_wipe_owned_settings_on_success_and_refusal() {
     for settings in [

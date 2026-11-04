@@ -563,9 +563,9 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
         vec![
             "export.w: the `module: request-log-webhook` export instance targeting \
              'https://***@siem.example/***' (#0) sets settings.auth_header with a name or value \
-             that is not a valid HTTP header (name \"Bad Name\": the name must be a non-empty RFC \
-             9110 token, and the value may hold no control byte other than tab); 1.5.5 left such a \
-             header out and sent the log without it — fix or remove the header"
+             that is not a valid HTTP header (the name must be a non-empty RFC 9110 token, and \
+             the value may hold no control byte other than tab); 1.5.5 left such a header out and \
+             sent the log without it — fix or remove the header"
                 .to_string()
         ]
     );
@@ -1064,7 +1064,6 @@ fn a_reload_back_to_the_same_settings_does_not_cut_the_batch() {
         issued: 0,
         exchange: None,
         bindings_pinned: false,
-        host: None,
     };
     assert!(!w.reloaded_since(&mut at));
     w.refresh(br#"{"url":"https://b.example/"}"#, &[], 2)
@@ -1335,7 +1334,6 @@ fn a_reload_of_only_the_deadline_or_bound_does_not_cut_the_batch() {
         issued: 0,
         exchange: None,
         bindings_pinned: false,
-        host: None,
     };
     w.refresh(
         br#"{"url":"https://a.example/","auth_header":{"name":"K","value":"one"},
@@ -1432,7 +1430,6 @@ fn a_reload_of_the_target_mid_batch_drops_the_rest_once() {
         issued: 0,
         exchange: None,
         bindings_pinned: false,
-        host: None,
     };
 
     let (first, next) = next_line(batch, at.offset).expect("line 1");
@@ -1485,7 +1482,6 @@ fn only_an_explicit_ticket_binding_capability_preserves_a_reloaded_batch() {
             issued: 0,
             exchange: None,
             bindings_pinned: pinned_ticket_bindings(&encoded),
-            host: None,
         };
         w.refresh(
             br#"{"url":"https://b.example/","auth_header":{"name":"X-Api-Key","value":"new"}}"#,
@@ -1787,4 +1783,139 @@ fn loaded_for_test(
         Outcome::Ready
     );
     (d, p)
+}
+
+/// A `url` written as a reference (`{env:}`, `{file:}`, `{module:}`: a declared reference field) is
+/// what `--migrate-config` hands the migration, unresolved: the header is judged all the same.
+#[test]
+fn a_referenced_url_does_not_keep_the_migration_from_removing_the_header() {
+    let m = migrated(json!({
+        "url": {"env": "WEBHOOK_URL"},
+        "auth_header": {"name": "Bad Name", "value": "k"}
+    }));
+    assert_eq!(m.settings, json!({"url": {"env": "WEBHOOK_URL"}}));
+    assert_eq!(m.report, vec![REMOVED_AUTH_HEADER.to_string()]);
+    let framing = migrated(json!({
+        "url": {"file": "/run/secrets/webhook-url"},
+        "auth_header": {"name": "Connection", "value": "close"}
+    }));
+    assert_eq!(
+        framing.settings,
+        json!({"url": {"file": "/run/secrets/webhook-url"}})
+    );
+    assert_eq!(framing.report, vec![removed_framing_header("Connection")]);
+    let kept = json!({
+        "url": {"env": "WEBHOOK_URL"},
+        "auth_header": {"name": "Authorization", "value": "k"}
+    });
+    assert_eq!(migrated(kept.clone()), Migrated::unchanged(kept));
+}
+
+/// A whole header line pasted into `auth_header.name` (credential and all) is not a token, so the
+/// instance check flags it, without repeating the name.
+#[test]
+fn a_header_line_pasted_into_the_name_never_reaches_the_check_finding() {
+    let lines = check(
+        CheckPhase::Instances,
+        &[(
+            "w".to_string(),
+            json!({
+                "url": "https://a.example/",
+                "auth_header": {"name": format!("Authorization: Bearer {CANARY}"), "value": ""}
+            }),
+        )],
+    );
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("settings.auth_header"), "{}", lines[0]);
+    assert!(!lines[0].contains(CANARY), "the name leaked: {}", lines[0]);
+}
+
+/// The settings error itself (whose message is freed unwiped) never holds the text of a mistyped
+/// header or an unknown header key; every other shape reads in serde's own words, as derived.
+#[test]
+fn a_refused_auth_header_error_never_holds_the_text_it_refused() {
+    let error = |settings: serde_json::Value| {
+        <Settings as serde::Deserialize>::deserialize(&settings)
+            .map(|_| ())
+            .expect_err("refused")
+            .to_string()
+    };
+    let url = "https://a.example/";
+    for (settings, want) in [
+        (
+            json!({"url": url, "auth_header": format!("Bearer {CANARY}")}),
+            "invalid type: string \"***\", expected struct ExportAuthHeader",
+        ),
+        (
+            json!({"url": url, "auth_header": {"name": "A", "value": "v", "Bearer CANARY7f2a9e": 1}}),
+            "unknown field `***`, expected `name` or `value`",
+        ),
+        (
+            json!({"url": url, "auth_header": 5}),
+            "invalid type: integer `5`, expected struct ExportAuthHeader",
+        ),
+        (
+            json!({"url": url, "auth_header": {"name": 5, "value": "v"}}),
+            "invalid type: integer `5`, expected a string",
+        ),
+        (
+            json!({"url": url, "auth_header": {"name": "A"}}),
+            "missing field `value`",
+        ),
+        (
+            json!({"url": url, "auth_header": {"value": "v"}}),
+            "missing field `name`",
+        ),
+        (
+            json!({"url": url, "auth_header": ["A"]}),
+            "invalid length 1, expected struct ExportAuthHeader with 2 elements",
+        ),
+    ] {
+        let got = error(settings.clone());
+        assert!(!got.contains(CANARY), "{settings}: {got}");
+        assert!(got.starts_with(want), "{settings}: {got}");
+    }
+    let s: Settings = serde_json::from_value(json!({
+        "url": url,
+        "auth_header": {"name": "Authorization", "value": "Bearer x"}
+    }))
+    .expect("a header object reads");
+    let h = s.auth_header.as_ref().expect("the header");
+    assert_eq!(
+        (h.name.as_str(), h.value.as_str()),
+        ("Authorization", "Bearer x")
+    );
+    let seq: Settings = serde_json::from_value(json!({"url": url, "auth_header": ["A", "v"]}))
+        .expect("the derived sequence form still reads");
+    assert_eq!(seq.auth_header.as_ref().map(|h| h.name.as_str()), Some("A"));
+}
+
+/// Production sources carry no test code: a `#[cfg(test)]` there only declares a side-file module
+/// by `#[path = ...]`, so the test build compiles the same function bodies the shipped build does.
+#[test]
+fn production_sources_hold_no_inline_test_code() {
+    for (file, text) in [
+        ("lib.rs", include_str!("lib.rs")),
+        ("config.rs", include_str!("config.rs")),
+        ("owners.rs", include_str!("owners.rs")),
+        ("redact.rs", include_str!("redact.rs")),
+        ("wipe_probe_off.rs", include_str!("wipe_probe_off.rs")),
+    ] {
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        for (at, line) in lines.iter().enumerate() {
+            if *line != "#[cfg(test)]" {
+                continue;
+            }
+            let attributes: Vec<&&str> = lines[at + 1..]
+                .iter()
+                .take_while(|l| l.starts_with("#["))
+                .collect();
+            let item = lines.get(at + 1 + attributes.len()).copied().unwrap_or("");
+            assert!(
+                attributes.iter().any(|a| a.starts_with("#[path")) && item.starts_with("mod "),
+                "{file}:{}: a #[cfg(test)] that is not a #[path] module declaration",
+                at + 1
+            );
+        }
+    }
 }

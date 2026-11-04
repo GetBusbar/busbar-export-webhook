@@ -177,6 +177,25 @@ pub(super) fn watch(label: &'static str, bytes: &[u8]) {
     });
 }
 
+/// Register every string and map key of `value`, each as [`watch`] registers a payload.
+pub(super) fn watch_value(label: &'static str, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => watch(label, text.as_bytes()),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                watch_value(label, value);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for (key, value) in values {
+                watch(label, key.as_bytes());
+                watch_value(label, value);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(super) struct Probe;
 
 impl Probe {

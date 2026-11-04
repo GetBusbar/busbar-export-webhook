@@ -33,6 +33,20 @@ Security notes:
 - An `auth_header` that cannot be sent (an invalid name or value) is refused, as is one named for a framing or connection field (`content-length`, `transfer-encoding`, `host`, `connection`, `te`, `upgrade`, `trailer`, `keep-alive`, `proxy-connection`); `validate` and `open` refuse alike.
 - Log lines name the target by scheme, a masked userinfo marker (`***@`), host and port, with a path shown as `/***` and a query as `?***`, and cut the url's parts and the request's credentials from the host's failure text.
 
+## Differences from 1.5.5
+
+- A mistyped `auth_header` (a string where `{ name, value }` belongs) or an unknown key under it is
+  refused without quoting the text: the refusal reads `invalid type: string "***"` or
+  ``unknown field `***` ``. 1.5.5 (serde's derived reader, `crates/busbar/src/config/mod.rs:3499`)
+  quoted it, and that text is most often the credential.
+- An `auth_header` whose name or value cannot be built as an HTTP header is refused at validation
+  and open (and removed by the migration from 1.5.5). 1.5.5 (`crates/busbar/src/export/webhook.rs:148`)
+  left such a header out and POSTed every line without it, unauthenticated.
+- An `auth_header` named for a framing or connection field (`content-length`, `host`,
+  `connection`, ...) is refused at validation and open (and removed by the migration from 1.5.5): the
+  sink's framer states those fields itself. 1.5.5 (`crates/busbar/src/export/webhook.rs:148`) passed
+  such a name to its HTTP client.
+
 ## Build
 
 ```bash

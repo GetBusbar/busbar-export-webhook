@@ -5,15 +5,18 @@ mod connector;
 mod receiver;
 pub use connector::host;
 pub use receiver::anchors;
-pub fn far_end(answer: fn(&[u8]) -> Option<Vec<u8>>) {
-    static START: std::sync::Once = std::sync::Once::new();
-    START.call_once(|| {
+/// The suite's far end, started once on a port the OS picks (a fixed port can be held by another
+/// process on the box): the port it listens on.
+pub fn far_end(answer: fn(&[u8]) -> Option<Vec<u8>>) -> u16 {
+    static PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    *PORT.get_or_init(|| {
         receiver::far_end_on(
-            std::net::TcpListener::bind("localhost:51655").expect("webhook receiver"),
+            std::net::TcpListener::bind("localhost:0").expect("webhook receiver"),
             answer,
         )
-        .expect("TLS receiver");
-    });
+        .expect("TLS receiver")
+        .port()
+    })
 }
 
 #[cfg(test)]
@@ -116,7 +119,12 @@ mod tests {
     }
     #[test]
     fn red_with_the_anchors_withheld_the_hosts_tls_upgrade_is_refused() {
-        assert!(tls_echo(false).is_err());
+        let refused = tls_echo(false).expect_err("an unverified upgrade is refused");
+        assert_ne!(
+            refused,
+            ConnError::Pending,
+            "the upgrade timed out instead of being refused"
+        );
     }
     #[test]
     fn an_http_need_reaches_a_local_http_listener_through_the_hosts_framer() {
