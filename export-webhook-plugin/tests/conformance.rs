@@ -285,7 +285,7 @@ fn the_linked_and_freshly_built_dropped_webhook_obey_the_export_contract() {
         assert_eq!(
             received.len(),
             2,
-            "one actual POST before and after refresh"
+            "one actual POST before and after refresh: dropped={dropped} calls={counts:?}"
         );
         for request in received {
             let split = request

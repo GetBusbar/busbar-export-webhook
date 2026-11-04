@@ -19,7 +19,12 @@ pub fn json(bytes: &[u8]) -> Blob {
     }
 }
 pub fn dispatcher() -> Arc<Dispatcher> {
-    Arc::new(Dispatcher::new(DispatchConfig::default()))
+    // Timed exchanges read the host clock before dialing and on every resume.
+    // Exercise the real clock service alongside the real connector in these fixtures.
+    Arc::new(Dispatcher::with_services(
+        DispatchConfig::default(),
+        Arc::new(busbar_kernel::host_services::KernelServices::new()),
+    ))
 }
 pub fn bind(d: &Dispatcher, name: &str) -> Bind {
     Bind {
