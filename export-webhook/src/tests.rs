@@ -1859,7 +1859,7 @@ fn a_refused_auth_header_error_never_holds_the_text_it_refused() {
         ),
         (
             json!({"url": url, "auth_header": {"name": 5, "value": "v"}}),
-            "invalid type: integer `5`, expected a string",
+            "invalid type: number, expected a string",
         ),
         (
             json!({"url": url, "auth_header": {"name": "A"}}),
