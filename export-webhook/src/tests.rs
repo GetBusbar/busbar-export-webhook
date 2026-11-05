@@ -3,6 +3,9 @@
 
 //! Exercises webhook settings, delivery and compatibility behavior.
 
+#[path = "../../testing/settings/integer_token.rs"]
+mod settings_profile;
+
 use super::*;
 #[path = "tests/admission_host.rs"]
 #[allow(unsafe_code)]
@@ -1915,6 +1918,224 @@ fn production_sources_hold_no_inline_test_code() {
                 attributes.iter().any(|a| a.starts_with("#[path")) && item.starts_with("mod "),
                 "{file}:{}: a #[cfg(test)] that is not a #[path] module declaration",
                 at + 1
+            );
+        }
+    }
+}
+
+/// The advertised schema covers production parser compatibility and the later per-instance
+/// deadline checks. The cross-instance minimum is deliberately tested with a positive sibling.
+#[test]
+#[allow(unsafe_code)]
+fn settings_schema_matches_lifecycle() {
+    use busbar_contract::abi::mechanism::{call::BLOB_JSON, door::Door};
+    // SAFETY: the linked door and its Statement/schema are static program data.
+    let statement = unsafe { &*Door::read_parts(crate::door()).statement };
+    let blob = &statement.settings_schema;
+    assert_eq!(blob.fmt, BLOB_JSON);
+    assert_eq!(blob.flags, 0);
+    assert!(!blob.ptr.is_null());
+    // SAFETY: this is the immutable schema published by the linked door above.
+    let bytes = unsafe { std::slice::from_raw_parts(blob.ptr, blob.len) };
+    assert_eq!(bytes, include_bytes!("../settings.schema.json"));
+    let schema: serde_json::Value = serde_json::from_slice(bytes).expect("schema JSON");
+    let validator = settings_profile::validator(&schema).expect("valid JSON Schema");
+
+    let defaults =
+        Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("defaults open");
+    assert_eq!(
+        schema["properties"]["max_inflight_deliveries"]["default"],
+        defaults.settings().max_inflight_deliveries
+    );
+    assert_eq!(
+        schema["properties"]["delivery_timeout_secs"]["default"],
+        defaults.settings().delivery_timeout_secs
+    );
+    for (settings, accepted) in [
+        (json!({"url":"https://a.example/"}), true),
+        (
+            json!({"url":"https://a.example/", "auth_header":null}),
+            true,
+        ),
+        (
+            json!({"url":"https://a.example/", "auth_header":["Authorization","Bearer x"]}),
+            true,
+        ),
+        (
+            json!({"url":"https://a.example/", "auth_header":{"name":"X-Key","value":"x\ty"}}),
+            true,
+        ),
+        (
+            json!({"url":"https://a.example/", "max_inflight_deliveries":0}),
+            true,
+        ),
+        (
+            json!({"url":"https://a.example/", "delivery_timeout_secs":MAX_DURATION_SECS}),
+            true,
+        ),
+        (json!({}), false),
+        (json!({"url":null}), false),
+        (json!({"url":"https://a.example/", "extra":true}), false),
+        (
+            json!({"url":"https://a.example/", "auth_header":{"name":"X-Key"}}),
+            false,
+        ),
+        (
+            json!({"url":"https://a.example/", "auth_header":{"name":"X-Key","value":"x", "extra":true}}),
+            false,
+        ),
+        (
+            json!({"url":"https://a.example/", "auth_header":["X-Key"]}),
+            false,
+        ),
+        (
+            json!({"url":"https://a.example/", "auth_header":{"name":"","value":"x"}}),
+            false,
+        ),
+        (
+            json!({"url":"https://a.example/", "auth_header":{"name":"HOST","value":"x"}}),
+            false,
+        ),
+        (
+            json!({"url":"https://a.example/", "auth_header":{"name":"X-Key","value":"x\ny"}}),
+            false,
+        ),
+        (
+            json!({"url":"https://a.example/", "max_inflight_deliveries":-1}),
+            false,
+        ),
+        (
+            json!({"url":"https://a.example/", "delivery_timeout_secs":0}),
+            false,
+        ),
+        (
+            json!({"url":"https://a.example/", "delivery_timeout_secs":MAX_DURATION_SECS + 1}),
+            false,
+        ),
+    ] {
+        assert_eq!(
+            validator.is_valid(&settings),
+            accepted,
+            "schema: {settings}"
+        );
+        // A zero bound is valid beside a permissive sibling: check judges the largest bound.
+        let instances = [
+            ("w".to_string(), settings.clone()),
+            ("sibling".to_string(), json!({"url":"https://b.example/"})),
+        ];
+        let runtime_accepts = Webhook::validate(settings.to_string().as_bytes()).is_ok()
+            && check(CheckPhase::Limits, &instances).is_empty()
+            && check(CheckPhase::Instances, &instances).is_empty();
+        assert_eq!(runtime_accepts, accepted, "lifecycle/check: {settings}");
+    }
+    for (reference, accepted) in [
+        (json!({"env":"WEBHOOK_VALUE"}), true),
+        (json!({"file":"/run/secrets/webhook-value"}), true),
+        (
+            json!({"module":"vault", "settings":{"key":"webhook"}}),
+            true,
+        ),
+        (json!({"env":" "}), false),
+        (json!({"module":""}), false),
+        (json!({"env":"X", "file":"Y"}), false),
+    ] {
+        let mut settings = json!({"url":reference.clone(),
+            "auth_header":{"name":"Authorization", "value":reference}});
+        assert_eq!(
+            validator.is_valid(&settings),
+            accepted,
+            "reference schema: {settings}"
+        );
+        let resolved = busbar_contract::secret_fields::resolve_declared_fields(
+            &mut settings,
+            &["auth_header.value".to_string()],
+            &["url".to_string()],
+            NAME,
+            |field, _| {
+                Ok(if field == "url" {
+                    "https://a.example/"
+                } else {
+                    "Bearer x"
+                }
+                .to_string())
+            },
+        );
+        assert_eq!(
+            resolved.is_ok() && Webhook::validate(settings.to_string().as_bytes()).is_ok(),
+            accepted,
+            "resolved lifecycle: {settings}"
+        );
+    }
+}
+
+#[test]
+fn settings_schema_integer_tokens_match_native_parser() {
+    let schema: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../settings.schema.json")).unwrap();
+    let profile = settings_profile::validator(&schema).unwrap();
+    let standard = jsonschema::validator_for(&schema).unwrap();
+    let accepts = |text: &str, value: &serde_json::Value| {
+        // The published numeric bounds include deployment checks. A positive
+        // sibling preserves the documented per-instance zero concurrency case.
+        let instances = [
+            ("w".to_string(), value.clone()),
+            ("sibling".to_string(), json!({"url":"https://b.example/"})),
+        ];
+        Webhook::validate(text.as_bytes()).is_ok()
+            && check(CheckPhase::Limits, &instances).is_empty()
+            && check(CheckPhase::Instances, &instances).is_empty()
+    };
+    assert_eq!(schema["x-busbar-settings-profile"], "integer-token-v1");
+    for (pointer, template, integer, kind) in [
+        (
+            r#"/properties/max_inflight_deliveries"#,
+            r#"{"url":"https://a.example/","max_inflight_deliveries":TOKEN}"#,
+            "1",
+            "unsigned",
+        ),
+        (
+            r#"/properties/delivery_timeout_secs"#,
+            r#"{"url":"https://a.example/","delivery_timeout_secs":TOKEN}"#,
+            "1",
+            "unsigned",
+        ),
+    ] {
+        assert_eq!(
+            schema.pointer(pointer).unwrap()["x-busbar-integer-token"],
+            kind
+        );
+        for (token, accepted) in [
+            (integer.to_string(), true),
+            (format!("{integer}.0"), false),
+            (format!("{integer}e0"), false),
+            (format!("{integer}E+0"), false),
+        ] {
+            let text = template.replace("TOKEN", &token);
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert!(
+                standard.is_valid(&value),
+                "standard mathematical integer: {text}"
+            );
+            assert_eq!(profile.is_valid(&value), accepted, "profile: {text}");
+            assert_eq!(accepts(&text, &value), accepted, "native: {text}");
+        }
+        // Do not infer signed negative-zero behavior from a regular expression:
+        // the profile must agree with the actual lifecycle parser.
+        for token in [
+            "null",
+            "0",
+            "-0",
+            "-0.0",
+            "0e0",
+            "-1",
+            "18446744073709551616",
+        ] {
+            let text = template.replace("TOKEN", token);
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(
+                profile.is_valid(&value),
+                accepts(&text, &value),
+                "native sign/range: {text}"
             );
         }
     }

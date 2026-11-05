@@ -107,7 +107,12 @@ fn the_linked_and_freshly_built_dropped_webhook_obey_the_export_contract() {
         assert_eq!(p.name(), "busbar-export-webhook");
         assert_eq!(p.max_inflight(), 64);
         pin("facts", 0);
-        for case in inputs["export"]["bad_settings"].as_array().unwrap() {
+        for (index, case) in inputs["export"]["bad_settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
             let bytes = case["settings"].to_string().into_bytes();
             let mut i: ValidateIn = blank_in();
             i.settings = calls::json(&bytes);
@@ -118,10 +123,25 @@ fn the_linked_and_freshly_built_dropped_webhook_obey_the_export_contract() {
                 lifecycle::slot::VALIDATE,
                 &mut Frame::new(i, blank_out::<OutHead>()),
             );
-            assert_eq!(c.outcome, Outcome::Failed);
-            assert_eq!(c.lease, 0);
-            assert!(String::from_utf8_lossy(c.error.as_deref().unwrap())
-                .contains(case["refusal"].as_str().unwrap()));
+            let route = if dropped { "dropped-in" } else { "linked" };
+            let expected = case["refusal"].as_str().expect("fixture refusal text");
+            assert_eq!(
+                c.outcome,
+                Outcome::Failed,
+                "{route} bad settings #{index}: {}",
+                calls::called(&c)
+            );
+            assert_eq!(
+                c.lease,
+                0,
+                "{route} bad settings #{index}: {}",
+                calls::called(&c)
+            );
+            let actual = String::from_utf8_lossy(c.error.as_ref().unwrap_or_else(|| {
+                panic!("{route} bad settings #{index}: missing refusal text; expected {expected:?}")
+            }));
+            assert!(actual.contains(expected),
+                "{route} bad settings #{index}: expected refusal substring {expected:?}, actual {actual:?}");
             observed.push(calls::called(&c));
             pin("validate bad", 1);
         }

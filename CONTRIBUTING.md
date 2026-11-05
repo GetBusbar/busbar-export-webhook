@@ -39,7 +39,7 @@ this does not make the two complete dependency graphs or every resolved version 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo build --release --locked -p busbar-export-webhook-plugin --lib
+cargo build --release --locked -p busbar-export-webhook-plugin --lib --features dropped-in
 BUSBAR_PLUGIN_CDYLIB="$PWD/target/release/libbusbar_export_webhook_plugin.so" cargo test --release --workspace --locked
 ```
 

@@ -57,7 +57,7 @@ use busbar_contract::abi::export::{
     CHECK_PHASE_LIMITS,
 };
 use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
-use busbar_contract::abi::mechanism::call::{AbiStr, OutHead, Outcome, BLOB_JSON};
+use busbar_contract::abi::mechanism::call::{AbiStr, Blob, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::cred::Cred;
@@ -171,6 +171,7 @@ busbar_contract::statement_extensions!(EXTENSIONS: [
 
 /// This plugin's Statement: its name, version, its in-flight ceiling, alias, stream and need.
 pub const STATEMENT: Statement = Statement {
+    settings_schema: Blob::json(include_bytes!("../settings.schema.json")),
     secret_refs: SECRET_REFS.as_ptr(),
     secret_refs_len: SECRET_REFS.len(),
     extensions: EXTENSIONS,

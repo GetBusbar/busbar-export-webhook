@@ -16,11 +16,15 @@
           "$ref": "#/$defs/reference"
         }
       ],
-      "description": "The HTTPS webhook target, as a literal URL or an env/file/module reference resolved by the host."
+      "description": "The HTTPS webhook target, as a literal URL or an env/file/module reference resolved by the host. Ambiguous credential-bearing URLs are refused by validate/open; the host enforces HTTPS and public-destination policy."
     },
     "auth_header": {
-      "type": "object",
-      "description": "An optional auth header applied to every delivery from this instance.",
+      "type": [
+        "object",
+        "array",
+        "null"
+      ],
+      "description": "Optional auth header. Null omits it; the legacy [name, value] string pair remains accepted. The name must be an HTTP token other than a framing/connection field, and the value must be a valid HTTP header value; validate/open enforce these checks.",
       "additionalProperties": false,
       "required": [
         "name",
@@ -29,12 +33,21 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "The header's name, e.g. Authorization."
+          "description": "The header's name, e.g. Authorization.",
+          "minLength": 1,
+          "maxLength": 65535,
+          "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+          "not": {
+            "pattern": "^([cC][oO][nN][tT][eE][nN][tT]-[lL][eE][nN][gG][tT][hH]|[tT][rR][aA][nN][sS][fF][eE][rR]-[eE][nN][cC][oO][dD][iI][nN][gG]|[hH][oO][sS][tT]|[cC][oO][nN][nN][eE][cC][tT][iI][oO][nN]|[tT][eE]|[uU][pP][gG][rR][aA][dD][eE]|[tT][rR][aA][iI][lL][eE][rR]|[kK][eE][eE][pP]-[aA][lL][iI][vV][eE]|[pP][rR][oO][xX][yY]-[cC][oO][nN][nN][eE][cC][tT][iI][oO][nN])$"
+          }
         },
         "value": {
           "oneOf": [
             {
-              "type": "string"
+              "type": "string",
+              "not": {
+                "pattern": "[\\u0000-\\u0008\\u000a-\\u001f\\u007f]"
+              }
             },
             {
               "$ref": "#/$defs/reference"
@@ -42,21 +55,44 @@
           ],
           "description": "The complete credential header value, preferably provided by an env/file/module reference such as {\"env\":\"WEBHOOK_AUTHORIZATION\"}. The export host also preserves existing literal values."
         }
-      }
+      },
+      "prefixItems": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65535,
+          "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+          "not": {
+            "pattern": "^([cC][oO][nN][tT][eE][nN][tT]-[lL][eE][nN][gG][tT][hH]|[tT][rR][aA][nN][sS][fF][eE][rR]-[eE][nN][cC][oO][dD][iI][nN][gG]|[hH][oO][sS][tT]|[cC][oO][nN][nN][eE][cC][tT][iI][oO][nN]|[tT][eE]|[uU][pP][gG][rR][aA][dD][eE]|[tT][rR][aA][iI][lL][eE][rR]|[kK][eE][eE][pP]-[aA][lL][iI][vV][eE]|[pP][rR][oO][xX][yY]-[cC][oO][nN][nN][eE][cC][tT][iI][oO][nN])$"
+          }
+        },
+        {
+          "type": "string",
+          "not": {
+            "pattern": "[\\u0000-\\u0008\\u000a-\\u001f\\u007f]"
+          }
+        }
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2,
+      "default": null
     },
     "max_inflight_deliveries": {
       "type": "integer",
       "minimum": 0,
       "maximum": 2305843009213693951,
       "default": 64,
-      "description": "Max concurrent deliveries."
+      "description": "Max concurrent deliveries. Zero is accepted for an instance beside a sibling with a positive bound; check requires the largest bound across instances to be at least one.",
+      "x-busbar-integer-token": "unsigned"
     },
     "delivery_timeout_secs": {
       "type": "integer",
       "minimum": 1,
       "maximum": 946080000,
       "default": 2,
-      "description": "Per-delivery timeout, seconds."
+      "description": "Per-delivery timeout, seconds.",
+      "x-busbar-integer-token": "unsigned"
     }
   },
   "$defs": {
@@ -70,7 +106,8 @@
           ],
           "properties": {
             "env": {
-              "type": "string"
+              "type": "string",
+              "pattern": "\\S"
             }
           }
         },
@@ -82,7 +119,8 @@
           ],
           "properties": {
             "file": {
-              "type": "string"
+              "type": "string",
+              "pattern": "\\S"
             }
           }
         },
@@ -94,7 +132,8 @@
           ],
           "properties": {
             "module": {
-              "type": "string"
+              "type": "string",
+              "pattern": "\\S"
             },
             "settings": {
               "type": "object"
@@ -103,5 +142,6 @@
         }
       ]
     }
-  }
+  },
+  "x-busbar-settings-profile": "integer-token-v1"
 }
