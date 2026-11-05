@@ -565,8 +565,14 @@ impl DeclaredConns for Watched {
     fn hold_authority(&self, owner: InstanceId) {
         self.inner.hold_authority(owner);
     }
-    fn request_head(&self, owner: InstanceId, need: NeedId, target: &str) -> HeadDefaults {
-        self.inner.request_head(owner, need, target)
+    fn request_head(
+        &self,
+        owner: InstanceId,
+        need: NeedId,
+        target: &str,
+        timeout_ms: u64,
+    ) -> Result<HeadDefaults, ConnError> {
+        self.inner.request_head(owner, need, target, timeout_ms)
     }
     fn bind_auth(&self, owner: InstanceId, need: NeedId, member: &str, origin: &str, b: ConnAuth) {
         self.inner.bind_auth(owner, need, member, origin, b);

@@ -22,7 +22,7 @@ Configured under the `request-log-webhook` module name (`export.<name>.module: r
 |---|---|---|
 | `url` | required | The webhook target. `https://` only; refused by the host when it names a loopback, link-local, private, CGNAT or cloud-metadata host. |
 | `auth_header` | none | `{ name, value }`: one header sent on every delivery. Prefer a secret reference (`{env:}`, `{file:}`, `{module:}`) for `value`; the export host also preserves existing literal header values. |
-| `max_inflight_deliveries` | 64 | Concurrent deliveries for this instance; at least 1 (the largest instance's bound is validated, and must not exceed `usize::MAX >> 3`). |
+| `max_inflight_deliveries` | 64 | Concurrent deliveries for this instance; each instance must be at least 1 and must not exceed `usize::MAX >> 3`. |
 | `delivery_timeout_secs` | 2 | Per-delivery deadline in seconds, from 1 up to 30 years (946080000). |
 
 Security notes:
@@ -34,6 +34,12 @@ Security notes:
 - Log lines name the target by scheme, a masked userinfo marker (`***@`), host and port, with a path shown as `/***` and a query as `?***`, and cut the url's parts and the request's credentials from the host's failure text.
 
 ## Differences from 1.5.5
+
+- Each instance must set `max_inflight_deliveries` to at least 1. A positive sibling no longer makes
+  a zero value valid. The one-shot configuration migration changes historical zero values to their effective delivery
+  limit of 1 and reports the correction; rerunning migration leaves the result unchanged.
+- Target-admission diagnostics name `settings.url` in the exporter's log context and preserve the
+  host's scrubbed refusal reason.
 
 - A mistyped `auth_header` (a string where `{ name, value }` belongs) or an unknown key under it is
   refused without quoting the text: the refusal reads `invalid type: string "***"` or

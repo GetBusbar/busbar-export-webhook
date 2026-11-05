@@ -46,3 +46,40 @@ fn the_door_migrates_an_auth_header_1_5_5_never_sent_both_ways() {
         assert!(m.report.is_empty() && m.needs.is_empty(), "{m:?}");
     }
 }
+
+#[test]
+fn the_door_migrates_zero_delivery_bounds_idempotently_both_ways() {
+    let bytes = std::fs::read(artifact::cdylib_of("busbar_export_webhook_plugin"))
+        .expect("the cdylib reads");
+    let before = json!({
+        "url":{"env":"WEBHOOK_URL"},
+        "auth_header":{"name":"Authorization", "value":{"env":"WEBHOOK_AUTHORIZATION"}},
+        "max_inflight_deliveries":0,
+        "delivery_timeout_secs":7
+    });
+    let mut expected = before.clone();
+    expected["max_inflight_deliveries"] = json!(1);
+    let linked = |s: &serde_json::Value| {
+        migrate_door(raw(busbar_export_webhook::door), s, "1.5.5")
+            .expect("migrates")
+            .expect("the door states migrate")
+    };
+    let dropped = |s: &serde_json::Value| {
+        migrate_library(&bytes, "busbar-export-webhook", s, "1.5.5")
+            .expect("migrates")
+            .expect("the door states migrate")
+    };
+    for migrated in [linked(&before), dropped(&before)] {
+        assert_eq!(migrated.settings, expected);
+        assert_eq!(
+            migrated.report,
+            vec![busbar_export_webhook::MIGRATED_ZERO_INFLIGHT.to_string()]
+        );
+        assert!(migrated.needs.is_empty());
+    }
+    for unchanged in [linked(&expected), dropped(&expected)] {
+        assert_eq!(unchanged.settings, expected);
+        assert!(unchanged.report.is_empty());
+        assert!(unchanged.needs.is_empty());
+    }
+}

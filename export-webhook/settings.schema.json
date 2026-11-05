@@ -80,10 +80,10 @@
     },
     "max_inflight_deliveries": {
       "type": "integer",
-      "minimum": 0,
+      "minimum": 1,
       "maximum": 2305843009213693951,
       "default": 64,
-      "description": "Max concurrent deliveries. Zero is accepted for an instance beside a sibling with a positive bound; check requires the largest bound across instances to be at least one.",
+      "description": "Max concurrent deliveries for this instance; each instance must specify at least one.",
       "x-busbar-integer-token": "unsigned"
     },
     "delivery_timeout_secs": {

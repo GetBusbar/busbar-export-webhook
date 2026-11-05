@@ -77,7 +77,7 @@ fn a_settings_shape_refusal_is_the_compiled_in_sinks_line() {
     assert!(Webhook::validate(br#"{"url":"https://a/","max_inflight_deliveries":0}"#).is_ok());
 }
 
-/// BOOT-083a / BOOT-083b / BOOT-089f: the validation-phase lines, one in-flight bound over the
+/// Validation-phase diagnostics identify each named instance independently.
 #[test]
 fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
     let one = |v: serde_json::Value| {
@@ -88,17 +88,11 @@ fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
     };
     assert_eq!(
         one(json!({"url": "https://a/", "max_inflight_deliveries": 0})),
-        vec![
-            "the largest settings.max_inflight_deliveries among `module: request-log-webhook` \
-             export instances must be >= 1"
-        ]
+        vec!["export.w: settings.max_inflight_deliveries must be >= 1"]
     );
     assert_eq!(
         one(json!({"url": "https://a/", "max_inflight_deliveries": 2305843009213693952u64})),
-        vec![
-            "the largest settings.max_inflight_deliveries among `module: request-log-webhook` \
-             export instances must be <= 2305843009213693951"
-        ]
+        vec!["export.w: settings.max_inflight_deliveries must be <= 2305843009213693951"]
     );
     assert!(
         one(json!({"url": "https://a/", "max_inflight_deliveries": 2305843009213693951u64}))
@@ -129,7 +123,7 @@ fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
         one(json!({"url": "https://a/b", "delivery_timeout_secs": MAX_DURATION_SECS + 1})).len(),
         1
     );
-    // A stingy sibling is not refused beside a generous one: the bound is the largest.
+    // Each instance reports its own invalid setting even beside a positive sibling.
     let two_instances = [
         (
             "a".into(),
@@ -142,8 +136,12 @@ fn the_validation_phase_checks_are_the_compiled_in_sinks_lines() {
     ];
     let mut two = check(CheckPhase::Limits, &two_instances);
     two.extend(check(CheckPhase::Instances, &two_instances));
-    assert_eq!(two.len(), 1, "{two:?}");
-    assert!(two[0].contains("'https://b' (#1)"), "{two:?}");
+    assert_eq!(two.len(), 2, "{two:?}");
+    assert_eq!(
+        two[0],
+        "export.a: settings.max_inflight_deliveries must be >= 1"
+    );
+    assert!(two[1].contains("'https://b' (#1)"), "{two:?}");
     assert!(check(CheckPhase::Limits, &[]).is_empty());
 
     let both = [(
@@ -383,31 +381,30 @@ fn the_success_boundary_is_200_to_299() {
     }
 }
 
-/// A target the host refused is named in 1.5.5's words, as 1.5.5's `validate_webhook_url` named it:
+/// Admission diagnostics name the current setting without inventing a host refusal reason.
 #[test]
-fn a_refused_target_is_named_in_1_5_5_words_when_it_is_the_scheme() {
+fn a_refused_target_names_the_current_setting_and_host_reason() {
     let refused = ConnFailure::Refused("destination refused".into());
-    assert_eq!(
-        refusal_words(Some("http://127.0.0.1:4000/sidecar"), &refused),
-        "observability.request_log_webhook_url must be an https:// URL (got 'http://127.0.0.1:4000/***')"
-    );
-    assert_eq!(
-        refusal_words(Some("HTTP://u:p@siem.example/in"), &refused),
-        "observability.request_log_webhook_url must be an https:// URL (got 'http://***@siem.example/***')"
-    );
-
-    assert_eq!(
-        refusal_words(Some("https://u:p@/x"), &refused),
-        "observability.request_log_webhook_url is not a valid URL: empty host"
-    );
-    assert_eq!(
-        refusal_words(Some("HTTPS://u:p@169.254.169.254/in"), &refused),
-        "observability.request_log_webhook_url must not target a loopback/link-local/private/CGNAT/\
-         cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/***'"
-    );
+    for (url, shown) in [
+        ("http://127.0.0.1:4000/sidecar", "http://127.0.0.1:4000/***"),
+        (
+            "HTTP://authuser:authpass@siem.example/in",
+            "http://***@siem.example/***",
+        ),
+        ("https://authuser:authpass@/x", "https:***"),
+        (
+            "HTTPS://authuser:authpass@169.254.169.254/in",
+            "https://***@169.254.169.254/***",
+        ),
+    ] {
+        assert_eq!(
+            refusal_words(Some(url), &refused),
+            format!("settings.url '{shown}': destination refused")
+        );
+    }
     assert_eq!(
         refusal_words(Some("http://siem.example/in"), &ConnFailure::Unarmed),
-        "the instance was handed no connector"
+        "settings.url 'http://siem.example/***': the instance was handed no connector"
     );
     assert_eq!(refusal_words(None, &refused), "destination refused");
 }
@@ -539,15 +536,12 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
     let host = fake_host.host();
     for (url, line) in [
         (
-            "HTTP://u:s3cret@siem.example/in",
-            "observability.request_log_webhook_url must be an https:// URL (got \
-             'http://***@siem.example/***'); disabling this webhook exporter",
+            "HTTP://operator:s3cret@siem.example/in",
+            "settings.url 'http://***@siem.example/***': destination refused; disabling this webhook exporter",
         ),
         (
-            "https://u:s3cret@169.254.169.254/in",
-            "observability.request_log_webhook_url must not target a loopback/link-local/private/\
-             CGNAT/cloud-metadata host (SSRF guard); got 'https://***@169.254.169.254/***'; \
-             disabling this webhook exporter",
+            "https://operator:s3cret@169.254.169.254/in",
+            "settings.url 'https://***@169.254.169.254/***': destination refused; disabling this webhook exporter",
         ),
     ] {
         let settings = json!({ "url": url }).to_string();
@@ -558,7 +552,7 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
         assert_eq!(field(&got[0], "message"), line);
     }
 
-    let url = "https://u:s3cret@siem.example/in";
+    let url = "https://operator:s3cret@siem.example/in";
     let lines =
         |settings: serde_json::Value| check(CheckPhase::Instances, &[("w".to_string(), settings)]);
     assert_eq!(
@@ -638,7 +632,7 @@ fn a_refresh_never_shows_new_settings_beside_the_old_verdict() {
 
 /// `ready` reads the HOST's verdict, not "no host": over a fake host whose `need.admit` refuses, an
 #[test]
-fn ready_reads_the_hosts_refusal_and_names_the_scheme_rule() {
+fn ready_reads_the_hosts_refusal_and_names_the_current_setting() {
     use busbar_contract::abi::mechanism::call::Outcome;
     use busbar_contract::abi::mechanism::ticket::Ticket;
     use std::task::Poll;
@@ -649,7 +643,8 @@ fn ready_reads_the_hosts_refusal_and_names_the_scheme_rule() {
     assert_eq!(got.len(), 1, "{got:?}");
     assert_eq!(field(&got[0], "diag"), "BUSBAR-7070");
     assert!(
-        field(&got[0], "message").contains("must be an https:// URL"),
+        field(&got[0], "message")
+            .contains("settings.url 'http://127.0.0.1:4000/***': destination refused"),
         "{got:?}"
     );
 }
@@ -1087,6 +1082,66 @@ fn migrated(settings: serde_json::Value) -> Migrated {
     Migration::migrate(settings, "1.5.5")
 }
 
+#[test]
+fn migration_makes_a_zero_delivery_bound_explicit_and_is_idempotent() {
+    let before = json!({
+        "url": {"env":"WEBHOOK_URL"},
+        "auth_header": {"name":"Authorization", "value":{"file":"/run/secrets/webhook"}},
+        "max_inflight_deliveries":0,
+        "delivery_timeout_secs":7,
+        "unrelated":{"preserved":[1,2,3]}
+    });
+    let mut expected = before.clone();
+    expected["max_inflight_deliveries"] = json!(1);
+    let result = migrated(before);
+    assert_eq!(result.settings, expected);
+    assert_eq!(result.report, vec![MIGRATED_ZERO_INFLIGHT.to_string()]);
+    assert!(result.needs.is_empty());
+    assert_eq!(migrated(result.settings), Migrated::unchanged(expected));
+}
+
+#[test]
+fn migration_preserves_omitted_positive_and_malformed_delivery_bounds() {
+    for before in [
+        json!({"url":"https://receiver.example/"}),
+        json!({"url":"https://receiver.example/", "max_inflight_deliveries":1}),
+        json!({"url":"https://receiver.example/", "max_inflight_deliveries":64}),
+        json!({"url":"https://receiver.example/", "max_inflight_deliveries":null}),
+        json!({"url":"https://receiver.example/", "max_inflight_deliveries":"0"}),
+        json!({"url":"https://receiver.example/", "max_inflight_deliveries":-1}),
+        json!(null),
+        json!([]),
+    ] {
+        assert_eq!(migrated(before.clone()), Migrated::unchanged(before));
+    }
+}
+
+#[test]
+fn migration_combines_zero_bound_and_unsendable_header_corrections() {
+    let result = migrated(json!({
+        "url":"https://receiver.example/",
+        "max_inflight_deliveries":0,
+        "auth_header":{"name":"Bad Name", "value":"credential-canary"},
+        "delivery_timeout_secs":7
+    }));
+    let expected = json!({"url":"https://receiver.example/", "max_inflight_deliveries":1, "delivery_timeout_secs":7});
+    assert_eq!(result.settings, expected);
+    assert_eq!(
+        result.report,
+        vec![
+            MIGRATED_ZERO_INFLIGHT.to_string(),
+            REMOVED_AUTH_HEADER.to_string()
+        ]
+    );
+    assert!(result.needs.is_empty());
+    assert!(!result.report.join("\n").contains("credential-canary"));
+    let instances = [("migrated".to_string(), result.settings.clone())];
+    assert!(Webhook::validate(result.settings.to_string().as_bytes()).is_ok());
+    assert!(check(CheckPhase::Limits, &instances).is_empty());
+    assert!(check(CheckPhase::Instances, &instances).is_empty());
+    assert_eq!(migrated(result.settings), Migrated::unchanged(expected));
+}
+
 /// Whether 1.6.0's validation refuses `settings` for their auth header.
 fn auth_header_refused(settings: &serde_json::Value) -> bool {
     check(
@@ -1379,46 +1434,61 @@ fn a_finding_is_numbered_by_the_configured_position() {
 }
 
 #[test]
-fn leading_controls_and_spaces_do_not_hide_the_scheme() {
+fn leading_controls_and_spaces_are_normalized_in_the_diagnostic_target() {
     let refused = ConnFailure::Refused("destination refused".into());
     for url in [
         " https://10.0.0.5/hook",
         "\u{1}\u{1f}  HTTPS://10.0.0.5/hook",
     ] {
-        let words = refusal_words(Some(url), &refused);
-        assert!(words.contains("(SSRF guard)"), "{url:?}: {words}");
-        assert!(
-            !words.contains("must be an https:// URL"),
-            "{url:?}: {words}"
+        assert_eq!(
+            refusal_words(Some(url), &refused),
+            "settings.url 'https://10.0.0.5/***': destination refused"
         );
     }
-    let words = refusal_words(Some(" http://10.0.0.5/hook"), &refused);
-    assert!(words.contains("must be an https:// URL"), "{words}");
 }
 
 #[test]
-fn only_an_undeclared_need_keeps_the_hosts_own_words() {
+fn every_host_refusal_retains_its_scrubbed_reason() {
     use busbar_contract::conn::ConnError;
     let url = "https://ops:hunter2@siem.example/services/PATHSECRET?k=QUERYSECRET";
-    let undeclared =
-        ConnFailure::Refused(format!("{} (for {url})", ConnError::UndeclaredNeed.text()));
-    let exact = ConnFailure::Refused(ConnError::UndeclaredNeed.text().to_string());
-    for refused in [&undeclared, &exact] {
-        let words = refusal_words(Some(url), refused);
-        assert!(
-            words.starts_with(ConnError::UndeclaredNeed.text()),
-            "{words}"
-        );
+    for reason in [
+        ConnError::UndeclaredNeed.text(),
+        ConnError::Refused.text(),
+        "destination denied by operator policy",
+    ] {
+        let refused = ConnFailure::Refused(format!("{reason} (for {url})"));
+        let words = refusal_words(Some(url), &refused);
+        assert!(words.starts_with("settings.url '"), "{words}");
+        assert!(words.contains(reason), "{words}");
         assert!(!words.contains("SSRF"), "{words}");
+        assert!(!words.contains("observability."), "{words}");
         for secret in ["hunter2", "PATHSECRET", "QUERYSECRET"] {
             assert!(!words.contains(secret), "`{secret}` leaked: {words}");
         }
     }
+}
 
-    let connection = ConnFailure::Refused(ConnError::Refused.text().to_string());
-    assert!(refusal_words(Some("https://10.0.0.5/in"), &connection).contains("(SSRF guard)"));
-
-    assert!(refusal_words(Some("http://10.0.0.5/in"), &connection).contains("must be an https://"));
+#[test]
+fn delivery_bound_validity_is_independent_of_siblings() {
+    let zero = (
+        "zero".to_string(),
+        json!({"url":"https://a.example/", "max_inflight_deliveries":0}),
+    );
+    let positive = (
+        "positive".to_string(),
+        json!({"url":"https://b.example/", "max_inflight_deliveries":1}),
+    );
+    let expected = vec!["export.zero: settings.max_inflight_deliveries must be >= 1".to_string()];
+    assert_eq!(check(CheckPhase::Limits, &[zero.clone()]), expected);
+    assert_eq!(
+        check(CheckPhase::Limits, &[zero.clone(), positive.clone()]),
+        expected
+    );
+    assert_eq!(
+        check(CheckPhase::Limits, &[positive.clone(), zero]),
+        expected
+    );
+    assert!(check(CheckPhase::Limits, &[positive]).is_empty());
 }
 
 #[test]
@@ -1549,7 +1619,7 @@ fn the_settings_schema_bounds_are_the_ones_check_enforces() {
     let p = &schema["properties"];
     assert_eq!(p["delivery_timeout_secs"]["minimum"], 1);
     assert_eq!(p["delivery_timeout_secs"]["maximum"], MAX_DURATION_SECS);
-    assert_eq!(p["max_inflight_deliveries"]["minimum"], 0);
+    assert_eq!(p["max_inflight_deliveries"]["minimum"], 1);
     assert_eq!(p["max_inflight_deliveries"]["maximum"], MAX_PERMITS as u64);
 }
 
@@ -1967,7 +2037,7 @@ fn settings_schema_matches_lifecycle() {
         ),
         (
             json!({"url":"https://a.example/", "max_inflight_deliveries":0}),
-            true,
+            false,
         ),
         (
             json!({"url":"https://a.example/", "delivery_timeout_secs":MAX_DURATION_SECS}),
@@ -2018,7 +2088,7 @@ fn settings_schema_matches_lifecycle() {
             accepted,
             "schema: {settings}"
         );
-        // A zero bound is valid beside a permissive sibling: check judges the largest bound.
+        // Schema and per-instance checks agree even when a valid sibling is present.
         let instances = [
             ("w".to_string(), settings.clone()),
             ("sibling".to_string(), json!({"url":"https://b.example/"})),

@@ -80,7 +80,7 @@ pub const ALIAS: &str = "request-log-webhook";
 /// The manifest `declares` section (`--declares-file` for the signed tarball).
 pub const DECLARES: &str = include_str!("../declares.json");
 
-/// The in-flight ceiling `check` holds the largest instance's bound to
+/// The in-flight ceiling `check` holds each instance's bound to
 /// (`tokio::sync::Semaphore::MAX_PERMITS`, `usize::MAX >> 3`). The host builds no semaphore: its
 /// export axis saturates the bound into a `u32`, clamped to at least one, and caps the instance's
 /// in-flight deliveries at it.
@@ -113,7 +113,7 @@ const TARGET_FROM: &str = "settings.url";
 
 /// The in-flight ceiling this sink declares: no bound of its own. The bound is the operator's
 /// `max_inflight_deliveries` (64 when unset), which the host applies per instance, clamped to at
-/// least one; `check` refuses the LARGEST instance's bound past [`MAX_PERMITS`] or below 1
+/// least one; `check` refuses each instance's bound past [`MAX_PERMITS`] or below 1
 /// ([`check`]).
 pub const MAX_INFLIGHT: u32 = u32::MAX;
 /// The one need's index in the Statement.
@@ -129,7 +129,6 @@ fn parsed_url(text: &str) -> Result<owners::ParsedUrl, url::ParseError> {
     Ok(parsed)
 }
 
-use config::DEFAULT_MAX_INFLIGHT;
 pub use config::{ExportAuthHeader, WebhookSettings};
 pub use redact::{log_target, scrub};
 
@@ -669,51 +668,19 @@ pub fn basic_authorization(url: &str) -> Option<Vec<u8>> {
     basic
 }
 
-/// BUSBAR-7070's words for a refused target, 1.5.5's: a target whose raw text is not an `https://`
-/// URL is the scheme rule ([`is_https`]); one that does not parse is an invalid URL; any other
-/// refusal of a parseable `https://` target is worded as the destination guard (the connector
-/// gives one text for every target refusal, so nothing tells them apart). Userinfo is masked. A host that gave no verdict, a need the plugin never declared ([`undeclared`]), or any
-/// failure that is not a refusal, is said in the host's words, scrubbed of the target's parts.
+/// Name the current setting and preserve the host's reason for refusing its target. The
+/// instance's log context identifies the exporter; its URL and the host's text are scrubbed so
+/// credentials never cross into the diagnostic. A generic refusal is not evidence of an SSRF
+/// violation, a malformed URL, or a particular scheme violation.
 pub fn refusal_words(url: Option<&str>, refused: &ConnFailure) -> String {
-    match (url, refused) {
-        (Some(u), ConnFailure::Refused(_)) if !undeclared(refused) && !is_https(u) => format!(
-            "observability.request_log_webhook_url must be an https:// URL (got '{}')",
-            log_target(u)
+    match url {
+        Some(url) => format!(
+            "settings.url '{}': {}",
+            log_target(url),
+            scrub(&refused.to_string(), url, None)
         ),
-        (Some(u), ConnFailure::Refused(_)) if !undeclared(refused) => match parsed_url(u) {
-            Err(e) => format!("observability.request_log_webhook_url is not a valid URL: {e}"),
-            Ok(_) => format!(
-                "observability.request_log_webhook_url must not target a loopback/link-local/\
-                 private/CGNAT/cloud-metadata host (SSRF guard); got '{}'",
-                log_target(u)
-            ),
-        },
-        (Some(u), _) => scrub(&refused.to_string(), u, None),
-        (None, _) => refused.to_string(),
+        None => refused.to_string(),
     }
-}
-
-/// Whether `refused` is the host's refusal of a need the plugin never declared
-/// (`ConnError::UndeclaredNeed`, worded by core's own constant). The connector words every other
-/// refusal of a target (the record, the scheme, the destination guard, the egress class) as the one
-/// `ConnError::Refused`, so the guard cannot be told from them here: a distinct guard reason needs
-/// core.
-fn undeclared(refused: &ConnFailure) -> bool {
-    matches!(refused, ConnFailure::Refused(t) if t.starts_with(busbar_contract::conn::ConnError::UndeclaredNeed.text()))
-}
-
-/// `url` names the `https` scheme, read without case and judged on the raw text before any parse, as
-/// 1.5.5 did.
-///
-/// Leading C0 controls and spaces are skipped first, as the WHATWG URL parser skips them, so the
-/// scheme is the one the parser would read.
-fn is_https(url: &str) -> bool {
-    url.trim_start_matches(|c: char| c <= ' ')
-        .chars()
-        .filter(|c| !matches!(c, '\t' | '\r' | '\n'))
-        .take(8)
-        .map(|c| c.to_ascii_lowercase())
-        .eq("https://".chars())
 }
 
 /// What became of one line: nothing to say for a 2xx; BUSBAR-7071 for any other status,
@@ -743,16 +710,8 @@ pub fn report(
     }
 }
 
-/// The checks the configuration's validation runs across every webhook instance: AMONG the
-/// operational limits' checks ([`CheckPhase::Limits`]) the in-flight bound — one bound over the
-/// instances, the largest configured (64 with none), so a generous instance is never refused for a
-/// stingy sibling; AFTER them ([`CheckPhase::Instances`]) each instance's auth
-/// header (framing, or not a valid HTTP header) and delivery deadline, numbered by its position.
-///
-/// Only the largest instance's bound is validated (the shared bound must accommodate the most
-/// permissive sink), and the host's export axis clamps each instance's bound to at least one. An
-/// instance stating `0` beside a larger sibling therefore validates and runs at one permit; refusing
-/// it per instance would tighten customer-visible behaviour.
+/// Validate each named instance's delivery bound during the limits phase, then its auth header
+/// and deadline during the instances phase. An instance's validity never depends on a sibling.
 pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
     let parsed: Vec<(usize, &str, Settings)> = instances
         .iter()
@@ -766,23 +725,18 @@ pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Ve
         instance_checks(&parsed, &mut errors);
         return errors;
     }
-    let bound = parsed
-        .iter()
-        .map(|(_, _, w)| w.max_inflight_deliveries)
-        .max()
-        .unwrap_or(DEFAULT_MAX_INFLIGHT);
-    if bound < 1 {
-        errors.push(
-            "the largest settings.max_inflight_deliveries among `module: request-log-webhook` \
-             export instances must be >= 1"
-                .to_string(),
-        );
-    }
-    if bound > MAX_PERMITS {
-        errors.push(format!(
-            "the largest settings.max_inflight_deliveries among `module: request-log-webhook` \
-             export instances must be <= {MAX_PERMITS}"
-        ));
+    for (_, name, settings) in &parsed {
+        let bound = settings.max_inflight_deliveries;
+        if bound < 1 {
+            errors.push(format!(
+                "export.{name}: settings.max_inflight_deliveries must be >= 1"
+            ));
+        }
+        if bound > MAX_PERMITS {
+            errors.push(format!(
+                "export.{name}: settings.max_inflight_deliveries must be <= {MAX_PERMITS}"
+            ));
+        }
     }
     errors
 }
@@ -845,29 +799,42 @@ pub fn removed_framing_header(name: &str) -> String {
     )
 }
 
-/// Migrates legacy webhook settings by removing an auth header that validation refuses.
+/// The migration receipt for making a historical zero limit's effective value explicit.
+pub const MIGRATED_ZERO_INFLIGHT: &str =
+    "changed settings.max_inflight_deliveries: 0 -> 1 (preserves the historical effective per-instance limit)";
+
+/// Migrates webhook settings once, before validation: make the effective zero limit explicit and
+/// remove an auth header that validation refuses. This entry is not part of the serving runtime.
 pub struct Migration;
 
 impl Migrate for Migration {
     fn migrate(mut settings: serde_json::Value, _: &str) -> Migrated {
-        if !auth_header_unbuildable(&settings) {
-            return Migrated::unchanged(settings);
+        let mut report = Vec::new();
+        if let Some(bound) = settings
+            .get_mut("max_inflight_deliveries")
+            .filter(|bound| bound.as_u64() == Some(0))
+        {
+            *bound = serde_json::Value::from(1);
+            report.push(MIGRATED_ZERO_INFLIGHT.to_string());
         }
-        let framing = settings
-            .pointer("/auth_header/name")
-            .and_then(serde_json::Value::as_str)
-            .filter(|n| is_framing(n))
-            .map(removed_framing_header);
-        if let Some(section) = settings.as_object_mut() {
-            let removed = section.remove("auth_header");
-            if let Some(value) = &removed {
-                wipe_probe::watch_value("removed migration header", value);
+        if auth_header_unbuildable(&settings) {
+            let framing = settings
+                .pointer("/auth_header/name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|n| is_framing(n))
+                .map(removed_framing_header);
+            if let Some(section) = settings.as_object_mut() {
+                let removed = section.remove("auth_header");
+                if let Some(value) = &removed {
+                    wipe_probe::watch_value("removed migration header", value);
+                }
+                drop(removed.map(owners::SettingsValue));
             }
-            drop(removed.map(owners::SettingsValue));
+            report.push(framing.unwrap_or_else(|| REMOVED_AUTH_HEADER.to_string()));
         }
         Migrated {
             settings,
-            report: vec![framing.unwrap_or_else(|| REMOVED_AUTH_HEADER.to_string())],
+            report,
             needs: Vec::new(),
         }
     }

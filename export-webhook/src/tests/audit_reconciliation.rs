@@ -55,12 +55,13 @@ fn an_admission_fault_does_not_permanently_disable_a_valid_target() {
 }
 
 #[test]
-fn the_https_diagnostic_uses_the_parsers_embedded_whitespace_rules() {
+fn the_diagnostic_normalizes_embedded_whitespace_without_guessing_the_refusal() {
     let line = refusal_words(
         Some("ht\ttps://hooks.example/embedded-whitespace-path-canary"),
         &ConnFailure::Refused("destination refused".into()),
     );
-    assert!(line.contains("SSRF guard"), "{line}");
+    assert!(line.contains("destination refused"), "{line}");
+    assert!(!line.contains("SSRF guard"), "{line}");
     assert!(line.contains("https://hooks.example/***"), "{line}");
     assert!(!line.contains("embedded-whitespace-path-canary"), "{line}");
 }
