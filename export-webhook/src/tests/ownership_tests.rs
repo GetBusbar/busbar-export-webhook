@@ -88,3 +88,17 @@ fn migration_wipes_the_removed_header_without_changing_the_remaining_section() {
         .finish()
         .assert_wiped_on_linux(&["removed migration header", "migration probe JSON"]);
 }
+
+#[test]
+fn guarded_settings_keep_duplicate_and_empty_semantics() {
+    let settings = parse(br#"{"url":"https://discarded.example/","url":"https://receiver.example/\u0070ath","auth_header":{"name":"authorization","value":"discarded","value":"Bearer kept"}}"#).unwrap();
+    assert_eq!(settings.url, "https://receiver.example/path");
+    assert_eq!(
+        settings.auth_header.as_ref().unwrap().value.as_str(),
+        "Bearer kept"
+    );
+    assert_eq!(
+        parse(b"").unwrap_err().text(),
+        Some("settings: missing field `url`")
+    );
+}

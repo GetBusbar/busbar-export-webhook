@@ -64,7 +64,7 @@ use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRE
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
-use busbar_contract::abi::sdk::cred::Cred;
+use busbar_contract::abi::sdk::cred::{Cred, SettingsValue};
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement};
 use busbar_contract::abi::sdk::exchange::{
     exchange, Exchange, ExchangeResponse, Request, SealedField,
@@ -188,7 +188,7 @@ pub const STATEMENT: Statement = Statement {
 /// The settings, parsed as the configuration grammar parses them (empty is `{}`); a `url` whose
 /// credential would be misread as its host is refused ([`ambiguous_url`]).
 fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
-    let value = owners::SettingsValue(settings_value(settings)?);
+    let value = SettingsValue::from(settings_value(settings)?);
     wipe_probe::watch_value("settings JSON", &value);
 
     let mut credentials = zeroize::Zeroizing::new(redact::settings_credentials(&value));
@@ -745,12 +745,19 @@ pub fn report(
 /// Validate each named instance's delivery bound during the limits phase, then its auth header
 /// and deadline during the instances phase. An instance's validity never depends on a sibling.
 pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
+    check_values(
+        phase,
+        instances.iter().map(|(name, value)| (name.as_str(), value)),
+    )
+}
+
+fn check_values<'a>(
+    phase: CheckPhase,
+    instances: impl Iterator<Item = (&'a str, &'a serde_json::Value)>,
+) -> Vec<String> {
     let parsed: Vec<(usize, &str, Settings)> = instances
-        .iter()
         .enumerate()
-        .filter_map(|(i, (name, s))| {
-            Some((i, name.as_str(), serde::Deserialize::deserialize(s).ok()?))
-        })
+        .filter_map(|(i, (name, s))| Some((i, name, serde::Deserialize::deserialize(s).ok()?)))
         .collect();
     let mut errors = Vec::new();
     match phase {
@@ -865,7 +872,7 @@ impl Migrate for Migration {
                 .and_then(|section| section.remove("auth_header"));
             if let Some(value) = removed {
                 wipe_probe::watch_value("removed migration header", &value);
-                drop(owners::SettingsValue(value));
+                drop(SettingsValue::from(value));
                 report.push(framing.unwrap_or_else(|| REMOVED_AUTH_HEADER.to_string()));
             }
         }
@@ -880,15 +887,15 @@ impl Migrate for Migration {
 /// Whether `settings` are refused at validation for their auth header ([`instance_checks`]), a
 /// referenced value read as one that builds.
 fn auth_header_unbuildable(settings: &serde_json::Value) -> bool {
-    let mut probe = owners::SettingsValue(settings.clone());
+    let mut probe = SettingsValue::from(settings.clone());
     wipe_probe::watch_value("migration probe JSON", &probe);
     // The section as written: a reference (`{env:}`, `{file:}`, `{module:}`) in either declared
     // reference-capable field is not resolved yet, so it stands in as text for the probe.
     for field in ["/url", "/auth_header/value"] {
-        if let Some(value) = probe.0.pointer_mut(field).filter(|v| v.is_object()) {
+        if let Some(value) = probe.pointer_mut(field).filter(|v| v.is_object()) {
             *value = {
                 let old = std::mem::replace(value, serde_json::Value::Null);
-                drop(owners::SettingsValue(old));
+                drop(SettingsValue::from(old));
                 serde_json::Value::String(String::new())
             };
         }
@@ -899,22 +906,22 @@ fn auth_header_unbuildable(settings: &serde_json::Value) -> bool {
 
 /// `check`'s instances, `(name, settings)` in configuration order (settings that are not JSON read
 /// as `null`, which no check parses), through the SDK's safe lend.
-fn instances(input: Lent<'_, CheckIn>) -> owners::SettingsInstances {
-    owners::SettingsInstances(
-        input
-            .instances()
-            .iter()
-            .map(|c| {
-                let settings = serde_json::from_slice(c.field(|c| &c.settings).bytes())
-                    .unwrap_or(serde_json::Value::Null);
-                wipe_probe::watch_value("check settings JSON", &settings);
-                (
-                    String::from_utf8_lossy(c.field(|c| &c.name).bytes()).into_owned(),
-                    settings,
-                )
-            })
-            .collect(),
-    )
+fn instances(input: Lent<'_, CheckIn>) -> Vec<(String, SettingsValue)> {
+    input
+        .instances()
+        .iter()
+        .map(|c| {
+            let settings = SettingsValue::from(
+                serde_json::from_slice(c.field(|c| &c.settings).bytes())
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            wipe_probe::watch_value("check settings JSON", &settings);
+            (
+                String::from_utf8_lossy(c.field(|c| &c.name).bytes()).into_owned(),
+                settings,
+            )
+        })
+        .collect()
 }
 
 /// The instance state every slot reads.
@@ -1047,7 +1054,13 @@ impl SafeSlot for Check {
 
             _ => return out.fail(Refusal::refused(UNKNOWN_PHASE)),
         };
-        let lines = check(phase, &instances(input));
+        let instances = instances(input);
+        let lines = check_values(
+            phase,
+            instances
+                .iter()
+                .map(|(name, value)| (name.as_str(), &**value)),
+        );
         if !lines.is_empty() {
             let json = serde_json::to_vec(&lines).unwrap_or_default();
             out.lease(|o| &o.findings, h.leases(), json, BLOB_JSON);
