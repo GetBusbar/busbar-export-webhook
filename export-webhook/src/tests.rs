@@ -412,22 +412,41 @@ fn a_refused_target_names_the_current_setting_and_host_reason() {
 /// With no verdict to be had, the instance is disabled once, in BUSBAR-7070's words, and stays so
 #[test]
 fn an_unadmitted_target_disables_the_instance_once() {
-    let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
-    let got = logged(|| {
-        assert!(!w.admitted(None));
-        assert!(!w.admitted(None));
-    });
-    assert_eq!(got.len(), 1, "{got:?}");
-    assert_eq!(field(&got[0], "diag"), "BUSBAR-7070");
-    assert_eq!(field(&got[0], "level"), "ERROR");
-    assert_eq!(
-        field(&got[0], "message"),
-        "the instance was handed no connector; disabling this webhook exporter"
-    );
-    w.refresh(br#"{"url":"https://b.example/"}"#, &[], 2)
-        .expect("a refresh applies");
-    assert_eq!(logged(|| assert!(!w.admitted(None))).len(), 1);
-    assert_eq!(w.settings().url, "https://b.example/");
+    for (url, shown) in [
+        ("https://a.example/", "https://a.example"),
+        (
+            "https://authuser:authpass@a.example/private?token=secret",
+            "https://***@a.example/***?***",
+        ),
+    ] {
+        let settings = json!({"url": url}).to_string();
+        let w = Webhook::open(settings.as_bytes(), &[], 1).expect("opens");
+        let got = logged(|| {
+            assert!(!w.admitted(None));
+            assert!(!w.admitted(None));
+        });
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(field(&got[0], "diag"), "BUSBAR-7070");
+        assert_eq!(field(&got[0], "level"), "ERROR");
+        assert_eq!(
+            field(&got[0], "message"),
+            format!("settings.url '{shown}': the instance was handed no connector; disabling this webhook exporter")
+        );
+        w.refresh(br#"{"url":"https://b.example/"}"#, &[], 2)
+            .expect("a refresh applies");
+        let refreshed = logged(|| {
+            assert!(!w.admitted(None));
+            assert!(!w.admitted(None));
+        });
+        assert_eq!(refreshed.len(), 1, "{refreshed:?}");
+        assert_eq!(field(&refreshed[0], "diag"), "BUSBAR-7070");
+        assert_eq!(field(&refreshed[0], "level"), "ERROR");
+        assert_eq!(
+            field(&refreshed[0], "message"),
+            "settings.url 'https://b.example': the instance was handed no connector; disabling this webhook exporter"
+        );
+        assert_eq!(w.settings().url, "https://b.example/");
+    }
 }
 
 /// The Statement: name, NO in-flight ceiling of its own (`u32::MAX`: the operator's
