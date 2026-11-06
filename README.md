@@ -7,7 +7,6 @@ First-party signed kind:export plugin cdylib: the request-log WEBHOOK sink (modu
 |---|---|---|---|---|
 | `export` | `request-log-webhook` | `busbar-export-webhook-plugin` | 1.6.0 (pinned in `.busbar-ref`) | Apache-2.0 |
 
-[![ci](https://github.com/GetBusbar/busbar-export-webhook/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/GetBusbar/busbar-export-webhook/actions/workflows/ci.yml)
 <!-- fleet:header:end -->
 
 ## What it is for
