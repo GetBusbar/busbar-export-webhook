@@ -1479,7 +1479,10 @@ fn delivery_bound_validity_is_independent_of_siblings() {
         json!({"url":"https://b.example/", "max_inflight_deliveries":1}),
     );
     let expected = vec!["export.zero: settings.max_inflight_deliveries must be >= 1".to_string()];
-    assert_eq!(check(CheckPhase::Limits, &[zero.clone()]), expected);
+    assert_eq!(
+        check(CheckPhase::Limits, std::slice::from_ref(&zero)),
+        expected
+    );
     assert_eq!(
         check(CheckPhase::Limits, &[zero.clone(), positive.clone()]),
         expected
