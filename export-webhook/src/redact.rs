@@ -21,7 +21,7 @@ pub fn log_target(url: &str) -> String {
         return unparsed_target(url);
     }
     let Some(host) = u.host_str() else {
-        return format!("{}:{REDACTED}", u.scheme());
+        return unparsed_target(url);
     };
     let mut out = format!("{}://", u.scheme());
     if !u.username().is_empty() || u.password().is_some() {
@@ -72,8 +72,6 @@ pub fn scrub(text: &str, url: &str, header_value: Option<&str>) -> String {
         parts.push(u.username().to_string());
     }
     if let Some(basic) = crate::basic_authorization(url) {
-        let bytes = Zeroizing::new(basic);
-        let basic = String::from_utf8_lossy(&bytes).into_owned();
         parts.extend(basic.strip_prefix("Basic ").map(str::to_owned));
         parts.push(basic);
     }
@@ -97,12 +95,14 @@ pub fn scrub(text: &str, url: &str, header_value: Option<&str>) -> String {
     )
 }
 
-/// Every credential-bearing string the settings JSON holds: every string (and map key) under
-/// `auth_header` except the header's `name`. These are what serde may quote back in a shape refusal.
+/// Every credential-bearing scalar the settings JSON holds: every string, number (as serde names
+/// it) and map key under `auth_header` except the header's `name`, or the whole of settings that
+/// are not a section. These are what serde may quote back in a shape refusal.
 pub fn settings_credentials(settings: &serde_json::Value) -> Vec<String> {
     fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
         match v {
             serde_json::Value::String(s) => out.push(s.clone()),
+            serde_json::Value::Number(n) => out.push(n.to_string()),
             serde_json::Value::Array(a) => a.iter().for_each(|v| walk(v, out)),
             serde_json::Value::Object(o) => {
                 for (k, v) in o {
@@ -119,7 +119,9 @@ pub fn settings_credentials(settings: &serde_json::Value) -> Vec<String> {
         }
     }
     let mut out = Vec::new();
-    if let Some(h) = settings.get("auth_header") {
+    if !settings.is_object() {
+        walk(settings, &mut out);
+    } else if let Some(h) = settings.get("auth_header") {
         walk(h, &mut out);
     }
     for credential in &out {

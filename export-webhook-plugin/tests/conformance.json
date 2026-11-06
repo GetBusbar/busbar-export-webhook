@@ -1,6 +1,5 @@
 {
-  "settings": { "url": "https://localhost/busbar" },
-  "dialing_steps": ["deliver #0"],
+  "settings": {},
   "export": {
     "bad_settings": [
       { "settings": {}, "refusal": "settings: missing field `url`" },
@@ -10,12 +9,7 @@
         "refusal": "settings: invalid type: number, expected a string" }
     ],
     "deliver": [
-      { "stream": "logs",
-        "batch": "{\"outcome\":\"ok\",\"ts\":1}\n",
-        "observed": [] }
-    ],
-    "status": { "outcome": "Ready" },
-    "check": { "outcome": "Ready" },
-    "serve": [ { "method": "GET", "path": "/exports/tail/x", "outcome": "Refused" } ]
+      { "batch": "{\"outcome\":\"ok\",\"ts\":1}\n" }
+    ]
   }
 }

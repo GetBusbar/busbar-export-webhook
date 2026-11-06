@@ -35,12 +35,8 @@ fn opened(dropped: bool) -> (Arc<Dispatcher>, Plugin<Export>) {
         conns: ConnTable::Probe,
     };
     let p = if dropped {
-        load_dropped::<Export>(
-            &artifact::cdylib_of("busbar_export_webhook_plugin"),
-            &row().statement,
-            bind,
-        )
-        .expect("the dropped door loads")
+        load_dropped::<Export>(&artifact::cdylib_of(), &row().statement, bind)
+            .expect("the dropped door loads")
     } else {
         load_linked::<Export>(&row(), bind).expect("the linked door loads")
     };
@@ -86,11 +82,11 @@ fn a_push_sink_refuses_scrape_and_serve_saying_why_through_both_doors() {
     let want = [
         (
             Outcome::Refused,
-            Some(busbar_export_webhook::NO_EXPOSITION.to_string()),
+            Some(busbar_contract::abi::sdk::export::NO_EXPOSITION.to_string()),
         ),
         (
             Outcome::Refused,
-            Some(busbar_export_webhook::NO_ROUTE.to_string()),
+            Some(busbar_contract::abi::sdk::export::NO_ROUTE.to_string()),
         ),
     ];
     for dropped in [false, true] {

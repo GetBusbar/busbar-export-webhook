@@ -119,11 +119,12 @@ mod tests {
     }
     #[test]
     fn red_with_the_anchors_withheld_the_hosts_tls_upgrade_is_refused() {
-        let refused = tls_echo(false).expect_err("an unverified upgrade is refused");
-        assert_ne!(
-            refused,
-            ConnError::Pending,
-            "the upgrade timed out instead of being refused"
+        // The open is the trusted case's own (it differs only in the anchors), so a refusal here
+        // is the certificate check's.
+        assert_eq!(
+            tls_echo(false),
+            Err(ConnError::Refused),
+            "an unverified upgrade is refused, not timed out or failed"
         );
     }
     #[test]

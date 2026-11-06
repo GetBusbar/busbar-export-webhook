@@ -11,15 +11,19 @@ use super::*;
 #[allow(unsafe_code)]
 pub(super) mod admission_host;
 use admission_host::AdmissionHost;
+#[path = "tests/audit_fixes.rs"]
+mod audit_fixes;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
 /// The request one line is POSTed as, under `s`: its plain part (the credential-bearing fields ride
+/// beside it, sealed).
 fn request(s: &Settings, line: &[u8]) -> Request {
     Prepared::new(s.clone()).parts(line).0
 }
 
 /// Asserts the fields one POST under `s` sends, in order: `want` is `(name, value)` as the far end
+/// receives them.
 fn sent(s: &Settings, want: &[(&str, &str)]) {
     let p = Prepared::new(s.clone());
     let (request, sealed) = p.parts(b"{}");
@@ -62,6 +66,7 @@ fn refused(settings: serde_json::Value) -> String {
 }
 
 /// The shape refusals are serde's, under the `settings:` prefix — the same derive, field order and
+/// words the compiled-in sink used.
 #[test]
 fn a_settings_shape_refusal_is_the_compiled_in_sinks_line() {
     assert_eq!(
@@ -215,7 +220,7 @@ fn reply(status: u16) -> Result<ExchangeResponse, ConnFailure> {
     })
 }
 
-/// A delivery POSTs the compact JSON line to the target's path and query with
+/// A delivery POSTs the compact JSON line to the target's path and query with its fields in order.
 #[test]
 fn a_delivery_posts_the_line() {
     let s = settings(json!({
@@ -279,11 +284,7 @@ fn a_userinfo_in_the_url_is_sent_as_basic_as_1_5_5_sent_it() {
         ("https://siem.example/in", None),
         ("not a url", None),
     ] {
-        assert_eq!(
-            basic_authorization(url).as_deref(),
-            sent.map(str::as_bytes),
-            "{url}"
-        );
+        assert_eq!(basic_authorization(url).as_deref(), sent, "{url}");
     }
 
     for (userinfo, encoded) in [
@@ -298,7 +299,7 @@ fn a_userinfo_in_the_url_is_sent_as_basic_as_1_5_5_sent_it() {
         let url = format!("https://{userinfo}@siem.example/in");
         assert_eq!(
             basic_authorization(&url).as_deref(),
-            Some(encoded.as_bytes()),
+            Some(encoded),
             "{userinfo}"
         );
     }
@@ -338,6 +339,7 @@ fn a_configured_auth_header_name_goes_lower_case_as_1_5_5_sent_it() {
 }
 
 /// A non-2xx answer and a transport failure each drop the line and raise their code at WARN (1.5.5's
+/// level).
 #[test]
 fn a_failed_delivery_raises_its_code_once() {
     let url = "https://user:pw@siem.example/in";
@@ -398,18 +400,18 @@ fn a_refused_target_names_the_current_setting_and_host_reason() {
         ),
     ] {
         assert_eq!(
-            refusal_words(Some(url), &refused),
+            refusal_words(url, &refused),
             format!("settings.url '{shown}': destination refused")
         );
     }
     assert_eq!(
-        refusal_words(Some("http://siem.example/in"), &ConnFailure::Unarmed),
+        refusal_words("http://siem.example/in", &ConnFailure::Unarmed),
         "settings.url 'http://siem.example/***': the instance was handed no connector"
     );
-    assert_eq!(refusal_words(None, &refused), "destination refused");
 }
 
 /// With no verdict to be had, the instance is disabled once, in BUSBAR-7070's words, and stays so
+/// until a reload.
 #[test]
 fn an_unadmitted_target_disables_the_instance_once() {
     for (url, shown) in [
@@ -450,6 +452,7 @@ fn an_unadmitted_target_disables_the_instance_once() {
 }
 
 /// The Statement: name, NO in-flight ceiling of its own (`u32::MAX`: the operator's
+/// `max_inflight_deliveries` bounds it), alias, stream and need.
 #[test]
 fn the_statement_states_the_sink() {
     assert_eq!(STATEMENT.name.len, NAME.len());
@@ -487,6 +490,7 @@ fn the_declaration_states_the_shed_counter_and_the_codes() {
 }
 
 /// Every metric a catalogue action cites (a backticked `*_total` token) is a series the declaration
+/// names.
 #[test]
 fn a_catalogue_action_cites_only_declared_metrics() {
     let d: serde_json::Value = serde_json::from_str(DECLARES).unwrap();
@@ -511,6 +515,7 @@ fn a_catalogue_action_cites_only_declared_metrics() {
 }
 
 /// A validation error names the target, never its userinfo (EHOOK-3): the deadline refusals echo
+/// only the masked target.
 #[test]
 fn validation_errors_mask_the_targets_userinfo() {
     for (url, shown) in [
@@ -546,6 +551,7 @@ fn validation_errors_mask_the_targets_userinfo() {
 }
 
 /// The lines naming a userinfo target hide its path and normalize its scheme: the BUSBAR-7070
+/// line and the check findings alike.
 #[test]
 fn the_lines_naming_a_userinfo_target_read_exactly() {
     use busbar_contract::abi::mechanism::call::Outcome;
@@ -605,7 +611,7 @@ fn the_lines_naming_a_userinfo_target_read_exactly() {
     );
 }
 
-/// DISCOVERY AT BOOT: `ready` asks the host's verdict once and never refuses the boot. Over host
+/// DISCOVERY AT BOOT: `ready` asks the host's verdict once and never refuses the boot.
 #[test]
 fn ready_asks_the_verdict_at_boot_and_never_refuses_it() {
     use busbar_contract::abi::mechanism::ticket::Ticket;
@@ -650,6 +656,7 @@ fn a_refresh_never_shows_new_settings_beside_the_old_verdict() {
 }
 
 /// `ready` reads the HOST's verdict, not "no host": over a fake host whose `need.admit` refuses, an
+/// http target is disabled with the host's reason, naming the current setting.
 #[test]
 fn ready_reads_the_hosts_refusal_and_names_the_current_setting() {
     use busbar_contract::abi::mechanism::call::Outcome;
@@ -668,7 +675,8 @@ fn ready_reads_the_hosts_refusal_and_names_the_current_setting() {
     );
 }
 
-/// THE CHECK SLOT THROUGH THE DOOR: the phase maps to its check (an instance whose
+/// THE CHECK SLOT THROUGH THE DOOR: the phase maps to its check, its findings are leased as JSON,
+/// and an unknown phase is refused.
 #[test]
 #[allow(unsafe_code)]
 fn the_check_slot_maps_its_phase_and_leases_the_findings() {
@@ -862,6 +870,7 @@ fn the_auth_header_value_is_redacted_from_debug() {
 }
 
 /// THE TARGET URL'S USERINFO NEVER RENDERS THROUGH `Debug` (§11.13): a `user:password@` in the url is
+/// shown as `***@`.
 #[test]
 fn the_url_userinfo_is_masked_in_debug() {
     let settings = WebhookSettings {
@@ -1028,7 +1037,10 @@ fn serve_is_refused_saying_why_through_the_door() {
         &mut Frame::new(blank_in::<ServeIn>(), blank_out::<ServeOut>()),
     );
     assert_eq!(c.outcome, Outcome::Refused);
-    assert_eq!(c.error.as_deref(), Some(crate::NO_ROUTE.as_bytes()));
+    assert_eq!(
+        c.error.as_deref(),
+        Some(busbar_contract::abi::sdk::export::NO_ROUTE.as_bytes())
+    );
     let closed = plugin.call(
         slot::CLOSE,
         &mut Frame::new(blank_in::<InHead>(), blank_out::<OutHead>()),
@@ -1070,6 +1082,7 @@ fn an_auth_header_that_cannot_be_built_is_refused_at_validation() {
 }
 
 /// A reload that lands back on the settings a batch started under (A -> B -> A) is no reload for
+/// that batch.
 #[test]
 fn a_reload_back_to_the_same_settings_does_not_cut_the_batch() {
     let w = Webhook::open(br#"{"url":"https://a.example/"}"#, &[], 1).expect("opens");
@@ -1221,6 +1234,7 @@ fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
 }
 
 /// The header's value may be a reference the kernel resolves (`auth_header.value` is a declared
+/// secret field).
 #[test]
 fn a_referenced_value_is_judged_by_the_headers_name_alone() {
     let m = migrated(json!({
@@ -1237,6 +1251,7 @@ fn a_referenced_value_is_judged_by_the_headers_name_alone() {
 }
 
 /// Everything 1.6.0 does not refuse for its auth header passes through unchanged, with nothing to
+/// report.
 #[test]
 fn a_section_1_6_0_does_not_refuse_for_its_header_is_unchanged() {
     for settings in [
@@ -1262,6 +1277,7 @@ fn a_section_1_6_0_does_not_refuse_for_its_header_is_unchanged() {
 }
 
 /// NO DECLARED CODE IS ONE THE CORE'S CATALOGUE HOLDS: the core at `.busbar-ref` (`BUSBAR_CHECKOUT`,
+/// which plugin CI exports) is read for every `code = N` row.
 #[test]
 fn no_declared_code_is_one_the_core_catalogue_holds() {
     let busbar = std::env::var_os("BUSBAR_CHECKOUT").expect(
@@ -1460,7 +1476,7 @@ fn leading_controls_and_spaces_are_normalized_in_the_diagnostic_target() {
         "\u{1}\u{1f}  HTTPS://10.0.0.5/hook",
     ] {
         assert_eq!(
-            refusal_words(Some(url), &refused),
+            refusal_words(url, &refused),
             "settings.url 'https://10.0.0.5/***': destination refused"
         );
     }
@@ -1476,7 +1492,7 @@ fn every_host_refusal_retains_its_scrubbed_reason() {
         "destination denied by operator policy",
     ] {
         let refused = ConnFailure::Refused(format!("{reason} (for {url})"));
-        let words = refusal_words(Some(url), &refused);
+        let words = refusal_words(url, &refused);
         assert!(words.starts_with("settings.url '"), "{words}");
         assert!(words.contains(reason), "{words}");
         assert!(!words.contains("SSRF"), "{words}");
@@ -1646,6 +1662,7 @@ fn the_settings_schema_bounds_are_the_ones_check_enforces() {
 }
 
 /// KIND 1: `validate` refuses exactly what `open` refuses: an `auth_header` that cannot be sent as
+/// an HTTP header.
 #[test]
 fn validate_refuses_an_auth_header_that_open_refuses() {
     let settings =
@@ -1658,6 +1675,7 @@ fn validate_refuses_an_auth_header_that_open_refuses() {
 }
 
 /// KIND 2: a host failure text echoing the request's credentials (the Basic value, its token, the
+/// auth header's value) is scrubbed of them.
 #[test]
 fn a_failure_echoing_the_requests_credentials_logs_none_of_them() {
     let url = "https://alice:s3cret@hooks.example/in";
@@ -1693,6 +1711,7 @@ fn an_unparsable_url_with_an_at_after_its_host_is_ambiguous() {
 }
 
 /// The ambiguous-url refusal shows only `<scheme>:***`: the parser's host of an ambiguous url is the
+/// front of the credential.
 #[test]
 fn the_ambiguous_url_refusal_never_echoes_the_path_or_query() {
     for url in [
@@ -1707,7 +1726,6 @@ fn the_ambiguous_url_refusal_never_echoes_the_path_or_query() {
             refusal.contains("url `https:***` is ambiguous"),
             "{refusal}"
         );
-        assert!(refusal.contains("is ambiguous"), "{refusal}");
     }
 }
 
@@ -1740,7 +1758,7 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
             &["SECRET", "bad host"][..],
         ),
     ] {
-        let mut lines = vec![refusal_words(Some(url), &refused), log_target(url)];
+        let mut lines = vec![refusal_words(url, &refused), log_target(url)];
         let settings = json!({ "url": url }).to_string();
         let verdict = Webhook::validate(settings.as_bytes());
         if let Err(r) = &verdict {
@@ -1998,7 +2016,7 @@ fn production_sources_hold_no_inline_test_code() {
     ] {
         let lines: Vec<&str> = text.lines().map(str::trim).collect();
         for (at, line) in lines.iter().enumerate() {
-            if *line != "#[cfg(test)]" {
+            if !(line.starts_with("#[") && line.contains("test")) || line.starts_with("#[path") {
                 continue;
             }
             let attributes: Vec<&&str> = lines[at + 1..]
@@ -2008,7 +2026,7 @@ fn production_sources_hold_no_inline_test_code() {
             let item = lines.get(at + 1 + attributes.len()).copied().unwrap_or("");
             assert!(
                 attributes.iter().any(|a| a.starts_with("#[path")) && item.starts_with("mod "),
-                "{file}:{}: a #[cfg(test)] that is not a #[path] module declaration",
+                "{file}:{}: a test-gated item that is not a #[path] module declaration",
                 at + 1
             );
         }

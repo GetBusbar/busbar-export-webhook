@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The artifact built with `--features dropped-in` immediately before this test run.
-pub fn cdylib_of(_: &str) -> std::path::PathBuf {
+pub fn cdylib_of() -> std::path::PathBuf {
     let path = std::env::var_os("BUSBAR_PLUGIN_CDYLIB")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {

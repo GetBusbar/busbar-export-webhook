@@ -12,8 +12,7 @@ use serde_json::json;
 
 #[test]
 fn the_door_migrates_an_auth_header_1_5_5_never_sent_both_ways() {
-    let bytes = std::fs::read(artifact::cdylib_of("busbar_export_webhook_plugin"))
-        .expect("the cdylib reads");
+    let bytes = std::fs::read(artifact::cdylib_of()).expect("the cdylib reads");
     let bad = json!({
         "url": "https://siem.example/in",
         "auth_header": {"name": "Authorization", "value": "Bearer s3cret\r\nX-Injected: 1"}
@@ -49,8 +48,7 @@ fn the_door_migrates_an_auth_header_1_5_5_never_sent_both_ways() {
 
 #[test]
 fn the_door_migrates_zero_delivery_bounds_idempotently_both_ways() {
-    let bytes = std::fs::read(artifact::cdylib_of("busbar_export_webhook_plugin"))
-        .expect("the cdylib reads");
+    let bytes = std::fs::read(artifact::cdylib_of()).expect("the cdylib reads");
     let before = json!({
         "url":{"env":"WEBHOOK_URL"},
         "auth_header":{"name":"Authorization", "value":{"env":"WEBHOOK_AUTHORIZATION"}},

@@ -23,7 +23,8 @@ busbar-contract = { workspace = true }
 # The settings shape (`deny_unknown_fields`, so the operator's typo is the same refusal it was).
 serde = { workspace = true }
 serde_json = { workspace = true }
-# The userinfo mask on the target URL the sink's diagnostics name (its own lines, never the host's).
+# The WHATWG parser the sink reads its target by: the request's path and query, the userinfo's Basic
+# value, the ambiguous-url refusal and the masked target its own lines name.
 url = { workspace = true }
 # The credential bytes the instance holds (the auth header's value, the request's `authorization`)
 # are wiped when dropped (`Zeroizing`); busbar's own workspace row, no new crate in the lock.

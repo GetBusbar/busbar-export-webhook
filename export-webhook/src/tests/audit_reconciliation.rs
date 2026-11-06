@@ -19,7 +19,7 @@ fn refusal_and_check_lines_hide_path_and_arbitrary_query_credentials() {
         )],
     );
     lines.push(refusal_words(
-        Some(url),
+        url,
         &ConnFailure::Refused("destination refused".into()),
     ));
     assert_eq!(lines.len(), 2);
@@ -57,7 +57,7 @@ fn an_admission_fault_does_not_permanently_disable_a_valid_target() {
 #[test]
 fn the_diagnostic_normalizes_embedded_whitespace_without_guessing_the_refusal() {
     let line = refusal_words(
-        Some("ht\ttps://hooks.example/embedded-whitespace-path-canary"),
+        "ht\ttps://hooks.example/embedded-whitespace-path-canary",
         &ConnFailure::Refused("destination refused".into()),
     );
     assert!(line.contains("destination refused"), "{line}");

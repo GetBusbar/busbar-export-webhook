@@ -9,9 +9,11 @@ mod settings;
 #[path = "support/conformance_host.rs"]
 mod conformance_host;
 
-/// The far end's answer: an HTTP/1.1 `200` once a whole request (its head, then the
+/// Every whole request the far end received, in arrival order.
 static RECEIVED: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
 
+/// The far end's answer: an HTTP/1.1 `200` once a whole request (its head, then the
+/// `content-length` body it states) has arrived, recorded in [`RECEIVED`].
 fn accepted(seen: &[u8]) -> Option<Vec<u8>> {
     let end = seen.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
     let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
@@ -70,11 +72,7 @@ fn the_linked_and_freshly_built_dropped_webhook_obey_the_export_contract() {
             ..calls::bind(&d, "conformance")
         };
         let p = if dropped {
-            load_dropped::<Export>(
-                &artifact::cdylib_of("busbar_export_webhook_plugin"),
-                &row.statement,
-                bind,
-            )
+            load_dropped::<Export>(&artifact::cdylib_of(), &row.statement, bind)
         } else {
             load_linked::<Export>(&row, bind)
         }
