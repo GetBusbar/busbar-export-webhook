@@ -1866,7 +1866,10 @@ fn loaded_for_test(
     use busbar_plugin_loader::dispatch::{
         self, Bind, ConnTable, DispatchConfig, Dispatcher, Frame, LinkedRow, NoSink,
     };
-    let d = Arc::new(Dispatcher::new(DispatchConfig::default()));
+    let d = Arc::new(Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    ));
     let row = LinkedRow::of(crate::door).expect("actual webhook statement");
     let p = dispatch::load_linked(
         &row,

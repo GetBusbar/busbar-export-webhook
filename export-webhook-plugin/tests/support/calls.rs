@@ -24,6 +24,7 @@ pub fn dispatcher() -> Arc<Dispatcher> {
     Arc::new(Dispatcher::with_services(
         DispatchConfig::default(),
         Arc::new(busbar_kernel::host_services::KernelServices::new()),
+        busbar_contract::services::test_caller_binding(),
     ))
 }
 pub fn bind(d: &Dispatcher, name: &str) -> Bind {

@@ -54,10 +54,12 @@ impl AdmissionHost {
         };
         Self { slots, tables }
     }
-    pub fn host(&self) -> busbar_contract::abi::sdk::conn::Host {
+    pub fn host(
+        &self,
+    ) -> busbar_contract::abi::sdk::conn::Host<busbar_contract::plugin::markers::ExportKind> {
         let _ = &self.slots;
         // SAFETY: the owned table prefixes are readable here; Host copies their slots.
         // The sole callback is static and its context is a fixed scalar, not borrowed state.
-        unsafe { busbar_contract::abi::sdk::conn::Host::from_raw(&self.tables) }
+        unsafe { busbar_contract::abi::sdk::conn::Host::test_from_raw(&self.tables) }
     }
 }

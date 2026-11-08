@@ -36,7 +36,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 jsonschema = { workspace = true }
 # Real ABI operation tests use the production dispatcher.
-busbar-plugin-loader = { workspace = true }
+busbar-plugin-loader = { workspace = true , features = ["test-support"] }
 # The plugin test support (a fake host over safe Rust): dev-only, never in a shipped image.
 busbar-contract = { workspace = true, features = ["test-seal"] }
 # The tests' RFC 4648 vectors for the Basic value's base64 (the encoding is the SDK's,

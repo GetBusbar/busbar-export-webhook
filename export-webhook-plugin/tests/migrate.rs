@@ -35,7 +35,7 @@ fn the_door_migrates_an_auth_header_1_5_5_never_sent_both_ways() {
         assert_eq!(m.settings, json!({"url": "https://siem.example/in"}));
         assert_eq!(
             m.report,
-            vec![busbar_export_webhook::REMOVED_AUTH_HEADER.to_string()]
+            vec!["removed settings.auth_header: 1.6.0 does not send it, as it cannot be sent as an HTTP header (its name or value is not a valid HTTP header), which 1.6.0 refuses at validation and open".to_string()]
         );
         assert!(m.needs.is_empty());
         assert!(!format!("{m:?}").contains("s3cret"), "{m:?}");
@@ -71,7 +71,7 @@ fn the_door_migrates_zero_delivery_bounds_idempotently_both_ways() {
         assert_eq!(migrated.settings, expected);
         assert_eq!(
             migrated.report,
-            vec![busbar_export_webhook::MIGRATED_ZERO_INFLIGHT.to_string()]
+            vec!["changed settings.max_inflight_deliveries: 0 -> 1 (preserves the historical effective per-instance limit)".to_string()]
         );
         assert!(migrated.needs.is_empty());
     }

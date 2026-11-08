@@ -83,13 +83,12 @@ fn the_linked_and_freshly_built_dropped_webhook_obey_the_export_contract() {
             p.secret_refs(),
             p.reference_fields()
         )];
-        use std::sync::atomic::Ordering;
-        let mut prior_crossings = p.inner.crossings.load(Ordering::SeqCst);
-        let mut prior_resumes = p.inner.resumes.load(Ordering::SeqCst);
+        let mut prior_crossings = p.test_invocations().0;
+        let mut prior_resumes = p.test_invocations().1;
         let mut counts = Vec::new();
         let mut pin = |label: &str, first: u64| {
-            let crossings = p.inner.crossings.load(Ordering::SeqCst);
-            let resumes = p.inner.resumes.load(Ordering::SeqCst);
+            let crossings = p.test_invocations().0;
+            let resumes = p.test_invocations().1;
             let resumed = resumes - prior_resumes;
             assert_eq!(
                 crossings - prior_crossings - resumed,
@@ -334,7 +333,10 @@ mod declared_secrets {
     use serde_json::{json, Value};
 
     fn load() -> Plugin<Export> {
-        let d = Arc::new(Dispatcher::new(DispatchConfig::default()));
+        let d = Arc::new(Dispatcher::new(
+            DispatchConfig::default(),
+            busbar_contract::services::test_caller_binding(),
+        ));
         load_linked::<Export>(
             &LinkedRow::of(busbar_export_webhook::door).expect("the linked door renders"),
             Bind {

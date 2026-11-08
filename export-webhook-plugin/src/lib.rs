@@ -12,7 +12,7 @@
 
 #![deny(unsafe_code)]
 
-pub use busbar_export_webhook::*;
+pub use busbar_export_webhook::{door, ALIAS, DECLARES, MACRO_DOOR, NAME};
 
 /// The exported door, behind `dropped-in` (the cdylib build only): the macro's `#[no_mangle]` symbol is
 /// the one exemption.

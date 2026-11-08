@@ -118,9 +118,9 @@ const TARGET_FROM: &str = "settings.url";
 /// `max_inflight_deliveries` (64 when unset), which the host applies per instance, clamped to at
 /// least one; `check` refuses each instance's bound past [`MAX_PERMITS`] or below 1
 /// ([`check`]).
-pub const MAX_INFLIGHT: u32 = u32::MAX;
+pub(crate) const MAX_INFLIGHT: u32 = u32::MAX;
 /// The one need's index in the Statement.
-pub const NEED: u32 = 0;
+pub(crate) const NEED: u32 = 0;
 
 mod config;
 mod owners;
@@ -132,11 +132,11 @@ fn parsed_url(text: &str) -> Result<owners::ParsedUrl, url::ParseError> {
     Ok(parsed)
 }
 
-pub use config::{ExportAuthHeader, WebhookSettings};
-pub use redact::{log_target, scrub};
+pub(crate) use config::{ExportAuthHeader, WebhookSettings};
+pub(crate) use redact::{log_target, scrub};
 
 /// This sink's settings (the configuration's `WebhookSettings`).
-pub type Settings = WebhookSettings;
+pub(crate) type Settings = WebhookSettings;
 
 /// The one need: outbound over a secure connection to the `url` setting's target, public
 /// destinations only (refusing loopback, link-local, private, CGNAT and cloud-metadata targets).
@@ -172,7 +172,7 @@ busbar_contract::statement_extensions!(EXTENSIONS: [
 ]);
 
 /// This plugin's Statement: its name, version, its in-flight ceiling, alias, stream and need.
-pub const STATEMENT: Statement = Statement {
+pub(crate) const STATEMENT: Statement = Statement {
     settings_schema: Blob::json(include_bytes!("../settings.schema.json")),
     secret_refs: SECRET_REFS.as_ptr(),
     secret_refs_len: SECRET_REFS.len(),
@@ -237,7 +237,7 @@ fn parse_to_run(settings: &[u8]) -> Result<Settings, Refusal> {
 /// host of an ambiguous url is the front of the credential, so no part of the text is echoed. The
 /// words are the SDK's (`sdk::url::ambiguous_url`); the parse is this plugin's own WHATWG reader,
 /// the one its target is dialled by.
-pub fn ambiguous_url(url: &str) -> Option<String> {
+pub(crate) fn ambiguous_url(url: &str) -> Option<String> {
     let from_path = zeroize::Zeroizing::new(match parsed_url(url) {
         Ok(parsed) => parsed[url::Position::BeforePath..].to_string(),
         Err(_) if url.contains('@') => "@".to_string(),
@@ -247,7 +247,7 @@ pub fn ambiguous_url(url: &str) -> Option<String> {
 }
 
 /// One opened instance.
-pub struct Webhook {
+pub(crate) struct Webhook {
     /// Its settings and the request every line shares. `open` and `refresh` refuse settings that do
     /// not parse, so an instance never holds unparsed ones and never sits silently dead.
     settings: RwLock<Arc<Prepared>>,
@@ -275,6 +275,7 @@ impl std::fmt::Debug for Webhook {
 }
 
 impl Life for Webhook {
+    type Kind = busbar_contract::plugin::markers::ExportKind;
     const CANCEL: u32 = export::cancel::ABORTED;
 
     /// The settings' shape, in the configuration grammar's own serde words.
@@ -298,7 +299,7 @@ impl Life for Webhook {
     /// Settings that did not parse are the configuration's refusal, not this one's.
     fn ready(
         &self,
-        host: &Host,
+        host: &Host<busbar_contract::plugin::markers::ExportKind>,
         _: busbar_contract::abi::mechanism::ticket::Ticket,
     ) -> Poll<Result<(), Refusal>> {
         let _ = self.admitted(Some(host));
@@ -359,7 +360,10 @@ impl Webhook {
     /// Whether the host admitted the target, asked once: a refusal (or no host to ask) raises
     /// BUSBAR-7070 in the host's words and disables the instance; an answer the host could not
     /// give is logged at ERROR, caches nothing and is asked again next time.
-    pub fn admitted(&self, host: Option<&Host>) -> bool {
+    pub fn admitted(
+        &self,
+        host: Option<&Host<busbar_contract::plugin::markers::ExportKind>>,
+    ) -> bool {
         matches!(self.admission(host), Admission::Admitted(..))
     }
 
@@ -367,7 +371,10 @@ impl Webhook {
     /// target; why not, when it did not. The settings are read while the verdict's lock is held
     /// (lock order live -> settings, as `refresh` takes them), so a delivery never pairs an old
     /// verdict with the settings of a reload that landed between the two reads.
-    fn admission(&self, host: Option<&Host>) -> Admission {
+    fn admission(
+        &self,
+        host: Option<&Host<busbar_contract::plugin::markers::ExportKind>>,
+    ) -> Admission {
         let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
         let ok = match *live {
             Some(v) => v,
@@ -405,7 +412,11 @@ impl Webhook {
     /// raised once); a batch met by an admission the host could not answer is dropped with each of
     /// its lines reported as the transport failure it met (BUSBAR-7072), as a line whose exchange
     /// failed would be.
-    fn admitted_for(&self, host: Option<&Host>, batch: &[u8]) -> Option<(Arc<Prepared>, u64)> {
+    fn admitted_for(
+        &self,
+        host: Option<&Host<busbar_contract::plugin::markers::ExportKind>>,
+        batch: &[u8],
+    ) -> Option<(Arc<Prepared>, u64)> {
         match self.admission(host) {
             Admission::Admitted(settings, generation) => Some((settings, generation)),
             Admission::Disabled => None,
@@ -477,7 +488,7 @@ fn next_line(batch: &[u8], from: usize) -> Option<(&[u8], usize)> {
 /// appended as an `http::HeaderMap` appends, so a configured auth header named `Authorization` is
 /// sent too, after the userinfo's. The configured name goes lower-cased (the contract's field block
 /// is lower-case).
-pub struct Prepared {
+pub(crate) struct Prepared {
     settings: Settings,
     target: Vec<u8>,
     /// The fields that carry no credential, in order (`content-type`).
@@ -691,7 +702,7 @@ fn append(fields: &mut Vec<(Vec<u8>, Field)>, name: &[u8], value: Field) {
 /// the password, if any. The host's connector drops the userinfo from the target the `url` setting
 /// gives the need. The decoding and the encoding are the SDK's (`sdk::url::basic_authorization`,
 /// read as [`Userinfo::Utf8`], reqwest 0.12's reading for 1.5.5); the parse is this plugin's own.
-pub fn basic_authorization(url: &str) -> Option<String> {
+pub(crate) fn basic_authorization(url: &str) -> Option<String> {
     let u = parsed_url(url).ok()?;
     if !u.has_authority() {
         return None;
@@ -707,7 +718,7 @@ pub fn basic_authorization(url: &str) -> Option<String> {
 /// instance's log context identifies the exporter; its URL and the host's text are scrubbed so
 /// credentials never cross into the diagnostic. A generic refusal is not evidence of an SSRF
 /// violation, a malformed URL, or a particular scheme violation.
-pub fn refusal_words(url: &str, refused: &ConnFailure) -> String {
+pub(crate) fn refusal_words(url: &str, refused: &ConnFailure) -> String {
     format!(
         "settings.url '{}': {}",
         log_target(url),
@@ -720,7 +731,7 @@ pub fn refusal_words(url: &str, refused: &ConnFailure) -> String {
 /// it: scheme, a masked userinfo marker, host and port, a path other than `/` shown as `/***` and
 /// a query as `?***` (the userinfo, path and query can each carry the webhook's secret); the host's
 /// failure text is scrubbed of the target's parts ([`scrub`]).
-pub fn report(
+pub(crate) fn report(
     url: &str,
     header_value: Option<&str>,
     answered: Result<ExchangeResponse, ConnFailure>,
@@ -744,7 +755,8 @@ pub fn report(
 
 /// Validate each named instance's delivery bound during the limits phase, then its auth header
 /// and deadline during the instances phase. An instance's validity never depends on a sibling.
-pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
+#[cfg(test)]
+pub(crate) fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
     check_values(
         phase,
         instances.iter().map(|(name, value)| (name.as_str(), value)),
@@ -828,14 +840,14 @@ fn instance_checks(parsed: &[(usize, &str, Settings)], errors: &mut Vec<String>)
 }
 
 /// The migration's report line when it removes an `auth_header` 1.6.0 refuses.
-pub const REMOVED_AUTH_HEADER: &str =
+pub(crate) const REMOVED_AUTH_HEADER: &str =
     "removed settings.auth_header: 1.6.0 does not send it, as it \
      cannot be sent as an HTTP header (its name or value is not a valid HTTP header), which 1.6.0 \
      refuses at validation and open";
 
 /// The migration's report line when it removes an `auth_header` named for a framing or connection
 /// field, which the http framer states itself ([`framing_words`]).
-pub fn removed_framing_header(name: &str) -> String {
+pub(crate) fn removed_framing_header(name: &str) -> String {
     format!(
         "removed {}, which 1.6.0 refuses at validation and open",
         framing_words(name)
@@ -843,14 +855,15 @@ pub fn removed_framing_header(name: &str) -> String {
 }
 
 /// The migration receipt for making a historical zero limit's effective value explicit.
-pub const MIGRATED_ZERO_INFLIGHT: &str =
+pub(crate) const MIGRATED_ZERO_INFLIGHT: &str =
     "changed settings.max_inflight_deliveries: 0 -> 1 (preserves the historical effective per-instance limit)";
 
 /// Migrates webhook settings once, before validation: make the effective zero limit explicit and
 /// remove an auth header that validation refuses. This entry is not part of the serving runtime.
-pub struct Migration;
+pub(crate) struct Migration;
 
 impl Migrate for Migration {
+    type Kind = busbar_contract::plugin::markers::ExportKind;
     fn migrate(mut settings: serde_json::Value, _: &str) -> Migrated {
         let mut report = Vec::new();
         if let Some(bound) = settings
@@ -929,9 +942,9 @@ type State = Held<Webhook>;
 
 /// The error texts of the door's REFUSED answers: one per cause, so the host's line names why
 /// instead of a bare outcome.
-pub const NO_INSTANCE: &str = "no opened request-log-webhook instance";
+pub(crate) const NO_INSTANCE: &str = "no opened request-log-webhook instance";
 /// `check` at a phase this sink does not know.
-pub const UNKNOWN_PHASE: &str = "not a check phase this sink knows (limits or instances)";
+pub(crate) const UNKNOWN_PHASE: &str = "not a check phase this sink knows (limits or instances)";
 
 /// A parked delivery keeps its admitted settings, binding capability and parked exchange (which
 /// closes its own host connection when the host gives the delivery up and the SDK drops it).
@@ -949,14 +962,15 @@ struct Posting {
 
 /// `deliver`: each line of the batch POSTed in order, one exchange after another; fire-and-forget,
 /// so READY whatever became of the lines, PENDING while an exchange runs.
-pub struct Deliver;
+pub(crate) struct Deliver;
 
 impl SafeSlot for Deliver {
+    type Kind = busbar_contract::plugin::markers::ExportKind;
     type In = DeliverIn;
     type Out = OutHead;
     type State = State;
     fn call(
-        instance: Instance<'_, State>,
+        instance: Instance<'_, State, busbar_contract::plugin::markers::ExportKind>,
         input: Lent<'_, DeliverIn>,
         mut out: Out<'_, OutHead>,
     ) -> Outcome {
@@ -1034,14 +1048,15 @@ impl SafeSlot for Deliver {
 }
 
 /// `check`: [`check`] at the phase asked, its lines as a JSON array under a lease.
-pub struct Check;
+pub(crate) struct Check;
 
 impl SafeSlot for Check {
+    type Kind = busbar_contract::plugin::markers::ExportKind;
     type In = CheckIn;
     type Out = CheckOut;
     type State = State;
     fn call(
-        instance: Instance<'_, State>,
+        instance: Instance<'_, State, busbar_contract::plugin::markers::ExportKind>,
         input: Lent<'_, CheckIn>,
         mut out: Out<'_, CheckOut>,
     ) -> Outcome {
@@ -1086,7 +1101,7 @@ mod table {
 }
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
-pub use table::door;
+pub use table::{door, MACRO_DOOR};
 
 #[cfg(test)]
 #[path = "tests.rs"]

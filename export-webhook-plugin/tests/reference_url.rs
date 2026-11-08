@@ -17,7 +17,10 @@ use settings::settings_as_the_kernel_resolves;
 const URL: &str = "https://siem.example/in";
 
 fn linked() -> (Plugin<Export>, Arc<Dispatcher>) {
-    let d = Arc::new(Dispatcher::new(DispatchConfig::default()));
+    let d = Arc::new(Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    ));
     let bind = Bind {
         instance: Arc::from("reference-url"),
         max_inflight_cap: 64,

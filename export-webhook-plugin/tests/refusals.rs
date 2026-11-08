@@ -26,7 +26,10 @@ fn row() -> LinkedRow {
 
 /// The door, linked or dropped in, opened on `SETTINGS`.
 fn opened(dropped: bool) -> (Arc<Dispatcher>, Plugin<Export>) {
-    let d = Arc::new(Dispatcher::new(DispatchConfig::default()));
+    let d = Arc::new(Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    ));
     let bind = Bind {
         instance: Arc::from("export.sibling"),
         max_inflight_cap: 64,
