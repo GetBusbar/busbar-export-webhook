@@ -753,16 +753,6 @@ pub(crate) fn report(
     }
 }
 
-/// Validate each named instance's delivery bound during the limits phase, then its auth header
-/// and deadline during the instances phase. An instance's validity never depends on a sibling.
-#[cfg(test)]
-pub(crate) fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
-    check_values(
-        phase,
-        instances.iter().map(|(name, value)| (name.as_str(), value)),
-    )
-}
-
 fn check_values<'a>(
     phase: CheckPhase,
     instances: impl Iterator<Item = (&'a str, &'a serde_json::Value)>,

@@ -16,6 +16,15 @@ mod audit_fixes;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
+/// Validate each named instance's delivery bound during the limits phase, then its auth header
+/// and deadline during the instances phase. An instance's validity never depends on a sibling.
+pub(crate) fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
+    check_values(
+        phase,
+        instances.iter().map(|(name, value)| (name.as_str(), value)),
+    )
+}
+
 /// The request one line is POSTed as, under `s`: its plain part (the credential-bearing fields ride
 /// beside it, sealed).
 fn request(s: &Settings, line: &[u8]) -> Request {
@@ -726,7 +735,7 @@ fn the_check_slot_maps_its_phase_and_leases_the_findings() {
         }
         (called, owned)
     };
-    let expected = crate::check(
+    let expected = self::check(
         CheckPhase::Instances,
         &[("w".to_string(), serde_json::from_slice(settings).unwrap())],
     );
