@@ -409,12 +409,12 @@ fn a_refused_target_names_the_current_setting_and_host_reason() {
         ),
     ] {
         assert_eq!(
-            refusal_words(url, &refused),
+            refusal_words(url, None, &refused),
             format!("settings.url '{shown}': destination refused")
         );
     }
     assert_eq!(
-        refusal_words("http://siem.example/in", &ConnFailure::Unarmed),
+        refusal_words("http://siem.example/in", None, &ConnFailure::Unarmed),
         "settings.url 'http://siem.example/***': the instance was handed no connector"
     );
 }
@@ -1490,7 +1490,7 @@ fn leading_controls_and_spaces_are_normalized_in_the_diagnostic_target() {
         "\u{1}\u{1f}  HTTPS://10.0.0.5/hook",
     ] {
         assert_eq!(
-            refusal_words(url, &refused),
+            refusal_words(url, None, &refused),
             "settings.url 'https://10.0.0.5/***': destination refused"
         );
     }
@@ -1506,7 +1506,7 @@ fn every_host_refusal_retains_its_scrubbed_reason() {
         "destination denied by operator policy",
     ] {
         let refused = ConnFailure::Refused(format!("{reason} (for {url})"));
-        let words = refusal_words(url, &refused);
+        let words = refusal_words(url, None, &refused);
         assert!(words.starts_with("settings.url '"), "{words}");
         assert!(words.contains(reason), "{words}");
         assert!(!words.contains("SSRF"), "{words}");
@@ -1803,7 +1803,7 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
             &["SECRET", "bad host"][..],
         ),
     ] {
-        let mut lines = vec![refusal_words(url, &refused), log_target(url)];
+        let mut lines = vec![refusal_words(url, None, &refused), log_target(url)];
         let settings = json!({ "url": url }).to_string();
         let verdict = Webhook::validate(settings.as_bytes());
         if let Err(r) = &verdict {

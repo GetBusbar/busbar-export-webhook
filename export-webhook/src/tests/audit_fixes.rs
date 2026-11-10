@@ -69,6 +69,7 @@ fn a_hostless_url_shows_no_word_before_its_colon() {
     assert_eq!(
         refusal_words(
             "sk_live_ab12:cd34",
+            None,
             &ConnFailure::Refused("destination refused".to_string())
         ),
         "settings.url '***': destination refused"

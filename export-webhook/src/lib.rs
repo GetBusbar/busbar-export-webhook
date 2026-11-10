@@ -210,9 +210,9 @@ fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
 /// The settings an instance runs on: [`parse`]d, and an `auth_header` that cannot be sent is
 /// refused: one named for a framing field in [`framing_words`], any other in generic words (the
 /// instance would otherwise POST every line unauthenticated). The value is never echoed.
-/// The `url` must parse (a URL that does not would silently target `"/"`), the delivery deadline
-/// must be in bounds (zero drops every line; a huge value enables a tarpit), and the in-flight
-/// bound must be >= 1.
+/// The `url` must parse (a URL that does not would silently target `"/"`), and the delivery deadline
+/// must be in bounds (zero drops every line; a huge value enables a tarpit). The in-flight bound
+/// is enforced by `check` (limits phase) and clamped by the host; it is not checked here.
 fn parse_to_run(settings: &[u8]) -> Result<Settings, Refusal> {
     let parsed = parse(settings)?;
     if parsed_url(&parsed.url).is_err() && ambiguous_url(&parsed.url).is_none() {
@@ -408,7 +408,11 @@ impl Webhook {
                     Ok(()) => true,
                     Err(e) => {
                         let settings = self.settings();
-                        let words = refusal_words(&settings.url, &e);
+                        let words = refusal_words(
+                            &settings.url,
+                            settings.auth_header.as_ref().map(|h| h.value.as_str()),
+                            &e,
+                        );
                         if !matches!(e, ConnFailure::Refused(_) | ConnFailure::Unarmed) {
                             tracing::error!("{words}; webhook target admission failed; the next readiness check or delivery will retry");
                             return Admission::Unsettled(e, settings);
@@ -748,11 +752,15 @@ pub(crate) fn basic_authorization(url: &str) -> Option<String> {
 /// instance's log context identifies the exporter; its URL and the host's text are scrubbed so
 /// credentials never cross into the diagnostic. A generic refusal is not evidence of an SSRF
 /// violation, a malformed URL, or a particular scheme violation.
-pub(crate) fn refusal_words(url: &str, refused: &ConnFailure) -> String {
+pub(crate) fn refusal_words(
+    url: &str,
+    header_value: Option<&str>,
+    refused: &ConnFailure,
+) -> String {
     format!(
         "settings.url '{}': {}",
         log_target(url),
-        scrub(&refused.to_string(), url, None)
+        scrub(&refused.to_string(), url, header_value)
     )
 }
 
@@ -793,8 +801,15 @@ fn check_values<'a>(
         .filter_map(|(i, (name, s))| match serde::Deserialize::deserialize(s) {
             Ok(settings) => Some((i, name, settings)),
             Err(e) => {
+                let mut credentials = zeroize::Zeroizing::new(redact::settings_credentials(s));
+                let detail = zeroize::Zeroizing::new(format!("{e}"));
+                let scrubbed = sdk_url::scrub(
+                    &detail,
+                    sdk_url::and_decoded(std::mem::take(&mut *credentials)),
+                    true,
+                );
                 errors.push(format!(
-                    "export.{name}: settings could not be parsed (#{i}): {e}"
+                    "export.{name}: settings could not be parsed (#{i}): {scrubbed}"
                 ));
                 None
             }
@@ -932,7 +947,7 @@ fn auth_header_unbuildable(settings: &serde_json::Value) -> bool {
     wipe_probe::watch_value("migration probe JSON", &probe);
     // The section as written: a reference (`{env:}`, `{file:}`, `{module:}`) in either declared
     // reference-capable field is not resolved yet, so it stands in as text for the probe.
-    for field in ["/url", "/auth_header/value"] {
+    for field in ["/url", "/auth_header/value", "/auth_header/1"] {
         if let Some(value) = probe.pointer_mut(field).filter(|v| v.is_object()) {
             *value = {
                 let old = std::mem::replace(value, serde_json::Value::Null);
