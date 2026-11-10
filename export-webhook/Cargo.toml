@@ -42,3 +42,6 @@ busbar-contract = { workspace = true, features = ["test-seal"] }
 # The tests' RFC 4648 vectors for the Basic value's base64 (the encoding is the SDK's,
 # `sdk::url::basic_authorization`).
 base64 = { workspace = true }
+
+[package.metadata.busbar.test-contexts]
+config_migrate_export = [{ path = "tests/root/config_migrate.rs" }]
