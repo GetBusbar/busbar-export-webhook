@@ -2298,3 +2298,7 @@ fn settings_schema_integer_tokens_match_native_parser() {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "loader_ownership_tests.rs"]
+mod loader_ownership_tests;
