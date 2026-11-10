@@ -218,7 +218,13 @@ fn opened_door_on(
     let tape = Arc::new(Tape::default());
     let b = Bind {
         sink: tape.clone(),
-        conns: ConnTable::Host(wrap(host(d.conn_waker(), Some(anchors())))),
+        conns: ConnTable::Host(
+            busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                wrap(host(d.conn_waker(), Some(anchors()))),
+                busbar_contract::secret_ref::Sugars::default(),
+            ),
+        ),
         ..bind(&d, "deliver")
     };
     let row = LinkedRow::of(busbar_export_webhook::door).expect("the linked door renders");

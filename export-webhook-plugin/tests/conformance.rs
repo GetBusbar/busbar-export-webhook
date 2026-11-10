@@ -68,7 +68,13 @@ fn the_linked_and_freshly_built_dropped_webhook_obey_the_export_contract() {
         let tape = Arc::new(calls::Observed::default());
         let bind = busbar_plugin_loader::dispatch::Bind {
             sink: tape.clone(),
-            conns: ConnTable::Host(host(d.conn_waker(), Some(conformance_host::anchors()))),
+            conns: ConnTable::Host(
+                busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                    &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                    host(d.conn_waker(), Some(conformance_host::anchors())),
+                    busbar_contract::secret_ref::Sugars::default(),
+                ),
+            ),
             ..calls::bind(&d, "conformance")
         };
         let p = if dropped {
@@ -344,7 +350,13 @@ mod declared_secrets {
                 max_inflight_cap: 64,
                 sink: Arc::new(NoSink),
                 dispatcher: d.adopter(),
-                conns: ConnTable::Host(super::conformance_host::host(Arc::new(|_, _| {}), None)),
+                conns: ConnTable::Host(
+                    busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                        &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                        super::conformance_host::host(Arc::new(|_, _| {}), None),
+                        busbar_contract::secret_ref::Sugars::default(),
+                    ),
+                ),
             },
         )
         .expect("the linked door loads")
