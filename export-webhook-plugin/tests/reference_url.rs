@@ -49,7 +49,7 @@ fn the_url_is_not_declared_secret() {
 fn a_reference_at_the_url_resolves_as_the_kernel_resolves_it() {
     let (p, _d) = linked();
     let out =
-        settings_as_the_kernel_resolves(&p, br#"{"url":{"env":"REFCAP_URL_FOR_TEST"}}"#, |_, _| {
+        settings_as_the_kernel_resolves(&p, br#"{"url":{"env":"REFCAP_URL_FOR_TEST"}}"#, |_| {
             Ok(URL.to_string())
         })
         .expect("a reference at the url resolves");
@@ -61,7 +61,7 @@ fn a_reference_at_the_url_resolves_as_the_kernel_resolves_it() {
 fn a_literal_url_passes_as_written() {
     let (p, _d) = linked();
     let settings = format!(r#"{{"url":"{URL}"}}"#);
-    let out = settings_as_the_kernel_resolves(&p, settings.as_bytes(), |_, _| {
+    let out = settings_as_the_kernel_resolves(&p, settings.as_bytes(), |_| {
         Err("a literal url resolves nothing".to_string())
     })
     .expect("a literal url passes as written");

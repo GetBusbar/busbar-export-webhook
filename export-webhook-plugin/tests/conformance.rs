@@ -362,7 +362,7 @@ mod declared_secrets {
         .expect("the linked door loads")
     }
 
-    fn resolved(_: &str, _: &busbar_contract::secret_ref::SecretRef) -> Result<String, String> {
+    fn resolved(_: &busbar_contract::secret_ref::SecretRef) -> Result<String, String> {
         Ok("resolved-value".to_string())
     }
 

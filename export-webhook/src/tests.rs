@@ -5,6 +5,8 @@
 
 #[path = "../../testing/settings/integer_token.rs"]
 mod settings_profile;
+#[path = "../../testing/settings/resolution.rs"]
+mod settings_resolution;
 
 use super::*;
 #[path = "tests/admission_host.rs"]
@@ -2197,29 +2199,22 @@ fn settings_schema_matches_lifecycle() {
         (json!({"module":""}), false),
         (json!({"env":"X", "file":"Y"}), false),
     ] {
-        let mut settings = json!({"url":reference.clone(),
+        let settings = json!({"url":reference.clone(),
             "auth_header":{"name":"Authorization", "value":reference}});
         assert_eq!(
             validator.is_valid(&settings),
             accepted,
             "reference schema: {settings}"
         );
-        let resolved = busbar_contract::secret_fields::resolve_declared_fields(
-            &mut settings,
+        let resolved = settings_resolution::resolve(
+            settings.to_string().as_bytes(),
+            NAME,
             &["auth_header.value".to_string()],
             &["url".to_string()],
-            NAME,
-            |field, _| {
-                Ok(if field == "url" {
-                    "https://a.example/"
-                } else {
-                    "Bearer x"
-                }
-                .to_string())
-            },
+            |_| Ok("https://a.example/".to_string()),
         );
         assert_eq!(
-            resolved.is_ok() && Webhook::validate(settings.to_string().as_bytes()).is_ok(),
+            resolved.is_ok_and(|bytes| Webhook::validate(&bytes).is_ok()),
             accepted,
             "resolved lifecycle: {settings}"
         );
