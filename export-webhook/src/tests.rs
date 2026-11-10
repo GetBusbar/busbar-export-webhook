@@ -697,11 +697,12 @@ fn the_check_slot_maps_its_phase_and_leases_the_findings() {
     use busbar_contract::abi::mechanism::lifecycle::slot;
     use busbar_contract::abi::sdk::door::{blank_in, blank_out};
     use busbar_plugin_loader::dispatch::Frame;
-    let settings = br#"{"url":"https://a.example/x","delivery_timeout_secs":0}"#;
-    let (_dispatcher, plugin) = loaded_for_test(settings);
+    let open_settings = br#"{"url":"https://a.example/x"}"#;
+    let check_settings = br#"{"url":"https://a.example/x","delivery_timeout_secs":0}"#;
+    let (_dispatcher, plugin) = loaded_for_test(open_settings);
     let rows = [CheckInstance {
         name: AbiStr::of("w"),
-        settings: Blob::json(settings),
+        settings: Blob::json(check_settings),
     }];
     let check = |phase| {
         let mut input: CheckIn = blank_in();
@@ -737,7 +738,10 @@ fn the_check_slot_maps_its_phase_and_leases_the_findings() {
     };
     let expected = self::check(
         CheckPhase::Instances,
-        &[("w".to_string(), serde_json::from_slice(settings).unwrap())],
+        &[(
+            "w".to_string(),
+            serde_json::from_slice(check_settings).unwrap(),
+        )],
     );
     assert!(!expected.is_empty(), "a 0-second deadline is a finding");
     let (found, owned) = check(CHECK_PHASE_INSTANCES);
@@ -1473,8 +1477,9 @@ fn a_finding_is_numbered_by_the_configured_position() {
         ),
     ];
     let lines = check(CheckPhase::Instances, &instances);
-    assert_eq!(lines.len(), 1, "{lines:?}");
-    assert!(lines[0].contains("(#1)"), "{lines:?}");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].contains("export.a:"), "{lines:?}");
+    assert!(lines[1].contains("(#1)"), "{lines:?}");
 }
 
 #[test]
@@ -1681,6 +1686,37 @@ fn validate_refuses_an_auth_header_that_open_refuses() {
     let validated = Webhook::validate(settings.as_bytes()).expect_err("validate refuses");
     assert_eq!(validated.text(), opened.text());
     assert!(!validated.text().unwrap().contains("tok"));
+}
+
+/// validate and open refuse a delivery_timeout_secs of 0 (every delivery would time out
+/// immediately) and one above the 30-year ceiling.
+#[test]
+fn validate_refuses_out_of_range_delivery_timeout() {
+    let zero = refused(json!({"url": "https://a.example/", "delivery_timeout_secs": 0}));
+    assert!(zero.contains("delivery_timeout_secs"), "{zero}");
+    assert!(zero.contains(">= 1"), "{zero}");
+
+    let huge = refused(json!({"url": "https://a.example/", "delivery_timeout_secs": 946080001u64}));
+    assert!(huge.contains("delivery_timeout_secs"), "{huge}");
+    assert!(huge.contains("ceiling"), "{huge}");
+
+    // The boundary value is accepted.
+    assert!(Webhook::validate(
+        json!({"url": "https://a.example/", "delivery_timeout_secs": 946080000u64})
+            .to_string()
+            .as_bytes()
+    )
+    .is_ok());
+}
+
+/// validate and open refuse a URL that does not parse and is not caught by the ambiguous-URL
+/// check (no `@`).
+#[test]
+fn validate_refuses_an_unparsable_url() {
+    // A URL with an invalid IPv6 host fails WHATWG parsing and has no '@'.
+    let text = refused(json!({"url": "https://[::gg]/hook"}));
+    assert!(text.contains("url"), "{text}");
+    assert!(text.contains("not a valid URL"), "{text}");
 }
 
 /// KIND 2: a host failure text echoing the request's credentials (the Basic value, its token, the

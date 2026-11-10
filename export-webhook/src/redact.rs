@@ -66,10 +66,12 @@ pub fn scrub(text: &str, url: &str, header_value: Option<&str>) -> String {
         if let Some(q) = u.query().filter(|q| !q.is_empty()) {
             parts.push(q.to_string());
         }
-        if let Some(p) = u.password() {
+        if let Some(p) = u.password().filter(|p| !p.is_empty()) {
             parts.push(p.to_string());
         }
-        parts.push(u.username().to_string());
+        if !u.username().is_empty() {
+            parts.push(u.username().to_string());
+        }
     }
     if let Some(basic) = crate::basic_authorization(url) {
         parts.extend(basic.strip_prefix("Basic ").map(str::to_owned));
@@ -102,7 +104,19 @@ pub fn settings_credentials(settings: &serde_json::Value) -> Vec<String> {
     fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
         match v {
             serde_json::Value::String(s) => out.push(s.clone()),
-            serde_json::Value::Number(n) => out.push(n.to_string()),
+            serde_json::Value::Number(n) => {
+                let ryu = n.to_string();
+                // serde's error messages format floats with std's Display (`12345678901234568000000`)
+                // rather than ryu's (`1.2345678901234568e22`), so collect both representations when
+                // they differ, ensuring the scrub covers the text serde would produce.
+                if let Some(f) = n.as_f64() {
+                    let display = format!("{f}");
+                    if display != ryu {
+                        out.push(display);
+                    }
+                }
+                out.push(ryu);
+            }
             serde_json::Value::Array(a) => a.iter().for_each(|v| walk(v, out)),
             serde_json::Value::Object(o) => {
                 for (k, v) in o {

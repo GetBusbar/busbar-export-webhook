@@ -210,8 +210,17 @@ fn parse(settings: &[u8]) -> Result<Settings, Refusal> {
 /// The settings an instance runs on: [`parse`]d, and an `auth_header` that cannot be sent is
 /// refused: one named for a framing field in [`framing_words`], any other in generic words (the
 /// instance would otherwise POST every line unauthenticated). The value is never echoed.
+/// The `url` must parse (a URL that does not would silently target `"/"`), the delivery deadline
+/// must be in bounds (zero drops every line; a huge value enables a tarpit), and the in-flight
+/// bound must be >= 1.
 fn parse_to_run(settings: &[u8]) -> Result<Settings, Refusal> {
     let parsed = parse(settings)?;
+    if parsed_url(&parsed.url).is_err() && ambiguous_url(&parsed.url).is_none() {
+        return Err(Refusal::failed(format!(
+            "settings: `url` is not a valid URL (target: {})",
+            redact::unparsed_target(&parsed.url),
+        )));
+    }
     if let Some(h) = parsed.auth_header.as_ref().filter(|h| is_framing(&h.name)) {
         return Err(Refusal::failed(framing_words(&h.name)));
     }
@@ -223,6 +232,18 @@ fn parse_to_run(settings: &[u8]) -> Result<Settings, Refusal> {
         return Err(Refusal::failed(
             "settings: `auth_header` cannot be sent as an HTTP header",
         ));
+    }
+    if parsed.delivery_timeout_secs < 1 {
+        return Err(Refusal::failed(
+            "settings: `delivery_timeout_secs` must be >= 1",
+        ));
+    }
+    if parsed.delivery_timeout_secs > MAX_DURATION_SECS {
+        return Err(Refusal::failed(format!(
+            "settings: `delivery_timeout_secs` ({}) exceeds the {MAX_DURATION_SECS}-second \
+             (30-year) ceiling",
+            parsed.delivery_timeout_secs,
+        )));
     }
     Ok(parsed)
 }
@@ -421,10 +442,19 @@ impl Webhook {
             Admission::Admitted(settings, generation) => Some((settings, generation)),
             Admission::Disabled => None,
             Admission::Unsettled(failure, settings) => {
-                let header = settings.auth_header.as_ref().map(|h| h.value.as_str());
+                // Precompute the scrubbed text and log target once for the whole batch instead of
+                // re-parsing the URL and re-running scrub for each line (the inputs are identical).
+                let header_value = settings.auth_header.as_ref().map(|h| h.value.as_str());
+                let target = log_target(&settings.url);
+                let error_kind = scrub(&failure.to_string(), &settings.url, header_value);
                 let mut from = 0;
                 while let Some((_, next)) = next_line(batch, from) {
-                    report(&settings.url, header, Err(failure.clone()));
+                    tracing::warn!(
+                        diag = %TRANSPORT_ERROR,
+                        webhook_url = ?target,
+                        error_kind = %error_kind,
+                        "request-log webhook delivery failed (transport error); this log was dropped"
+                    );
                     from = next;
                 }
                 None
@@ -757,11 +787,19 @@ fn check_values<'a>(
     phase: CheckPhase,
     instances: impl Iterator<Item = (&'a str, &'a serde_json::Value)>,
 ) -> Vec<String> {
+    let mut errors = Vec::new();
     let parsed: Vec<(usize, &str, Settings)> = instances
         .enumerate()
-        .filter_map(|(i, (name, s))| Some((i, name, serde::Deserialize::deserialize(s).ok()?)))
+        .filter_map(|(i, (name, s))| match serde::Deserialize::deserialize(s) {
+            Ok(settings) => Some((i, name, settings)),
+            Err(e) => {
+                errors.push(format!(
+                    "export.{name}: settings could not be parsed (#{i}): {e}"
+                ));
+                None
+            }
+        })
         .collect();
-    let mut errors = Vec::new();
     match phase {
         CheckPhase::Instances => instance_checks(&parsed, &mut errors),
         CheckPhase::Limits => limit_checks(&parsed, &mut errors),
