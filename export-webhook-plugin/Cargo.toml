@@ -47,3 +47,8 @@ busbar-transport-http = { workspace = true }
 # The declared-secrets test reads the settings the kernel resolves.
 serde_json = { workspace = true }
 busbar-contract = { workspace = true, features = ["test-seal"] }
+
+[package.metadata.busbar.test-artifacts]
+cdylib = ["BUSBAR_TEST_EXPORT_WEBHOOK_CDYLIB"]
+manifest = ["BUSBAR_TEST_EXPORT_WEBHOOK_MANIFEST"]
+declares = ["BUSBAR_TEST_EXPORT_WEBHOOK_DECLARES"]
