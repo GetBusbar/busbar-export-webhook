@@ -27,7 +27,7 @@ mod artifact;
 #[allow(dead_code)] // This binary uses delivery calls; the lifecycle binary records envelopes.
 mod calls;
 use artifact::cdylib_of;
-use calls::{bind, called, dispatcher, input, on_ticket, open_resumed, refresh};
+use calls::{bind, called, dispatcher, input, on_ticket, open_resumed, refresh, refresh_resumed};
 #[path = "support/connector.rs"]
 mod connector;
 #[path = "support/receiver.rs"]
@@ -755,7 +755,7 @@ fn a_pending_batch_keeps_its_original_destination_and_credentials(refuse: bool, 
     let (reached, refreshed, delivered) = std::thread::scope(|scope| {
         let delivery = scope.spawn(|| deliver(&p, &d, old_batch));
         let reached = waiting.recv_timeout(Duration::from_secs(5));
-        let refreshed = called(&refresh(&p, new.to_string().as_bytes()));
+        let refreshed = called(&refresh_resumed(&p, &d, new.to_string().as_bytes()));
 
         let _ = release.send(());
         let delivered = delivery.join();

@@ -108,6 +108,26 @@ pub fn refresh(p: &Plugin<Export>, settings: &[u8]) -> Called {
     )
 }
 
+/// Concurrent delivery may still be crossing the binding gate. The dispatcher owns
+/// this lifecycle ticket and its settings until REFRESH is admitted and completes.
+#[allow(dead_code)] // Used by the separate delivery test binary.
+pub fn refresh_resumed(p: &Plugin<Export>, d: &Dispatcher, settings: &[u8]) -> Called {
+    let bytes = Arc::new(settings.to_vec());
+    let mut i: RefreshIn = blank_in();
+    i.settings = json(&bytes);
+    i.generation = 2;
+    let deadline = busbar_plugin_loader::dispatch::now_ns().saturating_add(30_000_000_000);
+    on_ticket(
+        p,
+        d,
+        lifecycle::slot::REFRESH,
+        Frame::new(i, blank_out::<OutHead>()),
+        DeadlineClass::Call,
+        deadline,
+        bytes,
+    )
+}
+
 /// Host-observed effects of the concrete export lifecycle, compared between the two doors.
 #[derive(Default)]
 pub struct Observed(std::sync::Mutex<Vec<String>>);
