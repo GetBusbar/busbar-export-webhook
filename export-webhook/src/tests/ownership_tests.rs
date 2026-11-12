@@ -80,7 +80,7 @@ fn migration_wipes_the_removed_header_without_changing_the_remaining_section() {
     let probe = Probe::start();
     let migrated = Migration::migrate(settings, "1.5.5");
     assert_eq!(
-        migrated.settings,
+        crate::tests::settings_of(&migrated),
         serde_json::json!({"url":"https://receiver.example/private-kept","delivery_timeout_secs":7})
     );
     assert_eq!(migrated.report, vec![REMOVED_AUTH_HEADER.to_string()]);

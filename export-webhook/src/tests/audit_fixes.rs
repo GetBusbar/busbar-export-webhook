@@ -116,7 +116,11 @@ fn credentials_for_a_url_that_does_not_parse_require_a_secure_stream() {
 fn migration_names_a_framing_field_written_as_a_pair() {
     let m = migrated(json!({"url": "https://a.example/", "auth_header": ["Host", "x"]}));
     assert_eq!(m.report, vec![removed_framing_header("Host")]);
-    assert!(m.settings.get("auth_header").is_none(), "{:?}", m.settings);
+    assert!(
+        settings_of(&m).get("auth_header").is_none(),
+        "{:?}",
+        settings_of(&m)
+    );
 }
 
 /// Migration on settings that are not a section removes nothing, so it reports no removal.
@@ -128,7 +132,7 @@ fn migration_reports_no_removal_it_did_not_make() {
         "the probe reads it as refused"
     );
     let m = migrated(before.clone());
-    assert_eq!(m.settings, before);
+    assert_eq!(settings_of(&m), before);
     assert!(m.report.is_empty(), "{:?}", m.report);
 }
 

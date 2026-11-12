@@ -932,11 +932,7 @@ impl Migrate for Migration {
                 report.push(framing.unwrap_or_else(|| REMOVED_AUTH_HEADER.to_string()));
             }
         }
-        Migrated {
-            settings,
-            report,
-            needs: Vec::new(),
-        }
+        Migrated::new(settings, report, Vec::new())
     }
 }
 

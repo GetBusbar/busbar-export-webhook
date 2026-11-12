@@ -1124,6 +1124,15 @@ fn a_reload_back_to_the_same_settings_does_not_cut_the_batch() {
     assert!(w.reloaded_since(&mut at), "a different target cuts it");
 }
 
+/// The settings a sealed [`Migrated`] carries, read back under the dev-only test kernel seal.
+pub(crate) fn settings_of(answer: &Migrated) -> serde_json::Value {
+    let seal = busbar_contract::caps::KernelSeal::acquire_for_kernel();
+    serde_json::to_value(
+        busbar_contract::abi::sdk::migrate::MigrationAnswer::from(answer.clone()).authoring(&seal),
+    )
+    .expect("migrated settings serialize")
+}
+
 /// The section `Migration` answers for `settings`, from 1.5.5.
 fn migrated(settings: serde_json::Value) -> Migrated {
     Migration::migrate(settings, "1.5.5")
@@ -1141,10 +1150,13 @@ fn migration_makes_a_zero_delivery_bound_explicit_and_is_idempotent() {
     let mut expected = before.clone();
     expected["max_inflight_deliveries"] = json!(1);
     let result = migrated(before);
-    assert_eq!(result.settings, expected);
+    assert_eq!(settings_of(&result), expected);
     assert_eq!(result.report, vec![MIGRATED_ZERO_INFLIGHT.to_string()]);
     assert!(result.needs.is_empty());
-    assert_eq!(migrated(result.settings), Migrated::unchanged(expected));
+    assert_eq!(
+        migrated(settings_of(&result)),
+        Migrated::unchanged(expected)
+    );
 }
 
 #[test]
@@ -1172,7 +1184,7 @@ fn migration_combines_zero_bound_and_unsendable_header_corrections() {
         "delivery_timeout_secs":7
     }));
     let expected = json!({"url":"https://receiver.example/", "max_inflight_deliveries":1, "delivery_timeout_secs":7});
-    assert_eq!(result.settings, expected);
+    assert_eq!(settings_of(&result), expected);
     assert_eq!(
         result.report,
         vec![
@@ -1182,11 +1194,14 @@ fn migration_combines_zero_bound_and_unsendable_header_corrections() {
     );
     assert!(result.needs.is_empty());
     assert!(!result.report.join("\n").contains("credential-canary"));
-    let instances = [("migrated".to_string(), result.settings.clone())];
-    assert!(Webhook::validate(result.settings.to_string().as_bytes()).is_ok());
+    let instances = [("migrated".to_string(), settings_of(&result))];
+    assert!(Webhook::validate(settings_of(&result).to_string().as_bytes()).is_ok());
     assert!(check(CheckPhase::Limits, &instances).is_empty());
     assert!(check(CheckPhase::Instances, &instances).is_empty());
-    assert_eq!(migrated(result.settings), Migrated::unchanged(expected));
+    assert_eq!(
+        migrated(settings_of(&result)),
+        Migrated::unchanged(expected)
+    );
 }
 
 /// Whether 1.6.0's validation refuses `settings` for their auth header.
@@ -1223,7 +1238,7 @@ fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
         assert!(auth_header_refused(&before), "{name:?}: {value:?}");
         let m = migrated(before);
         assert_eq!(
-            m.settings,
+            settings_of(&m),
             json!({"url": "https://u:p@siem.example/in", "delivery_timeout_secs": 5}),
             "{name:?}: {value:?}"
         );
@@ -1240,9 +1255,9 @@ fn an_auth_header_1_5_5_never_sent_is_removed_by_the_migration() {
         };
         assert_eq!(m.report, vec![want]);
         assert!(m.needs.is_empty());
-        assert!(!auth_header_refused(&m.settings));
-        assert!(Webhook::validate(m.settings.to_string().as_bytes()).is_ok());
-        assert!(Webhook::open(m.settings.to_string().as_bytes(), &[], 1).is_ok());
+        assert!(!auth_header_refused(&settings_of(&m)));
+        assert!(Webhook::validate(settings_of(&m).to_string().as_bytes()).is_ok());
+        assert!(Webhook::open(settings_of(&m).to_string().as_bytes(), &[], 1).is_ok());
     }
     assert!(REMOVED_AUTH_HEADER.starts_with("removed settings.auth_header"));
     assert!(REMOVED_AUTH_HEADER.ends_with("which 1.6.0 refuses at validation and open"));
@@ -1256,7 +1271,7 @@ fn a_referenced_value_is_judged_by_the_headers_name_alone() {
         "url": "https://siem.example/in",
         "auth_header": {"name": "Bad Name", "value": {"env": "WEBHOOK_TOKEN"}}
     }));
-    assert_eq!(m.settings, json!({"url": "https://siem.example/in"}));
+    assert_eq!(settings_of(&m), json!({"url": "https://siem.example/in"}));
     assert_eq!(m.report, vec![REMOVED_AUTH_HEADER.to_string()]);
     let kept = json!({
         "url": "https://siem.example/in",
@@ -1956,14 +1971,14 @@ fn a_referenced_url_does_not_keep_the_migration_from_removing_the_header() {
         "url": {"env": "WEBHOOK_URL"},
         "auth_header": {"name": "Bad Name", "value": "k"}
     }));
-    assert_eq!(m.settings, json!({"url": {"env": "WEBHOOK_URL"}}));
+    assert_eq!(settings_of(&m), json!({"url": {"env": "WEBHOOK_URL"}}));
     assert_eq!(m.report, vec![REMOVED_AUTH_HEADER.to_string()]);
     let framing = migrated(json!({
         "url": {"file": "/run/secrets/webhook-url"},
         "auth_header": {"name": "Connection", "value": "close"}
     }));
     assert_eq!(
-        framing.settings,
+        settings_of(&framing),
         json!({"url": {"file": "/run/secrets/webhook-url"}})
     );
     assert_eq!(framing.report, vec![removed_framing_header("Connection")]);
