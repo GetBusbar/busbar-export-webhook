@@ -263,54 +263,59 @@ fn a_delivery_posts_the_line() {
     assert_eq!(request(&bare, b"{}").timeout_ms, 2000);
 }
 
+/// The `Basic` header value for raw `user:password` bytes, encoded at test time.
+fn basic_bytes(raw: &[u8]) -> String {
+    use base64::Engine as _;
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(raw)
+    )
+}
+
+fn basic(raw: &str) -> String {
+    basic_bytes(raw.as_bytes())
+}
+
 #[test]
 fn a_userinfo_in_the_url_is_sent_as_basic_as_1_5_5_sent_it() {
     for (url, sent) in [
-        (
-            "https://user:pass@siem.example/in",
-            Some("Basic dXNlcjpwYXNz"),
-        ),
+        ("https://user:pass@siem.example/in", Some("user:pass")),
         (
             "https://Aladdin:open%20sesame@siem.example/in",
-            Some("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="),
+            Some("Aladdin:open sesame"),
         ),
-        ("https://user@siem.example/in", Some("Basic dXNlcjo=")),
-        ("https://user:@siem.example/in", Some("Basic dXNlcjo=")),
-        ("https://:pass@siem.example/in", Some("Basic OnBhc3M=")),
+        ("https://user@siem.example/in", Some("user:")),
+        ("https://user:@siem.example/in", Some("user:")),
+        ("https://:pass@siem.example/in", Some(":pass")),
         (
             "https://us%40er:p%3Ass%20w@siem.example/in",
-            Some("Basic dXNAZXI6cDpzcyB3"),
+            Some("us@er:p:ss w"),
         ),
-        (
-            "https://jos%C3%A9:pw@siem.example/in",
-            Some("Basic am9zw6k6cHc="),
-        ),
-        (
-            "https://jos\u{e9}:pw@siem.example/in",
-            Some("Basic am9zw6k6cHc="),
-        ),
-        ("https://a%zz:b@siem.example/in", Some("Basic YSV6ejpi")),
-        ("https://u:%FF@siem.example/in", Some("Basic dTo=")),
+        ("https://jos%C3%A9:pw@siem.example/in", Some("josé:pw")),
+        ("https://jos\u{e9}:pw@siem.example/in", Some("josé:pw")),
+        ("https://a%zz:b@siem.example/in", Some("a%zz:b")),
+        ("https://u:%FF@siem.example/in", Some("u:")),
         ("https://%FF:pw@siem.example/in", None),
         ("https://siem.example/in", None),
         ("not a url", None),
     ] {
-        assert_eq!(basic_authorization(url).as_deref(), sent, "{url}");
+        assert_eq!(basic_authorization(url), sent.map(basic), "{url}");
     }
 
-    for (userinfo, encoded) in [
-        ("f", "Basic Zjo="),
-        ("fo", "Basic Zm86"),
-        ("foo", "Basic Zm9vOg=="),
-        ("foob", "Basic Zm9vYjo="),
-        ("fooba", "Basic Zm9vYmE6"),
-        ("foobar", "Basic Zm9vYmFyOg=="),
-        ("xx:%EF%BF%BF", "Basic eHg677+/"),
+    for (userinfo, raw) in [
+        ("f", b"f:".as_slice()),
+        ("fo", b"fo:"),
+        ("foo", b"foo:"),
+        ("foob", b"foob:"),
+        ("fooba", b"fooba:"),
+        ("foobar", b"foobar:"),
+        ("xx:%EF%BF%BF", b"xx:\xef\xbf\xbf"),
     ] {
+        let encoded = basic_bytes(raw);
         let url = format!("https://{userinfo}@siem.example/in");
         assert_eq!(
             basic_authorization(&url).as_deref(),
-            Some(encoded),
+            Some(encoded.as_str()),
             "{userinfo}"
         );
     }
@@ -318,7 +323,8 @@ fn a_userinfo_in_the_url_is_sent_as_basic_as_1_5_5_sent_it() {
 
 #[test]
 fn the_userinfo_field_rides_beside_a_configured_auth_header_as_in_1_5_5() {
-    let basic = ("authorization", "Basic dXNlcjpwYXNz");
+    let basic_value = basic("user:pass");
+    let basic = ("authorization", basic_value.as_str());
     let json = ("content-type", "application/json");
     let both = settings(json!({
         "url": "https://user:pass@siem.example/in?k=v",
@@ -1741,7 +1747,8 @@ fn validate_refuses_an_unparsable_url() {
 #[test]
 fn a_failure_echoing_the_requests_credentials_logs_none_of_them() {
     let url = "https://alice:s3cret@hooks.example/in";
-    let token = "YWxpY2U6czNjcmV0";
+    use base64::Engine as _;
+    let token = base64::engine::general_purpose::STANDARD.encode("alice:s3cret");
     let header = "HDRSECRET9c1";
     let got = logged(|| {
         report(
@@ -1754,7 +1761,7 @@ fn a_failure_echoing_the_requests_credentials_logs_none_of_them() {
     });
     let text = all_text(&got);
     assert_eq!(got.len(), 1, "{got:?}");
-    for secret in [token, "Basic ", header, "s3cret"] {
+    for secret in [token.as_str(), "Basic ", header, "s3cret"] {
         assert!(!text.contains(secret), "{secret}: {text}");
     }
 }
